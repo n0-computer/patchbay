@@ -6,12 +6,16 @@ edition = "2021"
 [dependencies]
 anyhow  = "1"
 tokio   = { version = "1", features = ["rt", "macros", "time"] }
-rtnetlink             = "0.14"
-netlink-packet-route  = "0.19"
+rtnetlink             = "0.20"
+netlink-packet-route  = "0.28"
 futures = "0.3"
-nix     = { version = "0.28", features = ["sched", "mount", "fs", "signal", "process", "user"] }
+nix     = { version = "0.30", features = ["sched", "mount", "fs", "signal", "process", "user"] }
 serde   = { version = "1", features = ["derive"] }
 toml    = "0.8"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+n0-tracing-test = "0.3.0"
+ipnet = "2.11.0"
 
 [dev-dependencies]
 serial_test = "3"
