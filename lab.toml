@@ -1,0 +1,78 @@
+[region.euc]
+latencies = { use: 80 }
+
+[region.use]
+latencies = { euc: 80 }
+
+[[isp]]
+name = "isp-eu1"
+region = "euc"
+impair_downstream = { latency: 20 }
+
+[[isp]]
+name = "isp-eu2"
+region = "euc"
+nat = "cgnat"
+
+[[isp]]
+name = "isp-us1"
+region = "use"
+
+[[dc]]
+name = "dc-us1"
+region = "use"
+
+[[dc]]
+name = "dc-eu1"
+region = "euc"
+
+[[lan]]
+name = "lan-eu1"
+isp = "isp-eu1"
+nat = "destination-independent"
+
+[[lan]]
+name = "lan-eu2"
+isp = "isp-eu1"
+nat = "destination-independent"
+
+[[lan]]
+name = "lan-us1"
+isp = "isp-us1"
+nat = "destination-independent"
+
+[[lan]]
+name = "lan-us2"
+isp = "isp-us1"
+nat = "destination-dependent"
+
+[[device]]
+name = "relay-eu1"
+gateway = "dc-eu1"
+
+[[device]]
+name = "relay-us1"
+gateway = "dc-us1"
+
+[[device]]
+name = "home-eu1"
+gateway = "lan-eu1"
+impair = "wifi"
+
+[[device]]
+name = "home-eu2"
+gateway = "lan-eu2"
+
+[[device]]
+name = "home-us1"
+gateway = "lan-us1"
+impair = "wifi"
+
+[[device]]
+name = "home-us2"
+gateway = "lan-us2"
+
+[[device]]
+name = "phone-eu1"
+gateway = "isp-eu2"
+impair = "mobile"
