@@ -43,11 +43,12 @@ use std::{
     path::Path,
     process::ExitStatus,
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 use tracing::debug;
 
 pub mod core;
+mod qdisc;
 use crate::core::{
     cleanup_netns, resources, run_in_netns, spawn_in_netns, spawn_in_netns_thread,
     with_netns_thread, CoreConfig, DownstreamPool, LabCore, RouterConfig, TaskHandle,
@@ -828,7 +829,7 @@ fn spawn_reflector_in(
 
 /// Send a UDP probe from inside `ns` to `reflector`, parse the "OBSERVED …"
 /// reply, and return the observed external address.
-fn probe_in_ns(
+pub fn probe_in_ns(
     ns: &str,
     reflector: SocketAddr,
     timeout: Duration,
@@ -874,14 +875,30 @@ fn probe_in_ns(
 // ─────────────────────────────────────────────
 // Tests
 // ─────────────────────────────────────────────
+//
+pub fn udp_roundtrip_in_ns(ns: &str, reflector: SocketAddr) -> Result<ObservedAddr> {
+    probe_in_ns(ns, reflector, Duration::from_millis(500), None)
+}
+
+pub fn udp_rtt_in_ns(ns: &str, reflector: SocketAddr) -> Result<Duration> {
+    with_netns_thread(ns, move || {
+        let sock = UdpSocket::bind("0.0.0.0:0")?;
+        sock.set_read_timeout(Some(Duration::from_secs(2)))?;
+        let mut buf = [0u8; 256];
+        let start = Instant::now();
+        sock.send_to(b"PING", reflector)?;
+        let _ = sock.recv_from(&mut buf)?;
+        Ok(start.elapsed())
+    })
+}
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use n0_tracing_test::traced_test;
     use serial_test::serial;
     use std::io::{Read, Write};
-    use std::time::Instant;
+
+    use super::*;
 
     fn require_root() {
         if !nix::unistd::Uid::effective().is_root() {
@@ -895,21 +912,6 @@ mod tests {
         run_in_netns(ns, cmd).map(|_| ())
     }
 
-    fn udp_roundtrip_in_ns(ns: &str, reflector: SocketAddr) -> Result<ObservedAddr> {
-        probe_in_ns(ns, reflector, Duration::from_millis(500), None)
-    }
-
-    fn udp_rtt_in_ns(ns: &str, reflector: SocketAddr) -> Result<Duration> {
-        with_netns_thread(ns, move || {
-            let sock = UdpSocket::bind("0.0.0.0:0")?;
-            sock.set_read_timeout(Some(Duration::from_secs(2)))?;
-            let mut buf = [0u8; 256];
-            let start = Instant::now();
-            sock.send_to(b"PING", reflector)?;
-            let _ = sock.recv_from(&mut buf)?;
-            Ok(start.elapsed())
-        })
-    }
     fn spawn_tcp_echo_in(ns: &str, bind: SocketAddr) -> thread::JoinHandle<Result<()>> {
         Lab::run_in_thread(ns, move || {
             let listener = std::net::TcpListener::bind(bind).context("tcp echo bind")?;

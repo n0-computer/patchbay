@@ -16,7 +16,7 @@ use std::sync::{Mutex, Once, OnceLock};
 use std::thread;
 use tracing::debug;
 
-use crate::{Impair, NatMode};
+use crate::{qdisc, Impair, NatMode};
 use nix::libc;
 
 #[derive(Clone, Debug)]
@@ -1047,107 +1047,18 @@ pub fn apply_region_latency(ns: &str, ifname: &str, filters: &[(Ipv4Net, u32)]) 
     if filters.is_empty() {
         return Ok(());
     }
-
-    let _ = run_in_netns(ns, {
-        let mut cmd = std::process::Command::new("tc");
-        cmd.args(["qdisc", "del", "dev", ifname, "root"]);
-        cmd.stderr(std::process::Stdio::null());
-        cmd
-    });
-
-    let base_args = [
-        "class", "add", "dev", ifname, "parent", "1:", "classid", "1:1", "htb", "rate", "1000mbit",
-    ];
-    let status = run_in_netns(ns, {
-        let mut cmd = std::process::Command::new("tc");
-        cmd.args([
-            "qdisc", "add", "dev", ifname, "root", "handle", "1:", "htb", "default", "1", "r2q",
-            "1",
-        ]);
-        cmd
-    })?;
-    if !status.success() {
-        bail!("tc qdisc add failed for {}", ifname);
-    }
-    let status = run_in_netns(ns, {
-        let mut cmd = std::process::Command::new("tc");
-        cmd.args(base_args);
-        cmd
-    })?;
-    if !status.success() {
-        bail!("tc class add base failed for {}", ifname);
-    }
-
-    for (idx, (cidr, latency)) in filters.iter().enumerate() {
-        let class_id = format!("1:{}", 10 + idx as u16);
-        let handle = format!("{}:", 10 + idx as u16);
-        let cidr_str = format!("{}/{}", cidr.addr(), cidr.prefix_len());
-
-        let status = run_in_netns(ns, {
-            let mut cmd = std::process::Command::new("tc");
-            cmd.args([
-                "class", "add", "dev", ifname, "parent", "1:", "classid", &class_id, "htb", "rate",
-                "1000mbit",
-            ]);
-            cmd
-        })?;
-        if !status.success() {
-            bail!("tc class add failed for {}", ifname);
-        }
-
-        let status = run_in_netns(ns, {
-            let mut cmd = std::process::Command::new("tc");
-            cmd.args([
-                "qdisc",
-                "add",
-                "dev",
-                ifname,
-                "parent",
-                &class_id,
-                "handle",
-                &handle,
-                "netem",
-                "delay",
-                &format!("{}ms", latency),
-            ]);
-            cmd
-        })?;
-        if !status.success() {
-            bail!("tc netem add failed for {}", ifname);
-        }
-
-        let status = run_in_netns(ns, {
-            let mut cmd = std::process::Command::new("tc");
-            cmd.args([
-                "filter", "add", "dev", ifname, "protocol", "ip", "parent", "1:", "prio", "1",
-                "u32", "match", "ip", "dst", &cidr_str, "flowid", &class_id,
-            ]);
-            cmd
-        })?;
-        if !status.success() {
-            bail!("tc filter add failed for {}", ifname);
-        }
-    }
-
-    Ok(())
+    qdisc::apply_region_latency(ns, ifname, filters)
 }
 
 pub fn apply_impair_in(ns: &str, ifname: &str, impair: Impair) {
     debug!(ns = %ns, ifname = %ifname, impair = ?impair, "tc: apply impairment");
-    let _ = run_in_netns(ns, {
-        let mut cmd = std::process::Command::new("tc");
-        cmd.args(["qdisc", "del", "dev", ifname, "root"]);
-        cmd.stderr(std::process::Stdio::null());
-        cmd
-    });
-
     let limits = match impair {
-        Impair::Wifi => ImpairLimits {
+        Impair::Wifi => qdisc::ImpairLimits {
             rate_kbit: 0,
             loss_pct: 0.0,
             latency_ms: 20,
         },
-        Impair::Mobile => ImpairLimits {
+        Impair::Mobile => qdisc::ImpairLimits {
             rate_kbit: 0,
             loss_pct: 1.0,
             latency_ms: 50,
@@ -1156,76 +1067,15 @@ pub fn apply_impair_in(ns: &str, ifname: &str, impair: Impair) {
             rate,
             loss,
             latency,
-        } => ImpairLimits {
+        } => qdisc::ImpairLimits {
             rate_kbit: rate,
             loss_pct: loss,
             latency_ms: latency,
         },
     };
 
-    let qdisc = Qdisc::new(ifname, limits);
-    if let Err(e) = qdisc.apply(ns) {
+    if let Err(e) = qdisc::apply_impair(ns, ifname, limits) {
         eprintln!("warn: apply_impair_in({}): {}", ifname, e);
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
-struct ImpairLimits {
-    rate_kbit: u32,
-    loss_pct: f32,
-    latency_ms: u32,
-}
-
-struct Qdisc<'a> {
-    ifname: &'a str,
-    limits: ImpairLimits,
-}
-
-impl<'a> Qdisc<'a> {
-    fn new(ifname: &'a str, limits: ImpairLimits) -> Self {
-        Self { ifname, limits }
-    }
-
-    fn apply(&self, ns: &str) -> Result<()> {
-        let mut cmd = std::process::Command::new("tc");
-        cmd.args([
-            "qdisc",
-            "add",
-            "dev",
-            self.ifname,
-            "root",
-            "handle",
-            "1:",
-            "netem",
-            "delay",
-            &format!("{}ms", self.limits.latency_ms),
-            "loss",
-            &format!("{:.3}%", self.limits.loss_pct),
-        ]);
-        run_in_netns(ns, cmd)?;
-
-        if self.limits.rate_kbit > 0 {
-            let mut cmd = std::process::Command::new("tc");
-            cmd.args([
-                "qdisc",
-                "add",
-                "dev",
-                self.ifname,
-                "parent",
-                "1:1",
-                "handle",
-                "10:",
-                "tbf",
-                "rate",
-                &format!("{}kbit", self.limits.rate_kbit),
-                "burst",
-                "32kbit",
-                "latency",
-                "400ms",
-            ]);
-            run_in_netns(ns, cmd)?;
-        }
-        Ok(())
     }
 }
 
