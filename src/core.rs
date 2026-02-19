@@ -1141,85 +1141,91 @@ pub fn apply_impair_in(ns: &str, ifname: &str, impair: Impair) {
         cmd
     });
 
-    match impair {
-        Impair::Wifi => {
-            let mut cmd = std::process::Command::new("tc");
-            cmd.args([
-                "qdisc",
-                "add",
-                "dev",
-                ifname,
-                "root",
-                "netem",
-                "delay",
-                "20ms",
-                "5ms",
-                "distribution",
-                "normal",
-            ]);
-            if let Err(e) = run_in_netns(ns, cmd) {
-                eprintln!("warn: apply_impair_in({}): {}", ifname, e);
-            }
-        }
-        Impair::Mobile => {
-            let mut cmd = std::process::Command::new("tc");
-            cmd.args([
-                "qdisc", "add", "dev", ifname, "root", "netem", "delay", "50ms", "20ms", "loss",
-                "1%",
-            ]);
-            if let Err(e) = run_in_netns(ns, cmd) {
-                eprintln!("warn: apply_impair_in({}): {}", ifname, e);
-            }
-        }
+    let limits = match impair {
+        Impair::Wifi => ImpairLimits {
+            rate_kbit: 0,
+            loss_pct: 0.0,
+            latency_ms: 20,
+        },
+        Impair::Mobile => ImpairLimits {
+            rate_kbit: 0,
+            loss_pct: 1.0,
+            latency_ms: 50,
+        },
         Impair::Manual {
             rate,
             loss,
             latency,
-        } => {
+        } => ImpairLimits {
+            rate_kbit: rate,
+            loss_pct: loss,
+            latency_ms: latency,
+        },
+    };
+
+    let qdisc = Qdisc::new(ifname, limits);
+    if let Err(e) = qdisc.apply(ns) {
+        eprintln!("warn: apply_impair_in({}): {}", ifname, e);
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ImpairLimits {
+    rate_kbit: u32,
+    loss_pct: f32,
+    latency_ms: u32,
+}
+
+struct Qdisc<'a> {
+    ifname: &'a str,
+    limits: ImpairLimits,
+}
+
+impl<'a> Qdisc<'a> {
+    fn new(ifname: &'a str, limits: ImpairLimits) -> Self {
+        Self { ifname, limits }
+    }
+
+    fn apply(&self, ns: &str) -> Result<()> {
+        let mut cmd = std::process::Command::new("tc");
+        cmd.args([
+            "qdisc",
+            "add",
+            "dev",
+            self.ifname,
+            "root",
+            "handle",
+            "1:",
+            "netem",
+            "delay",
+            &format!("{}ms", self.limits.latency_ms),
+            "loss",
+            &format!("{:.3}%", self.limits.loss_pct),
+        ]);
+        run_in_netns(ns, cmd)?;
+
+        if self.limits.rate_kbit > 0 {
             let mut cmd = std::process::Command::new("tc");
             cmd.args([
                 "qdisc",
                 "add",
                 "dev",
-                ifname,
-                "root",
+                self.ifname,
+                "parent",
+                "1:1",
                 "handle",
-                "1:",
-                "netem",
-                "delay",
-                &format!("{}ms", latency),
-                "loss",
-                &format!("{loss:.3}%"),
+                "10:",
+                "tbf",
+                "rate",
+                &format!("{}kbit", self.limits.rate_kbit),
+                "burst",
+                "32kbit",
+                "latency",
+                "400ms",
             ]);
-            if let Err(e) = run_in_netns(ns, cmd) {
-                eprintln!("warn: apply_impair_in({}): {}", ifname, e);
-                return;
-            }
-
-            if rate > 0 {
-                let mut cmd = std::process::Command::new("tc");
-                cmd.args([
-                    "qdisc",
-                    "add",
-                    "dev",
-                    ifname,
-                    "parent",
-                    "1:1",
-                    "handle",
-                    "10:",
-                    "tbf",
-                    "rate",
-                    &format!("{}kbit", rate),
-                    "burst",
-                    "32kbit",
-                    "latency",
-                    "400ms",
-                ]);
-                if let Err(e) = run_in_netns(ns, cmd) {
-                    eprintln!("warn: apply_impair_in({}): {}", ifname, e);
-                }
-            }
+            run_in_netns(ns, cmd)?;
         }
+        Ok(())
     }
 }
 
