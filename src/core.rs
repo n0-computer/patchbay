@@ -61,6 +61,7 @@ pub struct Router {
     pub id: RouterId,
     pub name: String,
     pub ns: String,
+    pub region: Option<String>,
     pub cfg: RouterConfig,
     pub uplink: Option<SwitchId>,
     pub upstream_ip: Option<Ipv4Addr>,
@@ -152,7 +153,13 @@ impl LabCore {
         self.nodes_by_name.get(name).copied()
     }
 
-    pub fn add_router(&mut self, name: &str, ns: String, cfg: RouterConfig) -> RouterId {
+    pub fn add_router(
+        &mut self,
+        name: &str,
+        ns: String,
+        cfg: RouterConfig,
+        region: Option<String>,
+    ) -> RouterId {
         let id = NodeId(self.alloc_id());
         self.nodes_by_name.insert(name.to_string(), id);
         self.routers.insert(
@@ -161,6 +168,7 @@ impl LabCore {
                 id,
                 name: name.to_string(),
                 ns,
+                region,
                 cfg,
                 uplink: None,
                 upstream_ip: None,
@@ -380,6 +388,54 @@ impl LabCore {
             }
         }
 
+        // Inter-region latency (per-destination netem on IX links).
+        if !region_latencies.is_empty() {
+            let mut region_targets: HashMap<String, Vec<Ipv4Net>> = HashMap::new();
+            for router in self.routers.values() {
+                if router.uplink != Some(self.ix_sw) {
+                    continue;
+                }
+                let Some(region) = router.region.as_ref() else { continue };
+                if let Some(ix_ip) = router.upstream_ip {
+                    if let Ok(cidr) = Ipv4Net::new(ix_ip, 32) {
+                        region_targets.entry(region.clone()).or_default().push(cidr);
+                    }
+                }
+                if router.cfg.downstream_pool == DownstreamPool::Public {
+                    if let Some(cidr) = router.downstream_cidr {
+                        region_targets.entry(region.clone()).or_default().push(cidr);
+                    }
+                }
+            }
+
+            for router in self.routers.values() {
+                if router.uplink != Some(self.ix_sw) {
+                    continue;
+                }
+                let Some(region) = router.region.as_ref() else { continue };
+                let mut filters = Vec::new();
+                for (from, to, latency) in region_latencies {
+                    if from != region {
+                        continue;
+                    }
+                    if let Some(targets) = region_targets.get(to) {
+                        for cidr in targets {
+                            filters.push((*cidr, *latency));
+                        }
+                    }
+                }
+                if !filters.is_empty() {
+                    debug!(
+                        ns = %router.ns,
+                        ifname = "ix",
+                        filters = filters.len(),
+                        "build: apply inter-region latency filters"
+                    );
+                    apply_region_latency(&router.ns, "ix", &filters)?;
+                }
+            }
+        }
+
         // Ensure router downlink bridges before attaching subscriber links/devices.
         for router in self.routers.values() {
             if let Some(sw) = router.downlink {
@@ -469,7 +525,7 @@ impl LabCore {
                 gw_br,
                 dev_ip: dev.ip.unwrap(),
                 prefix_len: sw.cidr.unwrap().prefix_len(),
-                impair: dev.impair_upstream,
+                impair: dev.impair_upstream.clone(),
                 idx: dev.id.0 as u32,
             });
         }
@@ -802,31 +858,186 @@ table ip nat {{
     run_nft_in(ns, &rules).await
 }
 
-pub fn apply_impair_in(ns: &str, ifname: &str, impair: Impair) {
-    debug!(ns = %ns, ifname = %ifname, impair = ?impair, "tc: apply impairment");
-    let args: &[&str] = match impair {
-        Impair::Wifi => &[
+pub fn apply_region_latency(ns: &str, ifname: &str, filters: &[(Ipv4Net, u32)]) -> Result<()> {
+    if filters.is_empty() {
+        return Ok(());
+    }
+
+    let _ = run_in_netns(ns, {
+        let mut cmd = std::process::Command::new("tc");
+        cmd.args(["qdisc", "del", "dev", ifname, "root"]);
+        cmd.stderr(std::process::Stdio::null());
+        cmd
+    });
+
+    let base_args = ["class", "add", "dev", ifname, "parent", "1:", "classid", "1:1", "htb", "rate", "1000mbit"];
+    let status = run_in_netns(ns, {
+        let mut cmd = std::process::Command::new("tc");
+        cmd.args([
             "qdisc",
             "add",
             "dev",
             ifname,
             "root",
-            "netem",
-            "delay",
-            "20ms",
-            "5ms",
-            "distribution",
-            "normal",
-        ],
-        Impair::Mobile => &[
-            "qdisc", "add", "dev", ifname, "root", "netem", "delay", "50ms", "20ms", "loss", "1%",
-        ],
-    };
-    let mut cmd = std::process::Command::new("tc");
-    cmd.args(args);
-    match run_in_netns(ns, cmd) {
-        Ok(_) => {}
-        Err(e) => eprintln!("warn: apply_impair_in({}): {}", ifname, e),
+            "handle",
+            "1:",
+            "htb",
+            "default",
+            "1",
+            "r2q",
+            "1",
+        ]);
+        cmd
+    })?;
+    if !status.success() {
+        bail!("tc qdisc add failed for {}", ifname);
+    }
+    let status = run_in_netns(ns, {
+        let mut cmd = std::process::Command::new("tc");
+        cmd.args(base_args);
+        cmd
+    })?;
+    if !status.success() {
+        bail!("tc class add base failed for {}", ifname);
+    }
+
+    for (idx, (cidr, latency)) in filters.iter().enumerate() {
+        let class_id = format!("1:{}", 10 + idx as u16);
+        let handle = format!("{}:", 10 + idx as u16);
+        let cidr_str = format!("{}/{}", cidr.addr(), cidr.prefix_len());
+
+        let status = run_in_netns(ns, {
+            let mut cmd = std::process::Command::new("tc");
+            cmd.args([
+                "class",
+                "add",
+                "dev",
+                ifname,
+                "parent",
+                "1:",
+                "classid",
+                &class_id,
+                "htb",
+                "rate",
+                "1000mbit",
+                "r2q",
+                "1",
+            ]);
+            cmd
+        })?;
+        if !status.success() {
+            bail!("tc class add failed for {}", ifname);
+        }
+
+        let status = run_in_netns(ns, {
+            let mut cmd = std::process::Command::new("tc");
+            cmd.args([
+                "qdisc", "add", "dev", ifname, "parent", &class_id, "handle", &handle, "netem", "delay", &format!("{}ms", latency),
+            ]);
+            cmd
+        })?;
+        if !status.success() {
+            bail!("tc netem add failed for {}", ifname);
+        }
+
+        let status = run_in_netns(ns, {
+            let mut cmd = std::process::Command::new("tc");
+            cmd.args([
+                "filter", "add", "dev", ifname, "protocol", "ip", "parent", "1:", "prio", "1",
+                "u32", "match", "ip", "dst", &cidr_str, "flowid", &class_id,
+            ]);
+            cmd
+        })?;
+        if !status.success() {
+            bail!("tc filter add failed for {}", ifname);
+        }
+    }
+
+    Ok(())
+}
+
+pub fn apply_impair_in(ns: &str, ifname: &str, impair: Impair) {
+    debug!(ns = %ns, ifname = %ifname, impair = ?impair, "tc: apply impairment");
+    let _ = run_in_netns(ns, {
+        let mut cmd = std::process::Command::new("tc");
+        cmd.args(["qdisc", "del", "dev", ifname, "root"]);
+        cmd
+    });
+
+    match impair {
+        Impair::Wifi => {
+            let mut cmd = std::process::Command::new("tc");
+            cmd.args([
+                "qdisc",
+                "add",
+                "dev",
+                ifname,
+                "root",
+                "netem",
+                "delay",
+                "20ms",
+                "5ms",
+                "distribution",
+                "normal",
+            ]);
+            if let Err(e) = run_in_netns(ns, cmd) {
+                eprintln!("warn: apply_impair_in({}): {}", ifname, e);
+            }
+        }
+        Impair::Mobile => {
+            let mut cmd = std::process::Command::new("tc");
+            cmd.args([
+                "qdisc", "add", "dev", ifname, "root", "netem", "delay", "50ms", "20ms", "loss", "1%",
+            ]);
+            if let Err(e) = run_in_netns(ns, cmd) {
+                eprintln!("warn: apply_impair_in({}): {}", ifname, e);
+            }
+        }
+        Impair::Manual { rate, loss, latency } => {
+            let mut cmd = std::process::Command::new("tc");
+            cmd.args([
+                "qdisc",
+                "add",
+                "dev",
+                ifname,
+                "root",
+                "handle",
+                "1:",
+                "netem",
+                "delay",
+                &format!("{}ms", latency),
+                "loss",
+                &format!("{loss:.3}%"),
+            ]);
+            if let Err(e) = run_in_netns(ns, cmd) {
+                eprintln!("warn: apply_impair_in({}): {}", ifname, e);
+                return;
+            }
+
+            if rate > 0 {
+                let mut cmd = std::process::Command::new("tc");
+                cmd.args([
+                    "qdisc",
+                    "add",
+                    "dev",
+                    ifname,
+                    "parent",
+                    "1:1",
+                    "handle",
+                    "10:",
+                    "tbf",
+                    "rate",
+                    &format!("{}kbit", rate),
+                    "burst",
+                    "32kbit",
+                    "latency",
+                    "400ms",
+                ]);
+                if let Err(e) = run_in_netns(ns, cmd) {
+                    eprintln!("warn: apply_impair_in({}): {}", ifname, e);
+                }
+            }
+        }
     }
 }
 
