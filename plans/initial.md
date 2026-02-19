@@ -135,7 +135,7 @@ struct RegionConfig {
 struct IspConfig {
     name:               String,
     region:             String,
-    nat:                Option<String>,              // "cgnat"
+    nat:                Option<String>,              // "cgnat" NOTE replace iwth enum
     impair_downstream:  Option<ImpairDownstreamCfg>,
 }
 
@@ -149,14 +149,14 @@ struct DcConfig  { name: String, region: String }
 struct LanConfig {
     name:   String,
     isp:    String,           // ISP name ref
-    nat:    String,           // "destination-independent" | "destination-dependent"
+    nat:    String,           // "destination-independent" | "destination-dependent" NOTE: replace with enum
 }
 
 #[derive(Deserialize)]
 struct DeviceConfig {
     name:    String,
     gateway: String,          // name of a lan, dc, or isp entry
-    impair:  Option<String>,  // "wifi" | "mobile"
+    impair:  Option<String>,  // "wifi" | "mobile": NOTE replace with enum
 }
 ```
 

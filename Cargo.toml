@@ -4,12 +4,14 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-anyhow = "1"
-tokio = { version = "1", features = ["rt", "macros", "time"] }
-rtnetlink = "0.14"
-netlink-packet-route = "0.19"
+anyhow  = "1"
+tokio   = { version = "1", features = ["rt", "macros", "time"] }
+rtnetlink             = "0.14"
+netlink-packet-route  = "0.19"
 futures = "0.3"
-nix = { version = "0.28", features = ["sched", "mount", "fs", "signal", "process"] }
+nix     = { version = "0.28", features = ["sched", "mount", "fs", "signal", "process", "user"] }
+serde   = { version = "1", features = ["derive"] }
+toml    = "0.8"
 
 [dev-dependencies]
 serial_test = "3"
