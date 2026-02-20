@@ -133,8 +133,17 @@ pub struct Step {
     /// Simple boolean expression, e.g. `"xfer.final_conn_direct == true"`.
     pub check: Option<String>,
 
-    // ── post-process parser for generic spawn ─────────────────────────────
+    // ── post-process parser for command output ────────────────────────────
+    /// Optional parser applied to the step log after completion.
+    ///
+    /// Supported values:
+    /// - `iperf3-json`: parse `iperf3 -J` output into report rows.
     pub parser: Option<String>,
+    /// Optional baseline result id used by parsers that support comparisons.
+    ///
+    /// For `parser = "iperf3-json"`, this computes `delta_mbps` and `delta_pct`
+    /// relative to a previous iperf result id in the same sim run.
+    pub baseline: Option<String>,
 }
 
 /// Spec for a named capture read from process stdout.

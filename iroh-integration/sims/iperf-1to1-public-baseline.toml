@@ -1,0 +1,21 @@
+[sim]
+name     = "iperf-1to1-public-baseline"
+topology = "1to1-public"
+
+[[step]]
+action      = "spawn"
+id          = "iperf-server"
+device      = "provider"
+cmd         = ["iperf3", "-s", "-1", "-J"]
+ready_after = "1s"
+
+[[step]]
+action = "run"
+id     = "iperf-baseline"
+device = "fetcher"
+cmd    = ["iperf3", "-c", "$NETSIM_IP_provider", "-t", "10", "-J"]
+parser = "iperf3-json"
+
+[[step]]
+action = "wait-for"
+id     = "iperf-server"

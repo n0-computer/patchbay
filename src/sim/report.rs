@@ -24,6 +24,93 @@ pub struct TransferResult {
     pub conn_events: usize,
 }
 
+/// Parsed result from one `iperf3 -J` run.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct IperfResult {
+    /// Step identifier.
+    pub id: String,
+    /// Device where the iperf client command ran.
+    pub device: String,
+    /// Bytes transferred according to iperf summary.
+    pub bytes: Option<u64>,
+    /// Duration in seconds.
+    pub seconds: Option<f64>,
+    /// Throughput in bits per second.
+    pub bits_per_second: Option<f64>,
+    /// Throughput in Mbit/s.
+    pub mbps: Option<f64>,
+    /// TCP retransmits if present.
+    pub retransmits: Option<u64>,
+    /// Optional baseline result id used for comparison.
+    pub baseline: Option<String>,
+    /// `mbps - baseline_mbps` when baseline is available.
+    pub delta_mbps: Option<f64>,
+    /// Relative delta percent from baseline throughput.
+    pub delta_pct: Option<f64>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct IperfMetrics {
+    pub bytes: Option<u64>,
+    pub seconds: Option<f64>,
+    pub bits_per_second: Option<f64>,
+    pub retransmits: Option<u64>,
+}
+
+/// Parse an `iperf3 -J` log file into summary metrics.
+///
+/// The parser is tolerant of mixed stdout/stderr logs and extracts the first
+/// top-level JSON object found in the file.
+pub fn parse_iperf3_json_log(log_path: &Path) -> Result<IperfMetrics> {
+    let text = std::fs::read_to_string(log_path)
+        .with_context(|| format!("read iperf log {}", log_path.display()))?;
+    let json = extract_json_object(&text).ok_or_else(|| {
+        anyhow::anyhow!(
+            "no JSON object found in iperf log {}; ensure iperf3 is run with -J",
+            log_path.display()
+        )
+    })?;
+    let v: serde_json::Value = serde_json::from_str(json).context("parse iperf JSON output")?;
+    let end = v
+        .get("end")
+        .ok_or_else(|| anyhow::anyhow!("iperf JSON missing 'end' section"))?;
+
+    let sum = end
+        .get("sum_received")
+        .or_else(|| end.get("sum"))
+        .or_else(|| end.get("sum_sent"));
+    let bits_per_second = sum
+        .and_then(|s| s.get("bits_per_second"))
+        .and_then(|v| v.as_f64());
+    let seconds = sum.and_then(|s| s.get("seconds")).and_then(|v| v.as_f64());
+    let bytes = sum.and_then(|s| s.get("bytes")).and_then(|v| v.as_u64());
+    let retransmits = sum
+        .and_then(|s| s.get("retransmits"))
+        .and_then(|v| v.as_u64());
+
+    if bits_per_second.is_none() {
+        return Err(anyhow::anyhow!(
+            "iperf JSON missing throughput fields in end.sum_*"
+        ));
+    }
+
+    Ok(IperfMetrics {
+        bytes,
+        seconds,
+        bits_per_second,
+        retransmits,
+    })
+}
+
+fn extract_json_object(text: &str) -> Option<&str> {
+    let start = text.find('{')?;
+    let end = text.rfind('}')?;
+    if end < start {
+        return None;
+    }
+    Some(&text[start..=end])
+}
+
 impl TransferResult {
     /// Parse a fetcher NDJSON log file and fill in transfer stats.
     pub fn parse_fetcher_log(&mut self, log_path: &Path) -> Result<()> {
@@ -91,14 +178,16 @@ pub async fn write_results(
     work_dir: &Path,
     sim_name: &str,
     results: &[TransferResult],
+    iperf_results: &[IperfResult],
 ) -> Result<()> {
-    if results.is_empty() {
+    if results.is_empty() && iperf_results.is_empty() {
         return Ok(());
     }
 
     let json = serde_json::to_string_pretty(&serde_json::json!({
         "sim": sim_name,
         "transfers": results,
+        "iperf": iperf_results,
     }))
     .context("serialize results")?;
     tokio::fs::write(work_dir.join("results.json"), json)
@@ -125,6 +214,28 @@ pub async fn write_results(
             r.conn_events,
         ));
     }
+    if !iperf_results.is_empty() {
+        md.push('\n');
+        md.push_str("| sim | id | device | bytes | seconds | mbps | retransmits | baseline | delta_mbps | delta_pct |\n");
+        md.push_str("| --- | -- | ------ | ----- | ------- | ---- | ----------- | -------- | ---------- | --------- |\n");
+        for r in iperf_results {
+            md.push_str(&format!(
+                "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
+                sim_name,
+                r.id,
+                r.device,
+                r.bytes.map(|v| v.to_string()).unwrap_or_default(),
+                r.seconds.map(|v| format!("{:.3}", v)).unwrap_or_default(),
+                r.mbps.map(|v| format!("{:.3}", v)).unwrap_or_default(),
+                r.retransmits.map(|v| v.to_string()).unwrap_or_default(),
+                r.baseline.clone().unwrap_or_default(),
+                r.delta_mbps
+                    .map(|v| format!("{:.3}", v))
+                    .unwrap_or_default(),
+                r.delta_pct.map(|v| format!("{:.1}", v)).unwrap_or_default(),
+            ));
+        }
+    }
     tokio::fs::write(work_dir.join("results.md"), md)
         .await
         .context("write results.md")?;
@@ -137,6 +248,7 @@ struct RunResults {
     run: String,
     sim: String,
     transfers: Vec<TransferResult>,
+    iperf: Vec<IperfResult>,
 }
 
 /// Scan run directories under `work_root` and emit combined reports.
@@ -154,17 +266,21 @@ pub async fn write_combined_results_for_runs(work_root: &Path, run_names: &[Stri
         .await
         .context("write combined-results.json")?;
 
-    let mut by_sim: BTreeMap<String, Vec<&TransferResult>> = BTreeMap::new();
+    let mut transfer_by_sim: BTreeMap<String, Vec<&TransferResult>> = BTreeMap::new();
+    let mut iperf_by_sim: BTreeMap<String, Vec<&IperfResult>> = BTreeMap::new();
     for run in &runs {
         for t in &run.transfers {
-            by_sim.entry(run.sim.clone()).or_default().push(t);
+            transfer_by_sim.entry(run.sim.clone()).or_default().push(t);
+        }
+        for i in &run.iperf {
+            iperf_by_sim.entry(run.sim.clone()).or_default().push(i);
         }
     }
 
     let mut md = String::new();
     md.push_str("| sim | transfers | avg_mbps | direct_final_pct |\n");
     md.push_str("| --- | --------- | -------- | ---------------- |\n");
-    for (sim, transfers) in &by_sim {
+    for (sim, transfers) in &transfer_by_sim {
         let mut mbps_sum = 0.0f64;
         let mut mbps_count = 0usize;
         let mut direct_total = 0usize;
@@ -202,6 +318,27 @@ pub async fn write_combined_results_for_runs(work_root: &Path, run_names: &[Stri
             direct_pct
         ));
     }
+    if !iperf_by_sim.is_empty() {
+        md.push('\n');
+        md.push_str("| sim | iperf_runs | avg_mbps |\n");
+        md.push_str("| --- | --------- | -------- |\n");
+        for (sim, runs) in &iperf_by_sim {
+            let mut mbps_sum = 0.0f64;
+            let mut mbps_count = 0usize;
+            for r in runs {
+                if let Some(mbps) = r.mbps {
+                    mbps_sum += mbps;
+                    mbps_count += 1;
+                }
+            }
+            let avg_mbps = if mbps_count > 0 {
+                format!("{:.3}", mbps_sum / mbps_count as f64)
+            } else {
+                String::new()
+            };
+            md.push_str(&format!("| {} | {} | {} |\n", sim, runs.len(), avg_mbps));
+        }
+    }
     md.push('\n');
     md.push_str("| run | sim | id | provider | fetcher | size_bytes | elapsed_s | mbps | final_conn_direct | conn_upgrade | conn_events |\n");
     md.push_str("| --- | --- | -- | -------- | ------- | ---------- | --------- | ---- | ----------------- | ------------ | ----------- |\n");
@@ -225,6 +362,35 @@ pub async fn write_combined_results_for_runs(work_root: &Path, run_names: &[Stri
             ));
         }
     }
+    if runs.iter().any(|run| !run.iperf.is_empty()) {
+        md.push('\n');
+        md.push_str(
+            "| run | sim | id | device | bytes | seconds | mbps | retransmits | baseline | delta_mbps | delta_pct |\n",
+        );
+        md.push_str(
+            "| --- | --- | -- | ------ | ----- | ------- | ---- | ----------- | -------- | ---------- | --------- |\n",
+        );
+        for run in &runs {
+            for r in &run.iperf {
+                md.push_str(&format!(
+                    "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
+                    run.run,
+                    run.sim,
+                    r.id,
+                    r.device,
+                    r.bytes.map(|v| v.to_string()).unwrap_or_default(),
+                    r.seconds.map(|v| format!("{:.3}", v)).unwrap_or_default(),
+                    r.mbps.map(|v| format!("{:.3}", v)).unwrap_or_default(),
+                    r.retransmits.map(|v| v.to_string()).unwrap_or_default(),
+                    r.baseline.clone().unwrap_or_default(),
+                    r.delta_mbps
+                        .map(|v| format!("{:.3}", v))
+                        .unwrap_or_default(),
+                    r.delta_pct.map(|v| format!("{:.1}", v)).unwrap_or_default(),
+                ));
+            }
+        }
+    }
     tokio::fs::write(work_root.join("combined-results.md"), md)
         .await
         .context("write combined-results.md")?;
@@ -238,17 +404,21 @@ pub fn print_combined_results_table_for_runs(work_root: &Path, run_names: &[Stri
         return Ok(());
     }
 
-    let mut by_sim: BTreeMap<String, Vec<&TransferResult>> = BTreeMap::new();
+    let mut transfer_by_sim: BTreeMap<String, Vec<&TransferResult>> = BTreeMap::new();
+    let mut iperf_by_sim: BTreeMap<String, Vec<&IperfResult>> = BTreeMap::new();
     for run in &runs {
         for t in &run.transfers {
-            by_sim.entry(run.sim.clone()).or_default().push(t);
+            transfer_by_sim.entry(run.sim.clone()).or_default().push(t);
+        }
+        for i in &run.iperf {
+            iperf_by_sim.entry(run.sim.clone()).or_default().push(i);
         }
     }
 
     let mut summary = Table::new();
     summary.load_preset(UTF8_FULL);
     summary.set_header(vec!["sim", "transfers", "avg_mbps", "direct_final_pct"]);
-    for (sim, transfers) in &by_sim {
+    for (sim, transfers) in &transfer_by_sim {
         let mut mbps_sum = 0.0f64;
         let mut mbps_count = 0usize;
         let mut direct_total = 0usize;
@@ -326,10 +496,83 @@ pub fn print_combined_results_table_for_runs(work_root: &Path, run_names: &[Stri
         }
     }
 
-    println!("\nCombined Summary:");
-    println!("{summary}");
-    println!("\nCombined Transfers:");
-    println!("{details}");
+    let mut iperf_summary = Table::new();
+    iperf_summary.load_preset(UTF8_FULL);
+    iperf_summary.set_header(vec!["sim", "iperf_runs", "avg_mbps"]);
+    for (sim, rows) in &iperf_by_sim {
+        let mut mbps_sum = 0.0f64;
+        let mut mbps_count = 0usize;
+        for row in rows {
+            if let Some(mbps) = row.mbps {
+                mbps_sum += mbps;
+                mbps_count += 1;
+            }
+        }
+        let avg_mbps = if mbps_count > 0 {
+            format!("{:.3}", mbps_sum / mbps_count as f64)
+        } else {
+            "-".to_string()
+        };
+        iperf_summary.add_row(vec![sim.clone(), rows.len().to_string(), avg_mbps]);
+    }
+
+    let mut iperf_details = Table::new();
+    iperf_details.load_preset(UTF8_FULL);
+    iperf_details.set_header(vec![
+        "run",
+        "sim",
+        "id",
+        "device",
+        "bytes",
+        "seconds",
+        "mbps",
+        "retransmits",
+        "baseline",
+        "delta_mbps",
+        "delta_pct",
+    ]);
+    for run in &runs {
+        for r in &run.iperf {
+            iperf_details.add_row(vec![
+                run.run.clone(),
+                run.sim.clone(),
+                r.id.clone(),
+                r.device.clone(),
+                r.bytes
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| "-".to_string()),
+                r.seconds
+                    .map(|v| format!("{:.3}", v))
+                    .unwrap_or_else(|| "-".to_string()),
+                r.mbps
+                    .map(|v| format!("{:.3}", v))
+                    .unwrap_or_else(|| "-".to_string()),
+                r.retransmits
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| "-".to_string()),
+                r.baseline.clone().unwrap_or_else(|| "-".to_string()),
+                r.delta_mbps
+                    .map(|v| format!("{:.3}", v))
+                    .unwrap_or_else(|| "-".to_string()),
+                r.delta_pct
+                    .map(|v| format!("{:.1}", v))
+                    .unwrap_or_else(|| "-".to_string()),
+            ]);
+        }
+    }
+
+    if !transfer_by_sim.is_empty() {
+        println!("\nCombined Summary:");
+        println!("{summary}");
+        println!("\nCombined Transfers:");
+        println!("{details}");
+    }
+    if !iperf_by_sim.is_empty() {
+        println!("\nCombined Iperf Summary:");
+        println!("{iperf_summary}");
+        println!("\nCombined Iperf Runs:");
+        println!("{iperf_details}");
+    }
     Ok(())
 }
 
@@ -377,10 +620,17 @@ fn load_runs(work_root: &Path, run_names: &[String]) -> Result<Vec<RunResults>> 
                 .unwrap_or_else(|| serde_json::Value::Array(vec![])),
         )
         .context("parse transfers array")?;
+        let iperf: Vec<IperfResult> = serde_json::from_value(
+            v.get("iperf")
+                .cloned()
+                .unwrap_or_else(|| serde_json::Value::Array(vec![])),
+        )
+        .context("parse iperf array")?;
         runs.push(RunResults {
             run: name.to_string(),
             sim,
             transfers,
+            iperf,
         });
     }
     Ok(runs)
@@ -440,10 +690,34 @@ mod tests {
         assert_eq!(r.conn_events, 2);
     }
 
+    #[test]
+    fn parse_iperf3_json_log_extracts_summary() {
+        let dir = temp_dir("report-iperf-parse");
+        let log = dir.join("iperf.log");
+        let data = r#"{
+  "end": {
+    "sum_received": {
+      "seconds": 5.0,
+      "bytes": 62500000,
+      "bits_per_second": 100000000.0,
+      "retransmits": 3
+    }
+  }
+}
+"#;
+        std::fs::write(&log, data).unwrap();
+
+        let parsed = parse_iperf3_json_log(&log).unwrap();
+        assert_eq!(parsed.seconds, Some(5.0));
+        assert_eq!(parsed.bytes, Some(62_500_000));
+        assert_eq!(parsed.bits_per_second, Some(100_000_000.0));
+        assert_eq!(parsed.retransmits, Some(3));
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn write_results_writes_json_and_markdown() {
         let dir = temp_dir("report-write");
-        let results = vec![TransferResult {
+        let transfers = vec![TransferResult {
             id: "xfer".to_string(),
             provider: "p".to_string(),
             fetcher: "f".to_string(),
@@ -454,13 +728,29 @@ mod tests {
             conn_upgrade: Some(false),
             conn_events: 1,
         }];
-        write_results(&dir, "sim-a", &results).await.unwrap();
+        let iperf = vec![IperfResult {
+            id: "iperf-baseline".to_string(),
+            device: "fetcher".to_string(),
+            bytes: Some(1_000_000),
+            seconds: Some(1.0),
+            bits_per_second: Some(8_000_000.0),
+            mbps: Some(8.0),
+            retransmits: Some(0),
+            baseline: None,
+            delta_mbps: None,
+            delta_pct: None,
+        }];
+        write_results(&dir, "sim-a", &transfers, &iperf)
+            .await
+            .unwrap();
 
         let json = std::fs::read_to_string(dir.join("results.json")).unwrap();
         let md = std::fs::read_to_string(dir.join("results.md")).unwrap();
         assert!(json.contains("\"sim\": \"sim-a\""));
         assert!(json.contains("\"id\": \"xfer\""));
+        assert!(json.contains("\"id\": \"iperf-baseline\""));
         assert!(md.contains("| sim-a | xfer | p | f | 42 |"));
+        assert!(md.contains("| sim-a | iperf-baseline | fetcher | 1000000 |"));
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -493,8 +783,8 @@ mod tests {
             conn_upgrade: Some(false),
             conn_events: 1,
         }];
-        write_results(&run_a, "sim-a", &r1).await.unwrap();
-        write_results(&run_b, "sim-b", &r2).await.unwrap();
+        write_results(&run_a, "sim-a", &r1, &[]).await.unwrap();
+        write_results(&run_b, "sim-b", &r2, &[]).await.unwrap();
 
         write_combined_results_for_runs(&root, &["sim-a-260220-120000".to_string()])
             .await

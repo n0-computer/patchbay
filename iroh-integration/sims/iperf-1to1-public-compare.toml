@@ -1,0 +1,50 @@
+[sim]
+name     = "iperf-1to1-public-compare"
+topology = "1to1-public"
+
+[[step]]
+action      = "spawn"
+id          = "iperf-server-a"
+device      = "provider"
+cmd         = ["iperf3", "-s", "-1", "-J"]
+ready_after = "1s"
+
+[[step]]
+action = "run"
+id     = "iperf-baseline"
+device = "fetcher"
+cmd    = ["iperf3", "-c", "$NETSIM_IP_provider", "-t", "10", "-J"]
+parser = "iperf3-json"
+
+[[step]]
+action = "wait-for"
+id     = "iperf-server-a"
+
+[[step]]
+action    = "set-impair"
+device    = "fetcher"
+interface = "eth0"
+impair    = { rate = 10000, loss = 0.0, latency = 40 }
+
+[[step]]
+action      = "spawn"
+id          = "iperf-server-b"
+device      = "provider"
+cmd         = ["iperf3", "-s", "-1", "-J"]
+ready_after = "1s"
+
+[[step]]
+action   = "run"
+id       = "iperf-impaired"
+device   = "fetcher"
+cmd      = ["iperf3", "-c", "$NETSIM_IP_provider", "-t", "10", "-J"]
+parser   = "iperf3-json"
+baseline = "iperf-baseline"
+
+[[step]]
+action = "wait-for"
+id     = "iperf-server-b"
+
+[[step]]
+action = "assert"
+check  = "iperf-impaired.delta_mbps != "

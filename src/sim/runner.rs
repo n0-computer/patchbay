@@ -12,8 +12,8 @@ use crate::sim::build::build_local_binary;
 use crate::sim::build::build_or_fetch_binary;
 use crate::sim::env::SimEnv;
 use crate::sim::report::{
-    print_combined_results_table_for_runs, write_combined_results_for_runs, write_results,
-    TransferResult,
+    parse_iperf3_json_log, print_combined_results_table_for_runs, write_combined_results_for_runs,
+    write_results, IperfResult, TransferResult,
 };
 use crate::sim::topology::load_topology;
 use crate::sim::transfer::{finish_transfer, start_transfer, TransferHandle};
@@ -33,6 +33,8 @@ pub struct SimState {
     transfers: HashMap<String, TransferHandle>,
     /// Completed transfer results.
     pub results: Vec<TransferResult>,
+    /// Parsed iperf results collected from `step.parser = "iperf3-json"`.
+    pub iperf_results: Vec<IperfResult>,
     /// Paths to resolved binaries, keyed by `[[binary]] name`.
     pub binaries: HashMap<String, PathBuf>,
     pub work_dir: PathBuf,
@@ -41,6 +43,21 @@ pub struct SimState {
 
 struct GenericProcess {
     child: std::process::Child,
+    parser: Option<ParserConfig>,
+}
+
+#[derive(Clone)]
+struct ParserConfig {
+    parser: StepParser,
+    result_id: String,
+    device: String,
+    log_path: PathBuf,
+    baseline: Option<String>,
+}
+
+#[derive(Clone, Copy)]
+enum StepParser {
+    Iperf3Json,
 }
 
 impl Drop for SimState {
@@ -141,6 +158,7 @@ async fn run_single_sim(
         spawned: HashMap::new(),
         transfers: HashMap::new(),
         results: vec![],
+        iperf_results: vec![],
         binaries: binary_paths,
         work_dir: run_work_dir.clone(),
         sim_name: sim_name.clone(),
@@ -158,9 +176,14 @@ async fn run_single_sim(
     }
 
     // ── Write results ────────────────────────────────────────────────────
-    write_results(&state.work_dir, &state.sim_name, &state.results)
-        .await
-        .context("write results")?;
+    write_results(
+        &state.work_dir,
+        &state.sim_name,
+        &state.results,
+        &state.iperf_results,
+    )
+    .await
+    .context("write results")?;
 
     Ok(run_work_dir)
 }
@@ -438,7 +461,7 @@ fn execute_step(state: &mut SimState, step: &Step, log_dir: &Path) -> Result<()>
         "sim: step"
     );
     if let Some(parser) = step.parser.as_deref() {
-        tracing::debug!(parser, id = ?step.id, "sim: parser hint");
+        tracing::debug!(parser, id = ?step.id, "sim: parser configured");
     }
 
     match step.action.as_str() {
@@ -465,6 +488,9 @@ fn execute_step(state: &mut SimState, step: &Step, log_dir: &Path) -> Result<()>
             let status = state.lab.run_on(device, cmd)?;
             if !status.success() {
                 bail!("'run' on '{}' failed: {:?}", device, status);
+            }
+            if let Some(parser_cfg) = build_parser_config(step, device, &log_path)? {
+                apply_parser_result(state, parser_cfg)?;
             }
         }
 
@@ -539,9 +565,10 @@ fn execute_step(state: &mut SimState, step: &Step, log_dir: &Path) -> Result<()>
                 read_captures(stdout, step, id, &mut state.env, &log_path)?;
             }
 
+            let parser = build_parser_config(step, device, &log_path)?;
             state
                 .spawned
-                .insert(id.to_string(), GenericProcess { child });
+                .insert(id.to_string(), GenericProcess { child, parser });
         }
 
         // ── wait ─────────────────────────────────────────────────────────
@@ -563,23 +590,33 @@ fn execute_step(state: &mut SimState, step: &Step, log_dir: &Path) -> Result<()>
             if let Some(handle) = state.transfers.remove(id) {
                 let results = finish_transfer(handle, timeout)?;
                 state.results.extend(results);
-            } else if let Some(sp) = state.spawned.get_mut(id) {
-                let deadline = std::time::Instant::now() + timeout;
-                loop {
-                    match sp.child.try_wait().context("try_wait")? {
-                        Some(status) => {
-                            if !status.success() {
-                                tracing::warn!(id, ?status, "spawned process exited non-zero");
+            } else if state.spawned.contains_key(id) {
+                let parser = {
+                    let sp = state
+                        .spawned
+                        .get_mut(id)
+                        .ok_or_else(|| anyhow!("wait-for '{}' missing spawned process", id))?;
+                    let deadline = std::time::Instant::now() + timeout;
+                    loop {
+                        match sp.child.try_wait().context("try_wait")? {
+                            Some(status) => {
+                                if !status.success() {
+                                    tracing::warn!(id, ?status, "spawned process exited non-zero");
+                                }
+                                break;
                             }
-                            break;
-                        }
-                        None => {
-                            if std::time::Instant::now() >= deadline {
-                                bail!("wait-for '{}' timed out", id);
+                            None => {
+                                if std::time::Instant::now() >= deadline {
+                                    bail!("wait-for '{}' timed out", id);
+                                }
+                                std::thread::sleep(Duration::from_millis(200));
                             }
-                            std::thread::sleep(Duration::from_millis(200));
                         }
                     }
+                    sp.parser.clone()
+                };
+                if let Some(parser_cfg) = parser {
+                    apply_parser_result(state, parser_cfg)?;
                 }
             }
             // If id is not found, assume it completed inline — no-op.
@@ -661,6 +698,67 @@ fn prepare_cmd(
         cmd.env(k, state.env.interpolate_str(v)?);
     }
     Ok(cmd)
+}
+
+fn build_parser_config(step: &Step, device: &str, log_path: &Path) -> Result<Option<ParserConfig>> {
+    let Some(parser_raw) = step.parser.as_deref() else {
+        return Ok(None);
+    };
+    let parser = match parser_raw {
+        "iperf3-json" | "iperf-json" => StepParser::Iperf3Json,
+        other => bail!("unknown parser '{}' (expected iperf3-json)", other),
+    };
+    let result_id = step
+        .id
+        .as_deref()
+        .ok_or_else(|| anyhow!("parser '{}' requires step id", parser_raw))?;
+    Ok(Some(ParserConfig {
+        parser,
+        result_id: result_id.to_string(),
+        device: device.to_string(),
+        log_path: log_path.to_path_buf(),
+        baseline: step.baseline.clone(),
+    }))
+}
+
+fn apply_parser_result(state: &mut SimState, parser: ParserConfig) -> Result<()> {
+    match parser.parser {
+        StepParser::Iperf3Json => {
+            let metrics = parse_iperf3_json_log(&parser.log_path)?;
+            let mbps = metrics.bits_per_second.map(|bps| bps / 1_000_000.0);
+            let baseline_id = parser.baseline.clone();
+            let (delta_mbps, delta_pct) = if let Some(ref baseline_id) = baseline_id {
+                let base = state
+                    .iperf_results
+                    .iter()
+                    .find(|r| r.id == *baseline_id)
+                    .ok_or_else(|| anyhow!("baseline result '{}' not found", baseline_id))?;
+                match (mbps, base.mbps) {
+                    (Some(cur), Some(base_mbps)) if base_mbps > 0.0 => {
+                        let delta = cur - base_mbps;
+                        (Some(delta), Some(delta * 100.0 / base_mbps))
+                    }
+                    (Some(cur), Some(base_mbps)) => (Some(cur - base_mbps), None),
+                    _ => (None, None),
+                }
+            } else {
+                (None, None)
+            };
+            state.iperf_results.push(IperfResult {
+                id: parser.result_id,
+                device: parser.device,
+                bytes: metrics.bytes,
+                seconds: metrics.seconds,
+                bits_per_second: metrics.bits_per_second,
+                mbps,
+                retransmits: metrics.retransmits,
+                baseline: baseline_id,
+                delta_mbps,
+                delta_pct,
+            });
+        }
+    }
+    Ok(())
 }
 
 fn read_captures(
@@ -855,6 +953,9 @@ fn resolve_assert_lhs(state: &SimState, lhs: &str) -> Result<String> {
         if let Some(result) = state.results.iter().find(|r| r.id == id) {
             return result_field(result, field);
         }
+        if let Some(result) = state.iperf_results.iter().find(|r| r.id == id) {
+            return iperf_result_field(result, field);
+        }
     }
     bail!(
         "assert: cannot resolve '{}' — not a capture or known result field",
@@ -874,6 +975,21 @@ fn result_field(r: &TransferResult, field: &str) -> Result<String> {
         "conn_upgrade" => Ok(r.conn_upgrade.map(|v| v.to_string()).unwrap_or_default()),
         "conn_events" => Ok(r.conn_events.to_string()),
         other => bail!("unknown result field '{}.{}'", r.id, other),
+    }
+}
+
+fn iperf_result_field(r: &IperfResult, field: &str) -> Result<String> {
+    match field {
+        "mbps" => Ok(r.mbps.map(|v| format!("{:.3}", v)).unwrap_or_default()),
+        "seconds" => Ok(r.seconds.map(|v| format!("{:.3}", v)).unwrap_or_default()),
+        "bytes" => Ok(r.bytes.map(|v| v.to_string()).unwrap_or_default()),
+        "retransmits" => Ok(r.retransmits.map(|v| v.to_string()).unwrap_or_default()),
+        "delta_mbps" => Ok(r
+            .delta_mbps
+            .map(|v| format!("{:.3}", v))
+            .unwrap_or_default()),
+        "delta_pct" => Ok(r.delta_pct.map(|v| format!("{:.1}", v)).unwrap_or_default()),
+        other => bail!("unknown iperf result field '{}.{}'", r.id, other),
     }
 }
 

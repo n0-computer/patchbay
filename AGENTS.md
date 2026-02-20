@@ -112,6 +112,11 @@ when a task is ready run the checks then ask to commit, don't commit without ask
 after confirmation commit with "feat: short description" etc and some details afterwards. elaborate open issues a little, explain decisions taken concisely
 
 ## Recent Changes
+- Added generic iperf parsing and comparison support in sim runner/reporting:
+  - `step.parser = "iperf3-json"` now parses `iperf3 -J` output from step logs into `results.json`/`results.md` and combined reports (`src/sim/runner.rs`, `src/sim/report.rs`).
+  - Added optional `baseline` on steps to compute `delta_mbps`/`delta_pct` against a prior iperf result id in the same run (`src/sim/mod.rs`, `src/sim/runner.rs`).
+  - Added example sims `iperf-1to1-public-baseline.toml` and `iperf-1to1-public-compare.toml` under `iroh-integration/sims/`.
+- Fixed `rtnetlink` route query API usage in `Netlink::replace_default_route_v4`: replaced stale `route().get(IpVersion::V4)` call with `route().get(RouteMessageBuilder::<Ipv4Addr>::new().build())` to match current crate API (`src/core.rs`).
 - Fixed NAT for IX-attached home routers: `LabCore::build` now applies `apply_home_nat` to routers with `NatMode::{DestinationIndependent,DestinationDependent}` even when attached directly to IX (`src/core.rs`).
 - Simplified home NAT nft rules to `postrouting` SNAT/masquerade only; removed interface-bound `prerouting` rule that could fail when bridges were created later in build order (`src/core.rs`).
 - Cleanup registry now ignores generic/non-owned link names (like `ix`) and only tracks `lab-*`/`br-*` links, eliminating noisy host-side `ip link del ix` failures (`src/core.rs`).

@@ -6,7 +6,7 @@ Rust network namespace simulator for NAT/routing/link-impairment labs, plus an i
 
 - Linux netns topology builder (`router`, `device`, NAT modes, impairments)
 - Simulation runner for TOML scenarios (`run`, `spawn`, `wait-for`, `switch-route`, etc.)
-- Built-in `kind = "iroh-transfer"` workflow with result reports:
+- Built-in `kind = "iroh-transfer"` workflow plus parser-driven generic metrics:
   - `results.json`
   - `results.md`
   - `combined-results.json` / `combined-results.md` (across runs in one work root)
@@ -122,10 +122,38 @@ Included sims:
 - `./iroh-integration/sims/iroh-1to1-public.toml`
 - `./iroh-integration/sims/iroh-1to1-nat.toml`
 - `./iroh-integration/sims/iroh-switch-direct.toml`
+- `./iroh-integration/sims/iperf-1to1-public-baseline.toml`
+- `./iroh-integration/sims/iperf-1to1-public-compare.toml`
 
 Shared binary defaults are in:
 
 - `iroh-integration/iroh-defaults.toml`
+
+## Iperf Parser
+
+Use `parser = "iperf3-json"` on a `run` or `spawn` step to parse `iperf3 -J`
+output from the step log into `results.json`/`combined-results.json`.
+
+Example (baseline + impaired comparison):
+
+```toml
+[[step]]
+action = "run"
+id     = "iperf-baseline"
+device = "fetcher"
+cmd    = ["iperf3", "-c", "$NETSIM_IP_provider", "-t", "10", "-J"]
+parser = "iperf3-json"
+
+[[step]]
+action   = "run"
+id       = "iperf-impaired"
+device   = "fetcher"
+cmd      = ["iperf3", "-c", "$NETSIM_IP_provider", "-t", "10", "-J"]
+parser   = "iperf3-json"
+baseline = "iperf-baseline"
+```
+
+When `baseline` is set, report rows include `delta_mbps` and `delta_pct`.
 
 ## Binary Overrides
 
