@@ -22,6 +22,9 @@ regex       = "1"
 reqwest     = { version = "0.12", default-features = false, features = ["stream", "rustls-tls"] }
 flate2      = "1"
 tar         = "0.4"
+comfy-table = "7"
+dirs        = "5"
+ctrlc       = "3"
 
 [dev-dependencies]
 serial_test = "3"

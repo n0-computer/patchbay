@@ -248,7 +248,7 @@ impl Lab {
     /// Honors `RUST_LOG`; defaults to `netsim=debug` if unset.
     pub fn init_tracing() {
         let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-            .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("netsim=debug"));
+            .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("netsim=info"));
         let _ = tracing_subscriber::fmt().with_env_filter(filter).try_init();
     }
 
@@ -1110,6 +1110,69 @@ mod tests {
         Ok(())
     }
 
+    fn ping_fails_in_ns(ns: &str, addr: &str) -> Result<()> {
+        let mut cmd = std::process::Command::new("ping");
+        cmd.args(["-c", "1", "-W", "1", addr]);
+        let status = run_command_in_namespace(ns, cmd)?;
+        if status.success() {
+            bail!("ping {} unexpectedly succeeded", addr);
+        }
+        Ok(())
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum UplinkWiring {
+        DirectIx,
+        ViaPublicIsp,
+        ViaCgnatIsp,
+    }
+
+    impl UplinkWiring {
+        fn label(self) -> &'static str {
+            match self {
+                Self::DirectIx => "direct-ix",
+                Self::ViaPublicIsp => "via-public-isp",
+                Self::ViaCgnatIsp => "via-cgnat-isp",
+            }
+        }
+    }
+
+    async fn build_single_nat_case(
+        nat_mode: NatMode,
+        wiring: UplinkWiring,
+        port_base: u16,
+    ) -> Result<(Lab, String, SocketAddr, SocketAddr, Ipv4Addr)> {
+        let mut lab = Lab::new();
+        let dc = lab.add_router("dc", Some("eu"), None, NatMode::None)?;
+        let upstream = match wiring {
+            UplinkWiring::DirectIx => None,
+            UplinkWiring::ViaPublicIsp => Some(lab.add_router("isp", Some("eu"), None, NatMode::None)?),
+            UplinkWiring::ViaCgnatIsp => Some(lab.add_router("isp", Some("eu"), None, NatMode::Cgnat)?),
+        };
+        let nat = lab.add_router("nat", None, upstream, nat_mode)?;
+        let dev = lab.add_device("dev").iface("eth0", nat, None).build()?;
+        lab.build().await?;
+
+        let dc_ip = lab.router_uplink_ip(dc)?;
+        let r_dc = SocketAddr::new(IpAddr::V4(dc_ip), port_base);
+        let r_ix = SocketAddr::new(IpAddr::V4(lab.ix_gw()), port_base + 1);
+        let dc_ns = lab.node_ns(dc)?.to_string();
+        lab.spawn_reflector(&dc_ns, r_dc)?;
+        lab.spawn_reflector_on_ix(r_ix)?;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        let dev_ns = lab.node_ns(dev)?.to_string();
+        let expected_ip = match (nat_mode, wiring) {
+            (_, UplinkWiring::ViaCgnatIsp) => {
+                let isp = lab.router_id("isp").context("missing isp")?;
+                lab.router_uplink_ip(isp)?
+            }
+            (NatMode::None, _) => lab.device_ip(dev)?,
+            _ => lab.router_uplink_ip(nat)?,
+        };
+        Ok((lab, dev_ns, r_dc, r_ix, expected_ip))
+    }
+
     fn spawn_tcp_echo_in(ns: &str, bind: SocketAddr) -> thread::JoinHandle<Result<()>> {
         Lab::run_in_namespace_thread(ns, move || {
             let listener = std::net::TcpListener::bind(bind).context("tcp echo bind")?;
@@ -1349,6 +1412,86 @@ mod tests {
         Ok(())
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    #[serial]
+    #[traced_test]
+    async fn iroh_nat_like_nodes_report_public_203_mapped_addrs() -> Result<()> {
+        check_caps()?;
+        let mut lab = Lab::new();
+        let dc = lab.add_router("dc", Some("eu"), None, NatMode::None)?;
+        let isp = lab.add_router("isp", Some("eu"), None, NatMode::Cgnat)?;
+        let lan_provider = lab.add_router(
+            "lan-provider",
+            None,
+            Some(isp),
+            NatMode::DestinationIndependent,
+        )?;
+        let lan_fetcher = lab.add_router(
+            "lan-fetcher",
+            None,
+            Some(isp),
+            NatMode::DestinationIndependent,
+        )?;
+        lab.add_device("provider")
+            .iface("eth0", lan_provider, None)
+            .build()?;
+        lab.add_device("fetcher")
+            .iface("eth0", lan_fetcher, None)
+            .build()?;
+        lab.build().await?;
+
+        let dc_ip = lab.router_uplink_ip(dc)?;
+        let reflector = SocketAddr::new(IpAddr::V4(dc_ip), 6478);
+        let dc_ns = lab.node_ns(dc)?.to_string();
+        lab.spawn_reflector(&dc_ns, reflector)?;
+        tokio::time::sleep(Duration::from_millis(250)).await;
+
+        let provider_obs = lab.probe_udp_mapping("provider", reflector)?;
+        let fetcher_obs = lab.probe_udp_mapping("fetcher", reflector)?;
+        let isp_public = lab.router_uplink_ip(isp)?;
+
+        let provider_ip = match provider_obs.observed.ip() {
+            IpAddr::V4(ip) => ip,
+            IpAddr::V6(ip) => bail!("expected provider observed IPv4 address, got {ip}"),
+        };
+        let fetcher_ip = match fetcher_obs.observed.ip() {
+            IpAddr::V4(ip) => ip,
+            IpAddr::V6(ip) => bail!("expected fetcher observed IPv4 address, got {ip}"),
+        };
+
+        assert_eq!(
+            provider_ip.octets()[0],
+            203,
+            "provider STUN report should be public 203.* mapped IP, got {}",
+            provider_obs.observed
+        );
+        assert_eq!(
+            fetcher_ip.octets()[0],
+            203,
+            "fetcher STUN report should be public 203.* mapped IP, got {}",
+            fetcher_obs.observed
+        );
+        assert_eq!(
+            provider_ip, isp_public,
+            "provider should be mapped behind ISP public address"
+        );
+        assert_eq!(
+            fetcher_ip, isp_public,
+            "fetcher should be mapped behind ISP public address"
+        );
+        assert_ne!(
+            provider_obs.observed.port(),
+            0,
+            "provider mapped port should be non-zero"
+        );
+        assert_ne!(
+            fetcher_obs.observed.port(),
+            0,
+            "fetcher mapped port should be non-zero"
+        );
+        Ok(())
+    }
+
     // ── Lab::load test ───────────────────────────────────────────────────
 
     #[tokio::test(flavor = "current_thread")]
@@ -1485,6 +1628,181 @@ gateway = "lan1"
         ping_in_ns(&isp_ns, &lab.ix_gw().to_string())?;
         let dc_ip = lab.router_uplink_ip(dc)?;
         ping_in_ns(&isp_ns, &dc_ip.to_string())?;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[serial]
+    #[traced_test]
+    async fn smoke_nat_homes_can_ping_public_relay_device() -> Result<()> {
+        check_caps()?;
+        let mut lab = Lab::new();
+
+        let dc = lab.add_router("dc", None, None, NatMode::None)?;
+        let lan_provider =
+            lab.add_router("lan-provider", None, None, NatMode::DestinationIndependent)?;
+        let lan_fetcher =
+            lab.add_router("lan-fetcher", None, None, NatMode::DestinationIndependent)?;
+
+        let relay = lab.add_device("relay").iface("eth0", dc, None).build()?;
+        let provider = lab
+            .add_device("provider")
+            .iface("eth0", lan_provider, None)
+            .build()?;
+        let fetcher = lab
+            .add_device("fetcher")
+            .iface("eth0", lan_fetcher, None)
+            .build()?;
+
+        lab.build().await?;
+
+        let relay_ip = lab.device_ip(relay)?;
+        let provider_ns = lab.node_ns(provider)?.to_string();
+        let fetcher_ns = lab.node_ns(fetcher)?.to_string();
+
+        ping_in_ns(&provider_ns, &relay_ip.to_string())?;
+        ping_in_ns(&fetcher_ns, &relay_ip.to_string())?;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[serial]
+    #[traced_test]
+    async fn nat_matrix_public_connectivity_and_reflexive_ip() -> Result<()> {
+        check_caps()?;
+        let cases = [
+            (NatMode::None, UplinkWiring::DirectIx),
+            (NatMode::Cgnat, UplinkWiring::DirectIx),
+            (NatMode::DestinationIndependent, UplinkWiring::DirectIx),
+            (NatMode::DestinationIndependent, UplinkWiring::ViaPublicIsp),
+            (NatMode::DestinationIndependent, UplinkWiring::ViaCgnatIsp),
+            (NatMode::DestinationDependent, UplinkWiring::DirectIx),
+            (NatMode::DestinationDependent, UplinkWiring::ViaPublicIsp),
+            (NatMode::DestinationDependent, UplinkWiring::ViaCgnatIsp),
+        ];
+
+        let mut case_idx = 0u16;
+        for (mode, wiring) in cases {
+            let port_base = 10000 + case_idx * 10;
+            case_idx = case_idx.saturating_add(1);
+            let (lab, dev_ns, r_dc, _r_ix, expected_ip) =
+                build_single_nat_case(mode, wiring, port_base).await?;
+
+            ping_in_ns(&dev_ns, &r_dc.ip().to_string())?;
+            let _ = udp_roundtrip_in_ns(&dev_ns, r_dc)?;
+            let observed = lab.probe_udp_mapping("dev", r_dc)?;
+            assert_eq!(
+                observed.observed.ip(),
+                IpAddr::V4(expected_ip),
+                "unexpected reflexive IP for mode={mode:?} wiring={}",
+                wiring.label()
+            );
+        }
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[serial]
+    #[traced_test]
+    async fn nat_mapping_port_behavior_by_mode_and_wiring() -> Result<()> {
+        check_caps()?;
+        let modes = [NatMode::DestinationIndependent, NatMode::DestinationDependent];
+        let wirings = [
+            UplinkWiring::DirectIx,
+            UplinkWiring::ViaPublicIsp,
+            UplinkWiring::ViaCgnatIsp,
+        ];
+
+        let mut case_idx = 0u16;
+        for mode in modes {
+            for wiring in wirings {
+                let port_base = 11000 + case_idx * 10;
+                case_idx = case_idx.saturating_add(1);
+                let (lab, _dev_ns, r_dc, r_ix, expected_ip) =
+                    build_single_nat_case(mode, wiring, port_base).await?;
+                let o1 = lab.probe_udp_mapping("dev", r_dc)?;
+                let o2 = lab.probe_udp_mapping("dev", r_ix)?;
+
+                assert_eq!(
+                    o1.observed.ip(),
+                    IpAddr::V4(expected_ip),
+                    "unexpected reflexive IP for mode={mode:?} wiring={}",
+                    wiring.label()
+                );
+                assert_eq!(
+                    o2.observed.ip(),
+                    IpAddr::V4(expected_ip),
+                    "unexpected reflexive IP for mode={mode:?} wiring={}",
+                    wiring.label()
+                );
+
+                match mode {
+                    NatMode::DestinationIndependent => assert_eq!(
+                        o1.observed.port(),
+                        o2.observed.port(),
+                        "expected stable external port for mode={mode:?} wiring={}",
+                        wiring.label()
+                    ),
+                    NatMode::DestinationDependent => assert_ne!(
+                        o1.observed.port(),
+                        o2.observed.port(),
+                        "expected destination-dependent external port for mode={mode:?} wiring={}",
+                        wiring.label()
+                    ),
+                    _ => unreachable!("only destination modes are tested here"),
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[serial]
+    #[traced_test]
+    async fn nat_private_reachability_isolated_public_reachable() -> Result<()> {
+        check_caps()?;
+        let mut lab = Lab::new();
+        let dc = lab.add_router("dc", Some("eu"), None, NatMode::None)?;
+        let nat_a = lab.add_router("nat-a", None, None, NatMode::DestinationIndependent)?;
+        let nat_b = lab.add_router("nat-b", None, None, NatMode::DestinationIndependent)?;
+
+        let relay = lab.add_device("relay").iface("eth0", dc, None).build()?;
+        let a1 = lab.add_device("a1").iface("eth0", nat_a, None).build()?;
+        let a2 = lab.add_device("a2").iface("eth0", nat_a, None).build()?;
+        let b1 = lab.add_device("b1").iface("eth0", nat_b, None).build()?;
+        lab.build().await?;
+
+        let a1_ns = lab.node_ns(a1)?.to_string();
+        let b1_ns = lab.node_ns(b1)?.to_string();
+        let a2_ip = lab.device_ip(a2)?;
+        let b1_ip = lab.device_ip(b1)?;
+        let a1_ip = lab.device_ip(a1)?;
+        let relay_ip = lab.device_ip(relay)?;
+
+        ping_in_ns(&a1_ns, &a2_ip.to_string())?;
+        ping_fails_in_ns(&a1_ns, &b1_ip.to_string())?;
+        ping_fails_in_ns(&b1_ns, &a1_ip.to_string())?;
+
+        ping_in_ns(&a1_ns, &relay_ip.to_string())?;
+        ping_in_ns(&b1_ns, &relay_ip.to_string())?;
+
+        let nat_a_public = lab.router_uplink_ip(nat_a)?;
+        let nat_b_public = lab.router_uplink_ip(nat_b)?;
+        ping_in_ns(&a1_ns, &nat_b_public.to_string())?;
+        ping_in_ns(&b1_ns, &nat_a_public.to_string())?;
+
+        let dc_ip = lab.router_uplink_ip(dc)?;
+        let reflector = SocketAddr::new(IpAddr::V4(dc_ip), 12000);
+        let dc_ns = lab.node_ns(dc)?.to_string();
+        lab.spawn_reflector(&dc_ns, reflector)?;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        let a1_map = lab.probe_udp_mapping("a1", reflector)?;
+        let a2_map = lab.probe_udp_mapping("a2", reflector)?;
+        let b1_map = lab.probe_udp_mapping("b1", reflector)?;
+        assert_eq!(a1_map.observed.ip(), IpAddr::V4(nat_a_public));
+        assert_eq!(a2_map.observed.ip(), IpAddr::V4(nat_a_public));
+        assert_eq!(b1_map.observed.ip(), IpAddr::V4(nat_b_public));
         Ok(())
     }
 

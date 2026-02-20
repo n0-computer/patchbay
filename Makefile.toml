@@ -47,7 +47,7 @@ script = ['''
 [tasks.run-local]
 dependencies = ["setcap"]
 command = "cargo"
-args = ["run", "${@}"]
+args = ["run", "--", "run", "${@}"]
 
 [tasks.test-local]
 dependencies = ["setcap"]
@@ -76,11 +76,8 @@ EOF
   ''']
 
 [tasks.run-vm]
-dependencies = ["setup-vm", "build-vm", "prepare-vm"]
-script = ['''
-  QEMU_VM_NAME="${VM_NAME}" ${QEMU_WRAPPER} ssh -- \
-    "sudo mkdir -p /work && sudo RUST_TARGET=${MUSL_TARGET} /target/${MUSL_TARGET}/release/${CARGO_MAKE_CRATE_NAME} --work-dir /work ${@}"
-  ''']
+command = "cargo"
+args = ["run", "--", "run-vm", "${@}"]
 
 [tasks.test-vm]
 dependencies = ["setup-vm", "build-test-vm", "prepare-vm"]
@@ -110,4 +107,4 @@ script = ['''
   ''']
 
 [tasks.start]
-dependencies = ["setup-vm", "run-vm"]
+dependencies = ["run-vm"]

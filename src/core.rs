@@ -241,6 +241,11 @@ extern "C" fn cleanup_at_exit() {
 impl ResourceList {
     /// Registers a link name for cleanup.
     pub fn register_link(&self, name: &str) {
+        // Only track names we own by prefix; generic names like "ix" are moved
+        // into namespaces and may collide with host interfaces.
+        if !(name.starts_with("lab-") || name.starts_with("br-")) {
+            return;
+        }
         let mut st = self.state.lock().unwrap();
         st.links.insert(name.to_string());
     }
@@ -260,42 +265,27 @@ impl ResourceList {
     /// Removes all explicitly registered links and namespaces.
     pub fn cleanup_all(&self) {
         let (links, netns) = {
-            let st = self.state.lock().unwrap();
-            (st.links.clone(), st.netns.clone())
+            let mut st = self.state.lock().unwrap();
+            (std::mem::take(&mut st.links), std::mem::take(&mut st.netns))
         };
-        for link in links {
-            let _ = std::process::Command::new("ip")
-                .args(["link", "del", &link])
-                .stderr(std::process::Stdio::null())
-                .status();
-        }
+        println!(
+            "netsim cleanup: explicit resources: {} links, {} namespaces",
+            links.len(),
+            netns.len()
+        );
         for ns in netns {
-            cleanup_netns(&ns);
+            println!("netsim cleanup: cleanup netns {ns}");
+            cleanup_netns_logged(&ns);
+        }
+        for link in links {
+            delete_link_logged(&link);
         }
     }
 
     /// Removes links and namespaces that match `prefix`.
     pub fn cleanup_everything_with_prefix(&self, prefix: &str) {
-        let output = std::process::Command::new("ip")
-            .args(["-o", "link", "show"])
-            .output();
-        if let Ok(out) = output {
-            if let Ok(text) = String::from_utf8(out.stdout) {
-                for line in text.lines() {
-                    let mut parts = line.split_whitespace();
-                    let _ = parts.next();
-                    if let Some(name) = parts.next() {
-                        let name = name.trim_end_matches(':');
-                        if name.starts_with(prefix) {
-                            let _ = std::process::Command::new("ip")
-                                .args(["link", "del", name])
-                                .stderr(std::process::Stdio::null())
-                                .status();
-                        }
-                    }
-                }
-            }
-        }
+        println!("netsim cleanup: scanning prefix '{prefix}'");
+        cleanup_links_with_prefix_ip(prefix);
 
         let output = std::process::Command::new("ip")
             .args(["netns", "list"])
@@ -305,14 +295,12 @@ impl ResourceList {
                 for line in text.lines() {
                     let name = line.split_whitespace().next().unwrap_or_default();
                     if name.starts_with(prefix) {
-                        let _ = std::process::Command::new("ip")
-                            .args(["netns", "del", name])
-                            .stderr(std::process::Stdio::null())
-                            .status();
+                        cleanup_netns_logged(name);
                     }
                 }
             }
         }
+        println!("netsim cleanup: drop fd-registry entries with prefix '{prefix}'");
         netns::cleanup_registry_prefix(prefix);
     }
 
@@ -322,8 +310,75 @@ impl ResourceList {
             let st = self.state.lock().unwrap();
             st.prefixes.clone()
         };
+        println!(
+            "netsim cleanup: registered prefixes: {}",
+            prefixes
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
         for prefix in prefixes {
             self.cleanup_everything_with_prefix(&prefix);
+        }
+    }
+}
+
+fn cleanup_netns_logged(name: &str) {
+    println!("netsim cleanup: ip netns del {name}");
+    let out = std::process::Command::new("ip")
+        .args(["netns", "del", name])
+        .output();
+    if let Ok(out) = out {
+        if !out.status.success() {
+            let msg = String::from_utf8_lossy(&out.stderr).trim().to_string();
+            if msg.contains("No such file or directory") {
+                println!(
+                    "netsim cleanup: netns '{name}' not present in /var/run/netns (ok for fd backend)"
+                );
+            } else {
+                eprintln!("netsim cleanup: failed ip netns del {name}: {msg}");
+            }
+        }
+    }
+    // Ensure FD backend entries are removed even when named deletion fails.
+    netns::cleanup_netns(name);
+}
+
+fn cleanup_links_with_prefix_ip(prefix: &str) {
+    let output = std::process::Command::new("ip")
+        .args(["-o", "link", "show"])
+        .output();
+    if let Ok(out) = output {
+        if let Ok(text) = String::from_utf8(out.stdout) {
+            for line in text.lines() {
+                let mut parts = line.split_whitespace();
+                let _ = parts.next();
+                if let Some(name) = parts.next() {
+                    let name = name.trim_end_matches(':');
+                    let ifname = name.split('@').next().unwrap_or(name);
+                    if ifname.starts_with(prefix) {
+                        delete_link_logged(ifname);
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn delete_link_logged(name: &str) {
+    println!("netsim cleanup: ip link del {name}");
+    let out = std::process::Command::new("ip")
+        .args(["link", "del", name])
+        .output();
+    if let Ok(out) = out {
+        if !out.status.success() {
+            let msg = String::from_utf8_lossy(&out.stderr).trim().to_string();
+            if msg.contains("Cannot find device") {
+                println!("netsim cleanup: link '{name}' already gone");
+            } else {
+                eprintln!("netsim cleanup: failed ip link del {name}: {msg}");
+            }
         }
     }
 }
@@ -667,6 +722,14 @@ impl LabCore {
             create_named_netns(&ns).await?;
         }
 
+        // Namespaces may inherit host nftables rules (including drop policies).
+        // Start from a clean ruleset so lab behavior is deterministic.
+        for ns in self.all_ns_names() {
+            if let Err(err) = run_nft_in(&ns, "flush ruleset").await {
+                debug!(ns = %ns, error = %err, "build: nft flush failed; continuing");
+            }
+        }
+
         // IX bridge in the lab root namespace.
         let ix_br = self.cfg.ix_br.clone();
         let ix_cidr = format!("{}/{}", self.cfg.ix_gw, self.cfg.ix_cidr.prefix_len());
@@ -735,6 +798,16 @@ impl LabCore {
 
             if router.cfg.cgnat {
                 apply_isp_cgnat(&router.ns, &ns_if).await?;
+            }
+            if let Some(nat) = router.cfg.nat {
+                apply_home_nat(
+                    &router.ns,
+                    nat,
+                    &router.cfg.downlink_bridge,
+                    &ns_if,
+                    router.upstream_ip.unwrap(),
+                )
+                .await?;
             }
         }
 
@@ -1224,7 +1297,7 @@ pub async fn run_nft_in(ns: &str, rules: &str) -> Result<()> {
 pub async fn apply_home_nat(
     ns: &str,
     mode: NatMode,
-    lan_if: &str,
+    _lan_if: &str,
     wan_if: &str,
     wan_ip: Ipv4Addr,
 ) -> Result<()> {
@@ -1243,17 +1316,12 @@ pub async fn apply_home_nat(
     let rules = format!(
         r#"
 table ip nat {{
-    chain prerouting {{
-        type nat hook prerouting priority -100;
-        iif "{lan}" ct state established,related accept
-    }}
     chain postrouting {{
         type nat hook postrouting priority 100;
         {snat}
     }}
 }}
 "#,
-        lan = lan_if,
         snat = snat_rule,
     );
     run_nft_in(ns, &rules).await

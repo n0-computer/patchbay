@@ -1,5 +1,5 @@
 [sim]
-name     = "iroh-1to1-nat"
+name     = "iroh-1to1-nat-ping"
 topology = "1to1-nat"
 binaries = "iroh-defaults.toml"
 
@@ -12,14 +12,11 @@ env         = { RUST_LOG = "iroh_relay=trace" }
 ready_after = "2s"
 
 [[step]]
-action    = "spawn"
-kind      = "iroh-transfer"
-id        = "xfer"
-provider  = "provider"
-fetcher   = "fetcher"
-relay_url = "http://$NETSIM_IP_relay:3340"
-duration  = "10s"
+action = "run"
+device = "provider"
+cmd = ["ping", "-c", "3", "-W", "2", "$NETSIM_IP_relay"]
 
 [[step]]
-action = "wait-for"
-id     = "xfer"
+action = "run"
+device = "fetcher"
+cmd = ["ping", "-c", "3", "-W", "2", "$NETSIM_IP_relay"]

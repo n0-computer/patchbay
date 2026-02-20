@@ -7,6 +7,7 @@ use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 use crate::sim::report::TransferResult;
+use crate::sim::runner::parse_duration;
 use crate::sim::runner::SimState;
 use crate::sim::Step;
 
@@ -54,6 +55,13 @@ pub fn start_transfer(
         .with_context(|| format!("create provider logs dir {}", provider_logs_dir.display()))?;
 
     let mut provider_cmd = std::process::Command::new(binary);
+    let mut provider_args = vec![
+        "--output".to_string(),
+        "json".to_string(),
+        "--logs-path".to_string(),
+        provider_logs_dir.display().to_string(),
+        "provide".to_string(),
+    ];
     provider_cmd
         .args(["--output", "json", "--logs-path"])
         .arg(&provider_logs_dir)
@@ -72,7 +80,15 @@ pub fn start_transfer(
     if let Some(relay_url) = &step.relay_url {
         let url = state.env.interpolate_str(relay_url)?;
         provider_cmd.args(["--relay-url", &url]);
+        provider_args.push("--relay-url".to_string());
+        provider_args.push(url);
     }
+    tracing::info!(
+        step_id,
+        device = provider_dev,
+        cmd = %format_cmd(binary, &provider_args),
+        "sim: iroh-transfer provider command"
+    );
 
     let provider = state
         .lab
@@ -93,6 +109,7 @@ pub fn start_transfer(
         .set_capture(step_id, "endpoint_id", bound.endpoint_id.clone());
 
     let mut fetchers = Vec::with_capacity(fetcher_devs.len());
+    let fetch_duration_s = transfer_duration_seconds(step)?;
     for (idx, fetcher_dev) in fetcher_devs.iter().enumerate() {
         let fetcher_log = step_dir.join(format!("fetcher-{}", idx));
         std::fs::create_dir_all(&fetcher_log)
@@ -100,23 +117,41 @@ pub fn start_transfer(
         let fetcher_stdio_log = step_dir.join(format!("fetcher-{}.log", idx));
 
         let mut fetcher_cmd = std::process::Command::new(binary);
+        let mut fetcher_args = vec![
+            "--output".to_string(),
+            "json".to_string(),
+            "--logs-path".to_string(),
+            fetcher_log.display().to_string(),
+            "fetch".to_string(),
+            format!("--duration={fetch_duration_s}"),
+        ];
         fetcher_cmd
             .args(["--output", "json", "--logs-path"])
             .arg(&fetcher_log)
-            .arg("fetch");
+            .arg("fetch")
+            .arg(format!("--duration={fetch_duration_s}"));
         if step.strategy.as_deref() == Some("endpoint_id_with_direct_addrs") {
             if let Some(addr) = &bound.direct_addr {
                 fetcher_cmd.args(["--remote-direct-address", addr]);
+                fetcher_args.push("--remote-direct-address".to_string());
+                fetcher_args.push(addr.clone());
             }
         }
         fetcher_cmd.arg(&bound.endpoint_id);
+        fetcher_args.push(bound.endpoint_id.clone());
         if let Some(relay_url) = &step.relay_url {
             let url = state.env.interpolate_str(relay_url)?;
+            fetcher_cmd.args(["--remote-relay-url", &url]);
             fetcher_cmd.args(["--relay-url", &url]);
+            fetcher_args.push("--remote-relay-url".to_string());
+            fetcher_args.push(url.clone());
+            fetcher_args.push("--relay-url".to_string());
+            fetcher_args.push(url);
         }
         if let Some(extra) = &step.fetch_args {
             let extra = state.env.interpolate(extra)?;
-            fetcher_cmd.args(extra);
+            fetcher_cmd.args(extra.clone());
+            fetcher_args.extend(extra);
         }
         let f_log = std::fs::OpenOptions::new()
             .create(true)
@@ -131,6 +166,12 @@ pub fn start_transfer(
             &mut fetcher_cmd,
             state,
             &format!("{}_fetcher_{}", step_id, idx),
+        );
+        tracing::info!(
+            step_id,
+            device = %fetcher_dev,
+            cmd = %format_cmd(binary, &fetcher_args),
+            "sim: iroh-transfer fetcher command"
         );
 
         let child = state
@@ -215,12 +256,53 @@ fn add_env_to_cmd(cmd: &mut std::process::Command, state: &SimState, keylog_suff
         cmd.env(k, v);
     }
     cmd.env("RUST_LOG_STYLE", "never");
-    cmd.env("RUST_LOG", "warn,iroh::_events::conn_type=trace");
+    let rust_log = std::env::var("NETSIM_RUST_LOG").unwrap_or_else(|_| "info".to_string());
+    cmd.env("RUST_LOG", rust_log);
     let keylog = state
         .work_dir
         .join("logs")
         .join(format!("keylog_{}.txt", sanitize_for_file(keylog_suffix)));
     cmd.env("SSLKEYLOGFILE", keylog);
+}
+
+fn transfer_duration_seconds(step: &Step) -> Result<u64> {
+    let parsed = step
+        .duration
+        .as_deref()
+        .map(parse_duration)
+        .transpose()?
+        .unwrap_or(Duration::from_secs(10));
+    Ok(parsed.as_secs().max(1))
+}
+
+fn format_cmd(binary: &Path, args: &[String]) -> String {
+    let mut parts = Vec::with_capacity(args.len() + 1);
+    parts.push(binary.display().to_string());
+    parts.extend(args.iter().cloned());
+    shell_join(&parts)
+}
+
+fn shell_join(parts: &[String]) -> String {
+    parts
+        .iter()
+        .map(|p| shell_escape(p))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn shell_escape(s: &str) -> String {
+    if s.is_empty() {
+        return "''".to_string();
+    }
+    if s.bytes().all(|b| {
+        matches!(
+            b,
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'/' | b':'
+        )
+    }) {
+        return s.to_string();
+    }
+    format!("'{}'", s.replace('\'', "'\"'\"'"))
 }
 
 fn wait_for_child_with_timeout(child: &mut std::process::Child, deadline: Instant) -> Result<()> {
@@ -331,6 +413,7 @@ fn sanitize_for_file(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sim::Step;
 
     #[test]
     fn parse_endpoint_bound_with_direct_addr() {
@@ -347,5 +430,22 @@ mod tests {
         let parsed = parse_endpoint_bound_line(line).expect("endpoint bound");
         assert_eq!(parsed.endpoint_id, "abc");
         assert!(parsed.direct_addr.is_none());
+    }
+
+    #[test]
+    fn transfer_duration_defaults_to_10s() {
+        let step = Step::default();
+        let secs = transfer_duration_seconds(&step).expect("default duration");
+        assert_eq!(secs, 10);
+    }
+
+    #[test]
+    fn transfer_duration_parses_step_duration() {
+        let step = Step {
+            duration: Some("20s".to_string()),
+            ..Default::default()
+        };
+        let secs = transfer_duration_seconds(&step).expect("parsed duration");
+        assert_eq!(secs, 20);
     }
 }

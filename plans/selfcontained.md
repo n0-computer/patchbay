@@ -87,11 +87,12 @@ Implementation constraints:
 - Use `std::process::Command` (plus `bash -lc` only where shell features are required).
 
 ### 3. Implement built-in self-capability setup (`setup-caps`)
-Add `src/caps.rs` for capability setup flow focused on the current binary:
+Add `src/caps.rs` for capability setup flow for both the current binary and required system tools:
 - detect Linux + `setcap` + `sudo`
 - resolve `std::env::current_exe()`
 - print exact command and why it is needed
 - run `sudo setcap cap_net_admin,cap_sys_admin,cap_net_raw+ep <self>`
+- run `sudo setcap cap_net_admin,cap_sys_admin,cap_net_raw+ep` for required tools (`ip`, `tc`, `nft`, `ping`, `ping6`) when present
 - verify with `getcap <self>` and print result
 
 Implementation sketch:
@@ -109,6 +110,7 @@ Documentation constraints:
 - explicitly explain rebuild invalidates caps on rebuilt binaries
 - explain that `sudo` is used only to set file capabilities
 - explain failure mode when `no_new_privs=1`
+- explain why helper tools are explicitly capped (capabilities are not reliably retained across `execve` without ambient-capability setup)
 
 ### 4. Keep `setcap.sh` for tests and align responsibility
 Retain `./setcap.sh` for project-local build/test artifacts and tool capabilities.
@@ -126,11 +128,13 @@ If needed, simplify `setcap.sh` output to point users to `netsim setup-caps` for
 
 Key requirement:
 - VM path contract remains stable so existing `iroh-integration` artifacts keep working.
+- Must work on macOS hosts with `brew install qemu` as the only explicit extra requirement.
 
 ### 6. Update automation and docs
 - Update `Makefile.toml` tasks to call the binary subcommands instead of wrapper scripts where possible.
 - Update `README.md` and `AGENTS.md` command examples (`run`/`run-vm`/`setup-caps`).
 - Keep `qemu-vm.sh` during migration behind a feature flag or temporary compatibility path, then remove once parity checks pass.
+- Ensure `run`/`run-vm` print a combined summary at the end as a terminal table.
 
 ### 7. Validation and rollout
 Validation checklist:
@@ -147,5 +151,5 @@ Rollout approach:
 
 ## Risks / Open Items
 1. VM orchestration parity risk: script-to-Rust migration may miss edge-case behavior in cloud-init and filesystem sharing.
-2. Capability usability risk: users may expect `setup-caps` to cover system tools (`ip`, `tc`, `nft`), but this plan scopes it to the binary itself.
-3. Portability risk: `run-vm` remains Linux/QEMU oriented; explicit guardrails should fail fast on unsupported hosts.
+2. Capability setup risk: applying capabilities to system tools may fail on hosts with restrictive filesystem policy; surface failures clearly and keep `setcap.sh` as repo-local fallback.
+3. Portability risk: `run-vm` remains QEMU-host dependent; keep defaults compatible with Linux + macOS (HVF/TCG on macOS) and fail fast with clear diagnostics when host tools are missing.

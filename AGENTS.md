@@ -112,6 +112,42 @@ when a task is ready run the checks then ask to commit, don't commit without ask
 after confirmation commit with "feat: short description" etc and some details afterwards. elaborate open issues a little, explain decisions taken concisely
 
 ## Recent Changes
+- Fixed NAT for IX-attached home routers: `LabCore::build` now applies `apply_home_nat` to routers with `NatMode::{DestinationIndependent,DestinationDependent}` even when attached directly to IX (`src/core.rs`).
+- Simplified home NAT nft rules to `postrouting` SNAT/masquerade only; removed interface-bound `prerouting` rule that could fail when bridges were created later in build order (`src/core.rs`).
+- Cleanup registry now ignores generic/non-owned link names (like `ix`) and only tracks `lab-*`/`br-*` links, eliminating noisy host-side `ip link del ix` failures (`src/core.rs`).
+- Added NAT test harness + matrix coverage in `src/lib.rs` tests:
+  - `nat_matrix_public_connectivity_and_reflexive_ip`
+  - `nat_mapping_port_behavior_by_mode_and_wiring`
+  - `nat_private_reachability_isolated_public_reachable`
+  - shared helpers for uplink wiring and ping-failure assertions.
+- Added namespace bootstrap nft reset in `LabCore::build`: each created lab namespace now gets a best-effort `nft flush ruleset` to avoid inherited host firewall policies (e.g., default-drop forwarding) breaking lab connectivity.
+- Added regression test `smoke_nat_homes_can_ping_public_relay_device` (`src/lib.rs`) to assert NAT-home devices can ping a public relay device in the `1to1-nat` style topology.
+- Cleanup path rollback/simplification:
+  - Panic hook + `atexit` now call `resources().cleanup_all()` (registry-only), avoiding runtime-dependent prefix sweeps during unwind/exit.
+  - `cleanup_all()` now drains tracked links/netns (idempotent across repeated calls) and performs namespace cleanup first.
+  - Prefix sweeps now use `ip -o link` parsing with `@peer` stripping and benign-error suppression for already-gone links/netns.
+- Prefix cleanup now deletes links via netlink (`rtnetlink`) instead of parsing `ip -o link` text, avoiding `@peer` name parsing artifacts and improving deletion reliability.
+- Ctrl-C cleanup scope is now process-local by default (registered prefixes only); broad global prefix sweeps remain available via explicit `netsim cleanup --prefix ...`.
+- Ctrl-C handler now exits via `_exit(130)` after best-effort cleanup to avoid duplicate atexit cleanup passes and repeated logs.
+- Cleanup diagnostics improved:
+  - `netsim cleanup` now checks required capabilities up front and prints actionable permission errors.
+  - Cleanup operations now log each attempted `ip link del` / `ip netns del` and print stderr on failure.
+  - Cleanup command logs start/end, selected prefixes, and VM-stop phase.
+- Replaced cooperative Tokio interrupt handling with `ctrlc` OS signal handler in `src/main.rs`; Ctrl-C now triggers immediate cleanup + process exit even when run paths are in blocking sections.
+- Cleanup hardening:
+  - `src/main.rs` now traps `SIGINT`/`SIGTERM` during `run`/`run-vm`, performs best-effort prefix cleanup (`lab-p`, `br-p`), and exits interrupted.
+  - Added `netsim cleanup` CLI command to clean leaked resources by prefix (repeatable `--prefix`) and stop the local QEMU VM if running.
+  - `src/core.rs` panic/atexit hooks now use prefix-based `cleanup_everything()` rather than only explicit link/netns registries.
+  - `src/vm.rs` exposes `stop_vm_if_running()` for unified cleanup flow.
+- `src/vm.rs` now stores downloaded QEMU base images in a shared user data cache (`dirs::data_dir()/netsim-rs/qemu-images`) with URL-hashed filenames, while keeping per-VM runtime state under `./.qemu-vm`.
+- Simplified `src/vm.rs` path model with constant-based internal names; VM runtime state remains script-compatible under `./.qemu-vm/<vm-name>`.
+- Updated `Makefile.toml` binary-first tasks: `run-local` now executes `cargo run -- run ...`, and `run-vm` now executes `cargo run -- run-vm ...` instead of shell-wrapper orchestration.
+- Clarified capability role split in `setcap.sh`: script explicitly targets repo test/dev binaries/tools and points standalone users to `netsim setup-caps`.
+- Updated `README.md` examples to `netsim run-vm ...` workflow and standalone `netsim setup-caps`.
+- Implemented self-contained CLI commands in `src/main.rs`: `netsim run`, `netsim run-vm`, and `netsim setup-caps`.
+- Added literal command-driven QEMU orchestration port to single `src/vm.rs`, mirroring `qemu-vm.sh` flow (`up`/mount checks/cloud-init/SSH guest prep) for `run-vm`.
+- Added `src/caps.rs` built-in capability setup that applies required caps to the current `netsim` binary and required system tools (`ip`, `tc`, `nft`, `ping`, `ping6`) via `sudo setcap`.
+- Added terminal combined-results table rendering after sim execution (`src/sim/report.rs` + `comfy-table`), invoked from `run_sims`.
 - Added `plans/selfcontained.md` outlining migration to a self-contained `netsim` binary (`run`, `run-vm`, `setup-caps`) and linked step tracking in `plans/PLAN.md`.
 - Revised `plans/selfcontained.md` VM migration approach to a single `src/vm.rs` (no submodules), with a near-literal command-exec port of `qemu-vm.sh` using short helper functions.
 - Completed public API doc coverage audit: all public library items now have rustdoc comments (verified with `RUSTFLAGS='-W missing-docs' cargo check`).
@@ -141,3 +177,7 @@ after confirmation commit with "feat: short description" etc and some details af
 - Step/process logging tightened: `run` and generic `spawn` always write stdout+stderr log files under `<work_dir>/logs`; iroh transfer provider/fetcher stdout+stderr logs are emitted alongside NDJSON `--logs-path` files.
 - Multi-sim execution is now first-class: `netsim` accepts multiple sim paths/directories in one invocation, writes per-run dirs (`<sim>-YYMMDD-HHMMSS[-N]`) under one work root, updates `latest` as a relative symlink, and emits invocation-scoped `combined-results.json` / `combined-results.md`.
 - `iroh-integration/netsim.yaml` now runs all requested sims in one `netsim` command against `iroh-integration/work` and publishes `combined-results.md` into the GitHub step summary for drop-in aggregated reporting.
+- VM execution now stages a Linux guest `netsim` binary in `/work/.netsim-bin/netsim` before running sims:
+  - Linux host: copies current executable.
+  - macOS host: downloads latest `netsim-x86_64-unknown-linux-musl.tar.gz` release asset and extracts `netsim`.
+- Added release workflow at `.github/workflows/release.yml` to build/package `netsim` for `x86_64-unknown-linux-musl` and `aarch64-apple-darwin`, then publish assets on tag pushes.

@@ -2,18 +2,12 @@
 name = "dc"
 
 [[router]]
-name = "isp"
-nat  = "cgnat"
-
-[[router]]
 name     = "lan-provider"
-upstream = "isp"
 nat      = "destination-independent"
 
 [[router]]
 name     = "lan-fetcher"
-upstream = "isp"
-nat      = "destination-dependent"
+nat      = "destination-independent"
 
 [device.relay.eth0]
 gateway = "dc"

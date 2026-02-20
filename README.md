@@ -17,7 +17,13 @@ Rust network namespace simulator for NAT/routing/link-impairment labs, plus an i
 - Linux host (or Linux VM) with:
   - `ip`, `tc`, `nft`
   - capabilities: `CAP_NET_ADMIN`, `CAP_SYS_ADMIN`, `CAP_NET_RAW`
-- Run capability setup after every rebuild:
+- Standalone binary setup:
+
+```bash
+netsim setup-caps
+```
+
+- Repo dev/test setup after every rebuild:
 
 ```bash
 ./setcap.sh
@@ -32,6 +38,12 @@ cargo check
 cargo fmt
 ```
 
+Cleanup leaked lab resources and stop VM:
+
+```bash
+netsim cleanup
+```
+
 Run tests locally (if your host policy allows it):
 
 ```bash
@@ -41,7 +53,8 @@ cargo test
 
 ## VM Workflow (Recommended)
 
-The QEMU VM flow is managed by `cargo make` + `qemu-vm.sh`.
+The QEMU VM flow is built into `netsim run-vm`.
+From the repo, use `cargo run -- run-vm ...` (or `cargo make run-vm ...`).
 
 ### VM mounts
 
@@ -72,17 +85,22 @@ For `kind = "iroh-transfer"` with `id = "xfer"`, logs are grouped as:
 ### Start and run
 
 ```bash
-cargo make setup-vm
-cargo make run-vm -- /app/iroh-integration/sims/iroh-1to1-public.toml
+cargo run -- run-vm ./iroh-integration/sims/iroh-1to1-public.toml
 
 # run a whole directory and produce combined results
-cargo make run-vm -- /app/iroh-integration/sims
+cargo run -- run-vm ./iroh-integration/sims
 ```
 
 ### Run and tee output
 
 ```bash
-cargo make run-vm /app/iroh-integration/sims/iroh-1to1-public.toml |& tee run-1to1
+cargo run -- run-vm ./iroh-integration/sims/iroh-1to1-public.toml |& tee run-1to1
+```
+
+If mount paths or runner-binary location changed since the last VM boot, recreate once:
+
+```bash
+cargo run -- run-vm --recreate ./iroh-integration/sims/iroh-1to1-public.toml
 ```
 
 ### Run tests in VM
@@ -101,9 +119,9 @@ cargo make vm-down
 
 Included sims:
 
-- `/app/iroh-integration/sims/iroh-1to1-public.toml`
-- `/app/iroh-integration/sims/iroh-1to1-nat.toml`
-- `/app/iroh-integration/sims/iroh-switch-direct.toml`
+- `./iroh-integration/sims/iroh-1to1-public.toml`
+- `./iroh-integration/sims/iroh-1to1-nat.toml`
+- `./iroh-integration/sims/iroh-switch-direct.toml`
 
 Shared binary defaults are in:
 
@@ -127,16 +145,16 @@ Examples:
 
 ```bash
 # Build transfer from checkout path
-cargo make run-vm -- /app/iroh-integration/sims/iroh-1to1-public.toml \
-  --binary "transfer:build:/app/../iroh"
+cargo run -- run-vm ./iroh-integration/sims/iroh-1to1-public.toml \
+  --binary "transfer:build:../iroh"
 
 # Force relay URL
-cargo make run-vm -- /app/iroh-integration/sims/iroh-1to1-nat.toml \
+cargo run -- run-vm ./iroh-integration/sims/iroh-1to1-nat.toml \
   --binary "relay:fetch:https://github.com/n0-computer/iroh/releases/download/v0.96.0/iroh-relay-v0.96.0-x86_64-unknown-linux-musl.tar.gz"
 
 # Use prebuilt transfer binary from host path
-cargo make run-vm -- /app/iroh-integration/sims/iroh-1to1-public.toml \
-  --binary "transfer:path:/app/target/x86_64-unknown-linux-musl/release/examples/transfer"
+cargo run -- run-vm ./iroh-integration/sims/iroh-1to1-public.toml \
+  --binary "transfer:path:./target/x86_64-unknown-linux-musl/release/examples/transfer"
 ```
 
 ## Testing Uncommitted Iroh Changes
@@ -144,12 +162,13 @@ cargo make run-vm -- /app/iroh-integration/sims/iroh-1to1-public.toml \
 If you have an iroh checkout with local uncommitted changes, run the sim against that source directly:
 
 ```bash
-cargo make run-vm -- /app/iroh-integration/sims/iroh-1to1-public.toml \
-  --binary "transfer:build:/app/../iroh"
+cargo run -- run-vm ./iroh-integration/sims/iroh-1to1-public.toml \
+  --binary "transfer:build:../iroh"
 ```
 
 Notes:
 
-- Source checkout can be read-only mounted.
 - Build artifacts are written under `/work/latest/build-target` (host `.netsim-work/latest/build-target`).
-- `RUST_TARGET` is set to MUSL in VM runs.
+- `run-vm` always executes a Linux x86_64 guest binary:
+  - on Linux host, it stages the current `netsim` binary into `/work/.netsim-bin/netsim`
+  - on macOS host, it downloads `netsim-x86_64-unknown-linux-musl.tar.gz` from the latest GitHub release and stages that into `/work/.netsim-bin/netsim`.

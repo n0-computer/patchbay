@@ -11,7 +11,10 @@ use netsim::{Impair, Lab};
 use crate::sim::build::build_local_binary;
 use crate::sim::build::build_or_fetch_binary;
 use crate::sim::env::SimEnv;
-use crate::sim::report::{write_combined_results_for_runs, write_results, TransferResult};
+use crate::sim::report::{
+    print_combined_results_table_for_runs, write_combined_results_for_runs, write_results,
+    TransferResult,
+};
 use crate::sim::topology::load_topology;
 use crate::sim::transfer::{finish_transfer, start_transfer, TransferHandle};
 use crate::sim::{BinarySpec, SimFile, Step};
@@ -73,6 +76,8 @@ pub async fn run_sims(
     write_combined_results_for_runs(&work_dir, &run_names)
         .await
         .context("write combined results")?;
+    print_combined_results_table_for_runs(&work_dir, &run_names)
+        .context("print combined results table")?;
     Ok(())
 }
 
@@ -432,6 +437,9 @@ fn execute_step(state: &mut SimState, step: &Step, log_dir: &Path) -> Result<()>
         device = ?step.device,
         "sim: step"
     );
+    if let Some(parser) = step.parser.as_deref() {
+        tracing::debug!(parser, id = ?step.id, "sim: parser hint");
+    }
 
     match step.action.as_str() {
         // ── run ──────────────────────────────────────────────────────────
@@ -440,6 +448,11 @@ fn execute_step(state: &mut SimState, step: &Step, log_dir: &Path) -> Result<()>
             let cmd_parts = state
                 .env
                 .interpolate(step.cmd.as_deref().context("run: missing cmd")?)?;
+            tracing::info!(
+                device,
+                cmd = %shell_join(&cmd_parts),
+                "sim: run command"
+            );
             let mut cmd = prepare_cmd(&cmd_parts, &step.env, state)?;
             let log_path = step_log_path(step, log_dir);
             let log = OpenOptions::new()
@@ -476,6 +489,12 @@ fn execute_step(state: &mut SimState, step: &Step, log_dir: &Path) -> Result<()>
             let cmd_parts = state
                 .env
                 .interpolate(step.cmd.as_deref().context("spawn: missing cmd")?)?;
+            tracing::info!(
+                id,
+                device,
+                cmd = %shell_join(&cmd_parts),
+                "sim: spawn command"
+            );
             let mut cmd = prepare_cmd(&cmd_parts, &step.env, state)?;
             let log_path = step_log_path(step, log_dir);
             if step.captures.is_empty() {
@@ -636,6 +655,8 @@ fn prepare_cmd(
     for (k, v) in state.env.process_env() {
         cmd.env(k, v);
     }
+    let rust_log = std::env::var("NETSIM_RUST_LOG").unwrap_or_else(|_| "info".to_string());
+    cmd.env("RUST_LOG", rust_log);
     for (k, v) in extra_env {
         cmd.env(k, state.env.interpolate_str(v)?);
     }
@@ -709,6 +730,29 @@ fn append_line(path: &Path, line: &str) -> Result<()> {
     f.write_all(line.as_bytes())
         .with_context(|| format!("append log {}", path.display()))?;
     Ok(())
+}
+
+fn shell_join(parts: &[String]) -> String {
+    parts
+        .iter()
+        .map(|p| shell_escape(p))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn shell_escape(s: &str) -> String {
+    if s.is_empty() {
+        return "''".to_string();
+    }
+    if s.bytes().all(|b| {
+        matches!(
+            b,
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'/' | b':'
+        )
+    }) {
+        return s.to_string();
+    }
+    format!("'{}'", s.replace('\'', "'\"'\"'"))
 }
 
 fn step_log_path(step: &Step, log_dir: &Path) -> PathBuf {
@@ -836,6 +880,18 @@ fn result_field(r: &TransferResult, field: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_dir(prefix: &str) -> PathBuf {
+        let ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("netsim-{prefix}-{ts}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        dir
+    }
 
     #[test]
     fn parse_duration_formats() {
@@ -875,5 +931,42 @@ mod tests {
         ])
         .expect_err("duplicate should fail");
         assert!(err.to_string().contains("duplicate --binary override"));
+    }
+
+    #[test]
+    fn expand_sim_inputs_loads_dirs_and_deduplicates() {
+        let root = temp_dir("expand-sims");
+        std::fs::write(root.join("b.toml"), "x").expect("write b");
+        std::fs::write(root.join("a.toml"), "x").expect("write a");
+        std::fs::write(root.join("skip.txt"), "x").expect("write txt");
+
+        let a = root.join("a.toml");
+        let got = expand_sim_inputs(&[root.clone(), a.clone()]).expect("expand sims");
+        assert_eq!(got, vec![a, root.join("b.toml")]);
+    }
+
+    #[test]
+    fn prepare_run_dir_sets_relative_latest_and_unique_suffix() {
+        let root = temp_dir("prepare-run");
+
+        let first = prepare_run_dir(&root, "sim-a").expect("first run dir");
+        let second = prepare_run_dir(&root, "sim-a").expect("second run dir");
+        assert_ne!(first, second, "second run should not reuse same dir");
+
+        let latest = root.join("latest");
+        let target = std::fs::read_link(&latest).expect("read latest symlink");
+        assert!(
+            !target.is_absolute(),
+            "latest symlink target should be relative: {}",
+            target.display()
+        );
+        assert_eq!(
+            target,
+            second
+                .file_name()
+                .map(PathBuf::from)
+                .expect("second basename"),
+            "latest should point at newest run dir"
+        );
     }
 }

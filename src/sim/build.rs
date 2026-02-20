@@ -107,6 +107,9 @@ fn extract_first_binary(archive: &Path, extract_dir: &Path) -> Result<PathBuf> {
     let mut found: Option<PathBuf> = None;
     for entry in tar.entries().context("read tar entries")? {
         let mut entry = entry.context("read tar entry")?;
+        if !entry.header().entry_type().is_file() {
+            continue;
+        }
         let path = entry.path().context("entry path")?.into_owned();
         // Skip directories and dotfiles
         if path.components().count() == 0 {
@@ -344,4 +347,62 @@ fn local_target_artifact_path(
     }
     path.push(binary_name);
     path
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use flate2::write::GzEncoder;
+    use flate2::Compression;
+    use std::time::{SystemTime, UNIX_EPOCH};
+    use tar::{Builder, Header};
+
+    fn temp_dir(prefix: &str) -> PathBuf {
+        let ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("netsim-{prefix}-{ts}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        dir
+    }
+
+    #[test]
+    fn extract_first_binary_skips_directory_entries() {
+        let dir = temp_dir("build-extract");
+        let archive = dir.join("relay.tar.gz");
+        let extract_dir = dir.join("bins");
+        std::fs::create_dir_all(&extract_dir).expect("create extract dir");
+
+        let file = std::fs::File::create(&archive).expect("create archive");
+        let enc = GzEncoder::new(file, Compression::default());
+        let mut tar = Builder::new(enc);
+
+        // Directory entry comes first and must be ignored.
+        let mut dir_hdr = Header::new_gnu();
+        dir_hdr.set_entry_type(tar::EntryType::Directory);
+        dir_hdr.set_mode(0o755);
+        dir_hdr.set_size(0);
+        dir_hdr.set_cksum();
+        tar.append_data(&mut dir_hdr, "bundle/", std::io::empty())
+            .expect("append dir entry");
+
+        let payload = b"#!/bin/sh\necho relay\n";
+        let mut file_hdr = Header::new_gnu();
+        file_hdr.set_entry_type(tar::EntryType::Regular);
+        file_hdr.set_mode(0o755);
+        file_hdr.set_size(payload.len() as u64);
+        file_hdr.set_cksum();
+        tar.append_data(&mut file_hdr, "bundle/iroh-relay", &payload[..])
+            .expect("append file entry");
+
+        tar.into_inner()
+            .expect("finish tar")
+            .finish()
+            .expect("finish gzip");
+
+        let out = extract_first_binary(&archive, &extract_dir).expect("extract first binary");
+        assert!(out.is_file(), "expected file output, got {}", out.display());
+        assert_eq!(out.file_name().and_then(|s| s.to_str()), Some("iroh-relay"));
+    }
 }

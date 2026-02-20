@@ -39,10 +39,10 @@ Status key: ✅ implemented, ⚠️ partially implemented, ❌ not implemented.
 | `iroh-netsim.md` | 22. `path` override copy-to-workdir semantics | ✅ | Path overrides are staged into `<work_dir>/bins` and chmodded executable (`src/sim/runner.rs`). |
 | `iroh-netsim.md` | 23. Override validation + resolved-source startup reporting | ⚠️ | Validation implemented; startup logs resolved binary path per name, but no dedicated summary table yet (`src/sim/runner.rs`). |
 | `iroh-netsim.md` | 24. Tests/examples for shared binaries + overrides | ⚠️ | Added override parser tests + shared defaults file + sims switched to shared binaries; merge-path tests are still limited (`src/sim/runner.rs`, `iroh-integration/iroh-defaults.toml`, `iroh-integration/sims/`). |
-| `selfcontained.md` | 1. Reshape CLI into explicit `run`/`run-vm`/`setup-caps` subcommands | ❌ | Planned in `plans/selfcontained.md`; current CLI only accepts `<sim>` positional (`src/main.rs`). |
-| `selfcontained.md` | 2. Embed `qemu-vm.sh` behavior in Rust VM module | ❌ | Planned in `plans/selfcontained.md`; VM orchestration still shell script based (`qemu-vm.sh`, `Makefile.toml`). |
-| `selfcontained.md` | 3. Implement built-in self capability setup (`netsim setup-caps`) | ❌ | Planned in `plans/selfcontained.md`; capability flow currently external script (`setcap.sh`). |
-| `selfcontained.md` | 4. Keep `setcap.sh` for test binaries and clarify role split | ❌ | Planned in `plans/selfcontained.md`; script currently handles broad setup only (`setcap.sh`). |
-| `selfcontained.md` | 5. Wire `run-vm` to execute `netsim run` in guest | ❌ | Planned in `plans/selfcontained.md`; current flow executes release binary directly with positional args (`Makefile.toml`). |
-| `selfcontained.md` | 6. Update automation/docs to binary-first workflows | ❌ | Planned in `plans/selfcontained.md`; docs/tasks still reference wrapper/script-first workflows (`README.md`, `Makefile.toml`). |
-| `selfcontained.md` | 7. Validate local + VM + external-checkout flow | ❌ | Planned in `plans/selfcontained.md`; no recorded validation artifact yet. |
+| `selfcontained.md` | 1. Reshape CLI into explicit `run`/`run-vm`/`setup-caps` subcommands | ✅ | Implemented in CLI command enum and dispatch (`src/main.rs`). |
+| `selfcontained.md` | 2. Embed `qemu-vm.sh` behavior in Rust VM module | ⚠️ | Implemented as single-file literal command-driven port for `run-vm` path (`src/vm.rs`); full standalone `up/down/status/ssh` subcommand surface is not yet exposed. |
+| `selfcontained.md` | 3. Implement built-in self capability setup (`netsim setup-caps`) | ✅ | Implemented with `sudo setcap` + verification for self and required tools (`src/caps.rs`, `src/main.rs`). |
+| `selfcontained.md` | 4. Keep `setcap.sh` for test binaries and clarify role split | ✅ | `setcap.sh` now explicitly documents repo test/dev scope and points standalone users to `netsim setup-caps` (`setcap.sh`). |
+| `selfcontained.md` | 5. Wire `run-vm` to execute `netsim run` in guest | ✅ | `run-vm` now SSH-executes `/target/<netsim> run ...` inside VM (`src/vm.rs`). |
+| `selfcontained.md` | 6. Update automation/docs to binary-first workflows | ✅ | `README.md` and `Makefile.toml` now use `netsim run` / `netsim run-vm` workflows; plan/docs updated (`README.md`, `Makefile.toml`, `plans/selfcontained.md`, `AGENTS.md`). |
+| `selfcontained.md` | 7. Validate local + VM + external-checkout flow | ❌ | Basic compile/help checks done, but no full local+VM+external runtime validation artifact recorded yet. |

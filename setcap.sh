@@ -2,6 +2,8 @@
 set -euo pipefail
 
 echo "setcap.sh: starting capability setup..."
+echo "setcap.sh: repo test/dev mode (tools + project/test binaries)."
+echo "setcap.sh: for a standalone installed binary, use: netsim setup-caps"
 
 if [[ "$(uname -s)" != "Linux" ]]; then
     echo "setcap.sh: this only works on Linux."
