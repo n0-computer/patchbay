@@ -1,3 +1,5 @@
+//! Runs the `netsim` CLI entrypoint.
+
 mod sim;
 
 use std::path::PathBuf;

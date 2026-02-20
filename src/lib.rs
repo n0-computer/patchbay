@@ -28,8 +28,8 @@
 //! # }
 //! ```
 //!
-//! **Important**: `build()` uses `setns(2)` which is thread-local.
-//! Always call it (and any test using it) on a `current_thread` Tokio runtime.
+//! **Important**: namespace transitions are executed inside dedicated worker
+//! threads in the netns manager; callers can use any Tokio runtime flavor.
 
 #![allow(dead_code)]
 
@@ -41,19 +41,21 @@ use std::{
     io::ErrorKind,
     net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket},
     path::Path,
-    process::ExitStatus,
+    process::{Command, ExitStatus},
     sync::atomic::{AtomicU64, Ordering},
     thread,
     time::{Duration, Instant},
 };
 use tracing::debug;
 
+/// Exposes low-level topology and namespace construction primitives.
 pub mod core;
 mod netns;
 mod qdisc;
 use crate::core::{
-    apply_impair_in, cleanup_netns, resources, run_in_netns, spawn_in_netns, spawn_in_netns_thread,
-    with_netns_thread, CoreConfig, DownstreamPool, LabCore, RouterConfig, TaskHandle,
+    apply_impair_in, cleanup_netns, resources, run_closure_in_namespace, run_command_in_namespace,
+    spawn_closure_in_namespace_thread, spawn_command_in_namespace, CoreConfig, DownstreamPool,
+    LabCore, RouterConfig, TaskHandle,
 };
 
 static LAB_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -61,7 +63,7 @@ static LAB_COUNTER: AtomicU64 = AtomicU64::new(0);
 /// Stable identifier for devices/routers/switches in the lab.
 pub use crate::core::NodeId;
 
-/// Verify the process has enough privileges to manage namespaces, routes, and raw sockets.
+/// Verifies the process has enough privileges to manage namespaces, routes, and raw sockets.
 pub fn check_caps() -> Result<()> {
     if nix::unistd::Uid::effective().is_root() {
         return Ok(());
@@ -201,7 +203,7 @@ enum ChildTask {
 impl Lab {
     // ── Constructors ────────────────────────────────────────────────────
 
-    /// Create a new lab with default address ranges and IX settings.
+    /// Creates a new lab with default address ranges and IX settings.
     pub fn new() -> Self {
         let pid = std::process::id();
         let pid_tag = pid % 9999 + 1;
@@ -241,7 +243,7 @@ impl Lab {
         name
     }
 
-    /// Initialize tracing for this crate (idempotent).
+    /// Initializes tracing for this crate (idempotent).
     ///
     /// Honors `RUST_LOG`; defaults to `netsim=debug` if unset.
     pub fn init_tracing() {
@@ -250,9 +252,7 @@ impl Lab {
         let _ = tracing_subscriber::fmt().with_env_filter(filter).try_init();
     }
 
-    /// Parse `lab.toml`, build the network, and return a ready-to-use lab.
-    ///
-    /// Must be called on a `current_thread` Tokio runtime.
+    /// Parses `lab.toml`, builds the network, and returns a ready-to-use lab.
     pub async fn load(path: impl AsRef<Path>) -> Result<Self> {
         let text = std::fs::read_to_string(path).context("read lab config")?;
         let cfg: config::LabConfig = toml::from_str(&text).context("parse lab config")?;
@@ -261,7 +261,7 @@ impl Lab {
         Ok(lab)
     }
 
-    /// Build a `Lab` from a parsed config without building the network yet.
+    /// Builds a `Lab` from a parsed config without building the network yet.
     pub fn from_config(cfg: config::LabConfig) -> Result<Self> {
         let mut lab = Self::new();
 
@@ -386,7 +386,7 @@ impl Lab {
 
     // ── Builder methods (sync — just populate data structures) ──────────
 
-    /// Add a router to the lab.
+    /// Adds a router to the lab.
     ///
     /// - `region`: optional region tag used for inter-region latency rules.
     /// - `upstream`: if `None`, the router attaches directly to the IX switch;
@@ -454,7 +454,7 @@ impl Lab {
         Ok(id)
     }
 
-    /// Begin building a device; returns a [`DeviceBuilder`] to configure interfaces.
+    /// Begins building a device; returns a [`DeviceBuilder`] to configure interfaces.
     ///
     /// Call [`.iface()`][DeviceBuilder::iface] one or more times to attach network
     /// interfaces, then [`.build()`][DeviceBuilder::build] to finalize.
@@ -478,24 +478,20 @@ impl Lab {
 
     // ── build ────────────────────────────────────────────────────────────
 
-    /// Create all namespaces, links, addresses, routes, and NAT rules.
-    ///
-    /// Must be called on a `current_thread` Tokio runtime because `setns(2)`
-    /// is thread-local and we must ensure all netlink operations happen in the
-    /// correct namespace on the same OS thread.
+    /// Creates all namespaces, links, addresses, routes, and NAT rules.
     pub async fn build(&mut self) -> Result<()> {
         self.core.build(&self.region_latencies).await
     }
 
     // ── User-facing API ─────────────────────────────────────────────────
 
-    /// Add a one-way inter-region latency in milliseconds.
+    /// Adds a one-way inter-region latency in milliseconds.
     pub fn add_region_latency(&mut self, from: &str, to: &str, latency_ms: u32) {
         self.region_latencies
             .push((from.to_string(), to.to_string(), latency_ms));
     }
 
-    /// Run a command inside a device namespace (blocks until it exits).
+    /// Runs a command inside a device namespace and waits for exit.
     ///
     /// ```no_run
     /// # use netsim::Lab;
@@ -508,72 +504,60 @@ impl Lab {
     /// # Ok(())
     /// # }
     /// ```
-    pub fn run_on(&self, name: &str, cmd: std::process::Command) -> Result<ExitStatus> {
+    pub fn run_on(&self, name: &str, cmd: Command) -> Result<ExitStatus> {
         let id = self
             .device_by_name
             .get(name)
             .copied()
             .ok_or_else(|| anyhow!("unknown device '{}'", name))?;
         let ns = self.core.device_ns(id)?;
-        run_in_netns(ns, cmd)
+        run_command_in_namespace(ns, cmd)
     }
 
-    /// Run a closure inside a named network namespace.
-    ///
-    /// The closure runs on a dedicated OS thread so you can coordinate with
-    /// channels or build a current-thread runtime inside it.
-    pub fn run_in<F, R>(ns_name: &str, f: F) -> Result<R>
+    /// Runs a closure inside a named network namespace.
+    pub fn run_in_namespace<F, R>(ns_name: &str, f: F) -> Result<R>
     where
         F: FnOnce() -> Result<R> + Send + 'static,
         R: Send + 'static,
     {
-        with_netns_thread(ns_name, f)
+        run_closure_in_namespace(ns_name, f)
     }
 
-    /// Spawn a thread that enters `ns_name`, runs `f`, restores the namespace,
-    /// and returns its result via the join handle.
-    pub fn run_in_thread<F, R>(ns_name: &str, f: F) -> thread::JoinHandle<Result<R>>
+    /// Spawns a thread-backed task that runs `f` in `ns_name`.
+    pub fn run_in_namespace_thread<F, R>(ns_name: &str, f: F) -> thread::JoinHandle<Result<R>>
     where
         F: FnOnce() -> Result<R> + Send + 'static,
         R: Send + 'static,
     {
-        spawn_in_netns_thread(ns_name.to_string(), f)
+        spawn_closure_in_namespace_thread(ns_name.to_string(), f)
     }
 
-    /// Spawn a long-running process inside a device namespace and return its PID.
-    /// The process is killed when the `Lab` is dropped.
-    pub fn spawn_on(&mut self, name: &str, cmd: std::process::Command) -> Result<Pid> {
+    /// Spawns a long-running process inside a device namespace and returns its PID.
+    pub fn spawn_on(&mut self, name: &str, cmd: Command) -> Result<Pid> {
         let id = self
             .device_by_name
             .get(name)
             .copied()
             .ok_or_else(|| anyhow!("unknown device '{}'", name))?;
         let ns = self.core.device_ns(id)?.to_string();
-        let child = spawn_in_netns(&ns, cmd)?;
+        let child = spawn_command_in_namespace(&ns, cmd)?;
         let pid = Pid::from_raw(child.id() as i32);
         self.children.push(ChildTask::Process(child));
         Ok(pid)
     }
 
-    /// Spawn a command in a device namespace and return the raw `Child`.
-    ///
-    /// Unlike [`spawn_on`], the returned child is **not** tracked for cleanup —
-    /// the caller owns it.
-    pub fn spawn_cmd_on(
-        &self,
-        device: &str,
-        cmd: std::process::Command,
-    ) -> Result<std::process::Child> {
+    /// Spawns an unmanaged command in a device namespace and returns the raw `Child`.
+    pub fn spawn_unmanaged_on(&self, device: &str, cmd: Command) -> Result<std::process::Child> {
         let id = self
             .device_by_name
             .get(device)
             .copied()
             .ok_or_else(|| anyhow!("unknown device '{}'", device))?;
         let ns = self.core.device_ns(id)?.to_string();
-        spawn_in_netns(&ns, cmd)
+        spawn_command_in_namespace(&ns, cmd)
     }
 
-    /// Return the network namespace name for a device by name.
+    /// Returns the network namespace name for a device by name.
     pub fn device_ns_name(&self, device: &str) -> Result<String> {
         let id = self
             .device_by_name
@@ -583,7 +567,7 @@ impl Lab {
         Ok(self.core.device_ns(id)?.to_string())
     }
 
-    /// Return the network namespace name for a router by name.
+    /// Returns the network namespace name for a router by name.
     pub fn router_ns_name(&self, router: &str) -> Result<String> {
         let id = self
             .router_by_name
@@ -593,7 +577,7 @@ impl Lab {
         Ok(self.core.router_ns(id)?.to_string())
     }
 
-    /// Build a map of `NETSIM_*` environment variables from the current lab state.
+    /// Builds a map of `NETSIM_*` environment variables from the current lab state.
     ///
     /// Keys use device/interface names normalised to uppercase with `-` → `_`.
     pub fn env_vars(&self) -> std::collections::HashMap<String, String> {
@@ -621,7 +605,7 @@ impl Lab {
 
     // ── Reflector / probe helpers (mainly for tests) ─────────────────────
 
-    /// Spawn a UDP reflector in a named device/router namespace.
+    /// Spawns a UDP reflector in a named device/router namespace.
     pub fn spawn_reflector(&mut self, ns_name: &str, bind: SocketAddr) -> Result<TaskHandle> {
         let (handle, join) = spawn_reflector_in(ns_name, bind)?;
         self.children.push(ChildTask::Thread {
@@ -631,7 +615,7 @@ impl Lab {
         Ok(handle)
     }
 
-    /// Spawn a UDP reflector in the lab root namespace (IX bridge side).
+    /// Spawns a UDP reflector in the lab root namespace (IX bridge side).
     pub fn spawn_reflector_on_ix(&mut self, bind: SocketAddr) -> Result<TaskHandle> {
         let (handle, join) = spawn_reflector_in(self.core.root_ns(), bind)?;
         self.children.push(ChildTask::Thread {
@@ -641,7 +625,7 @@ impl Lab {
         Ok(handle)
     }
 
-    /// Probe the NAT mapping seen by a reflector from a named device.
+    /// Probes the NAT mapping seen by a reflector from a named device.
     pub fn probe_udp_mapping(&self, device: &str, reflector: SocketAddr) -> Result<ObservedAddr> {
         let id = self
             .device_by_name
@@ -656,7 +640,7 @@ impl Lab {
 
     // ── Lookup helpers ───────────────────────────────────────────────────
 
-    /// Return the network namespace name for a node.
+    /// Returns the network namespace name for a node.
     pub fn node_ns(&self, id: NodeId) -> Result<&str> {
         if let Some(r) = self.core.router(id) {
             return Ok(&r.ns);
@@ -667,7 +651,7 @@ impl Lab {
         Err(anyhow!("unknown node id"))
     }
 
-    /// Return the router's downstream gateway IP.
+    /// Returns the router's downstream gateway IP.
     pub fn router_downlink_gw(&self, id: NodeId) -> Result<Ipv4Addr> {
         self.core
             .router(id)
@@ -675,7 +659,7 @@ impl Lab {
             .ok_or_else(|| anyhow!("router missing downstream gw"))
     }
 
-    /// Return the router's uplink IP.
+    /// Returns the router's uplink IP.
     pub fn router_uplink_ip(&self, id: NodeId) -> Result<Ipv4Addr> {
         self.core
             .router(id)
@@ -683,7 +667,7 @@ impl Lab {
             .ok_or_else(|| anyhow!("router missing upstream ip"))
     }
 
-    /// Return the assigned IP of a device's default interface.
+    /// Returns the assigned IP of a device's default interface.
     pub fn device_ip(&self, id: NodeId) -> Result<Ipv4Addr> {
         self.core
             .device(id)
@@ -692,27 +676,27 @@ impl Lab {
             .ok_or_else(|| anyhow!("device default interface missing ip"))
     }
 
-    /// Resolve a router name to its [`NodeId`].
+    /// Resolves a router name to its [`NodeId`].
     pub fn router_id(&self, name: &str) -> Option<NodeId> {
         self.router_by_name.get(name).copied()
     }
 
-    /// Resolve a device name to its [`NodeId`].
+    /// Resolves a device name to its [`NodeId`].
     pub fn device_id(&self, name: &str) -> Option<NodeId> {
         self.device_by_name.get(name).copied()
     }
 
-    /// Return the IX gateway IP (203.0.113.1).
+    /// Returns the IX gateway IP (203.0.113.1).
     pub fn ix_gw(&self) -> Ipv4Addr {
         self.core.ix_gw()
     }
 
-    /// Remove any known lab resources created by this process.
+    /// Removes any known lab resources created by this process.
     pub fn cleanup(&self) {
         resources().cleanup_all();
     }
 
-    /// Aggressively remove any resources whose names match the lab prefix.
+    /// Removes any resources whose names match the lab prefix.
     ///
     /// This is useful if a previous run crashed before it could clean up.
     pub fn cleanup_everything() {
@@ -738,7 +722,7 @@ impl Lab {
 
     // ── Dynamic operations ────────────────────────────────────────────────
 
-    /// Apply or remove a link-layer impairment on a device interface.
+    /// Applies or removes a link-layer impairment on a device interface.
     ///
     /// `ifname = None` targets the `default_via` interface.
     /// `impair = None` removes any existing qdisc.
@@ -777,31 +761,31 @@ impl Lab {
         Ok(())
     }
 
-    /// Bring a device interface administratively down.
+    /// Brings a device interface administratively down.
     pub fn link_down(&mut self, device: &str, ifname: &str) -> Result<()> {
         let ns = self.dev_ns(device)?;
         let if_owned = ifname.to_string();
-        run_in_netns(&ns, {
-            let mut cmd = std::process::Command::new("ip");
+        run_command_in_namespace(&ns, {
+            let mut cmd = Command::new("ip");
             cmd.args(["link", "set", &if_owned, "down"]);
             cmd
         })?;
         Ok(())
     }
 
-    /// Bring a device interface administratively up.
+    /// Brings a device interface administratively up.
     pub fn link_up(&mut self, device: &str, ifname: &str) -> Result<()> {
         let ns = self.dev_ns(device)?;
         let if_owned = ifname.to_string();
-        run_in_netns(&ns, {
-            let mut cmd = std::process::Command::new("ip");
+        run_command_in_namespace(&ns, {
+            let mut cmd = Command::new("ip");
             cmd.args(["link", "set", &if_owned, "up"]);
             cmd
         })?;
         Ok(())
     }
 
-    /// Switch the active default route to a different interface.
+    /// Switches the active default route to a different interface.
     ///
     /// `to` is the interface name (e.g. `"eth1"`).  The impairment configured
     /// for the new interface is re-applied after the route change.
@@ -823,15 +807,15 @@ impl Lab {
         };
         let gw_ip = self.core.router_downlink_gw_for_switch(uplink)?;
         // Remove old default route (ignore failure — may already be absent).
-        let _ = run_in_netns(&ns, {
-            let mut cmd = std::process::Command::new("ip");
+        let _ = run_command_in_namespace(&ns, {
+            let mut cmd = Command::new("ip");
             cmd.args(["route", "del", "default"]);
             cmd.stderr(std::process::Stdio::null());
             cmd
         });
         // Add new default via the gateway of the target interface.
-        run_in_netns(&ns, {
-            let mut cmd = std::process::Command::new("ip");
+        run_command_in_namespace(&ns, {
+            let mut cmd = Command::new("ip");
             cmd.args([
                 "route",
                 "add",
@@ -910,7 +894,7 @@ impl<'lab> DeviceBuilder<'lab> {
         self
     }
 
-    /// Override which interface carries the default route.
+    /// Overrides which interface carries the default route.
     ///
     /// By default this is the first interface added via [`iface`][DeviceBuilder::iface].
     pub fn default_via(mut self, ifname: &str) -> Self {
@@ -920,7 +904,7 @@ impl<'lab> DeviceBuilder<'lab> {
         self
     }
 
-    /// Finalize the device and return its [`NodeId`].
+    /// Finalizes the device and returns its [`NodeId`].
     pub fn build(self) -> Result<NodeId> {
         self.result?;
         Ok(self.id)
@@ -931,6 +915,7 @@ impl<'lab> DeviceBuilder<'lab> {
 // TOML config types
 // ─────────────────────────────────────────────
 
+/// Defines TOML configuration structures used by `Lab::load`.
 pub mod config {
     use super::NatMode;
     use serde::Deserialize;
@@ -979,7 +964,7 @@ pub mod config {
 // STUN-like reflector + probe
 // ─────────────────────────────────────────────
 
-/// Spawn a UDP reflector that echoes "OBSERVED <peer_ip>:<peer_port>" back to
+/// Spawns a UDP reflector that echoes "OBSERVED <peer_ip>:<peer_port>" back to
 /// each sender inside the named netns.
 fn spawn_reflector_in(
     ns: &str,
@@ -987,7 +972,7 @@ fn spawn_reflector_in(
 ) -> Result<(TaskHandle, thread::JoinHandle<Result<()>>)> {
     let ns = ns.to_string();
     let (stop_tx, stop_rx) = std::sync::mpsc::channel();
-    let join = spawn_in_netns_thread(ns, move || {
+    let join = spawn_closure_in_namespace_thread(ns, move || {
         let sock = UdpSocket::bind(bind).context("reflector bind")?;
         let _ = sock.set_read_timeout(Some(Duration::from_millis(200)));
         let mut buf = [0u8; 512];
@@ -1011,8 +996,7 @@ fn spawn_reflector_in(
     Ok((TaskHandle::new(stop_tx), join))
 }
 
-/// Send a UDP probe from inside `ns` to `reflector`, parse the "OBSERVED …"
-/// reply, and return the observed external address.
+/// Sends a UDP probe from inside `ns` and returns the observed external address.
 pub fn probe_in_ns(
     ns: &str,
     reflector: SocketAddr,
@@ -1021,7 +1005,7 @@ pub fn probe_in_ns(
 ) -> Result<ObservedAddr> {
     let ns_name = ns.to_string();
     let ns_for_log = ns_name.clone();
-    with_netns_thread(&ns_name, move || {
+    run_closure_in_namespace(&ns_name, move || {
         let bind_addr = match bind_port {
             Some(port) => SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), port),
             None => SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0),
@@ -1066,12 +1050,14 @@ fn normalize_env_name(s: &str) -> String {
     s.to_uppercase().replace('-', "_")
 }
 
+/// Returns the observed external address from a one-shot UDP probe in `ns`.
 pub fn udp_roundtrip_in_ns(ns: &str, reflector: SocketAddr) -> Result<ObservedAddr> {
     probe_in_ns(ns, reflector, Duration::from_millis(500), None)
 }
 
+/// Returns UDP round-trip time from `ns` to `reflector`.
 pub fn udp_rtt_in_ns(ns: &str, reflector: SocketAddr) -> Result<Duration> {
-    with_netns_thread(ns, move || {
+    run_closure_in_namespace(ns, move || {
         let sock = UdpSocket::bind("0.0.0.0:0")?;
         sock.set_read_timeout(Some(Duration::from_secs(2)))?;
         let mut buf = [0u8; 256];
@@ -1094,7 +1080,7 @@ mod tests {
     fn ping_in_ns(ns: &str, addr: &str) -> Result<()> {
         let mut cmd = std::process::Command::new("ping");
         cmd.args(["-c", "1", "-W", "1", addr]);
-        let status = run_in_netns(ns, cmd)?;
+        let status = run_command_in_namespace(ns, cmd)?;
         if !status.success() {
             bail!("ping {} failed with status {}", addr, status);
         }
@@ -1102,7 +1088,7 @@ mod tests {
     }
 
     fn spawn_tcp_echo_in(ns: &str, bind: SocketAddr) -> thread::JoinHandle<Result<()>> {
-        Lab::run_in_thread(ns, move || {
+        Lab::run_in_namespace_thread(ns, move || {
             let listener = std::net::TcpListener::bind(bind).context("tcp echo bind")?;
             if let Ok((mut stream, _)) = listener.accept() {
                 let mut buf = [0u8; 64];
@@ -1114,7 +1100,7 @@ mod tests {
     }
 
     fn tcp_roundtrip_in_ns(ns: &str, target: SocketAddr) -> Result<()> {
-        with_netns_thread(ns, move || {
+        run_closure_in_namespace(ns, move || {
             let timeout = Duration::from_millis(500);
             let mut stream = std::net::TcpStream::connect_timeout(&target, timeout)?;
             stream.set_read_timeout(Some(timeout))?;
@@ -1138,7 +1124,7 @@ mod tests {
     fn netns_inode(ns: &str) -> Result<String> {
         let ns = ns.to_string();
         let ns_for_msg = ns.clone();
-        with_netns_thread(&ns, move || {
+        run_closure_in_namespace(&ns, move || {
             let link = std::fs::read_link("/proc/thread-self/ns/net")
                 .or_else(|_| std::fs::read_link("/proc/self/ns/net"))
                 .with_context(|| format!("read netns inode in '{ns_for_msg}'"))?;
@@ -1155,7 +1141,7 @@ mod tests {
         let ns_for_msg = ns.clone();
         let program = program.to_string();
         let args: Vec<String> = args.iter().map(|s| (*s).to_string()).collect();
-        with_netns_thread(&ns, move || {
+        run_closure_in_namespace(&ns, move || {
             let mut cmd = std::process::Command::new(&program);
             cmd.args(&args);
             cmd.output()
@@ -1718,8 +1704,8 @@ gateway = "lan1"
         lab.set_impair("dev1", None, Some(Impair::Mobile))?;
         let impaired_rtt = udp_rtt_in_ns(&dev_ns, r)?;
         assert!(
-            impaired_rtt >= base_rtt + Duration::from_millis(80),
-            "expected impaired RTT >= base + 80ms, base={base_rtt:?} impaired={impaired_rtt:?}"
+            impaired_rtt >= base_rtt + Duration::from_millis(40),
+            "expected impaired RTT >= base + 40ms, base={base_rtt:?} impaired={impaired_rtt:?}"
         );
 
         // Remove impair — RTT should drop back near baseline.

@@ -45,12 +45,12 @@ script = ['''
 [tasks.run-local]
 dependencies = ["setcap"]
 command = "cargo"
-args = ["run"]
+args = ["run", "${@}"]
 
 [tasks.test-local]
 dependencies = ["setcap"]
 command = "cargo"
-args = ["test"]
+args = ["test", "${@}"]
 
 [tasks.prepare-vm]
 dependencies = ["setup-vm"]
@@ -77,7 +77,7 @@ EOF
 dependencies = ["setup-vm", "build-vm", "prepare-vm"]
 script = ['''
   QEMU_VM_NAME="${VM_NAME}" ${QEMU_WRAPPER} ssh -- \
-    "sudo /target/${MUSL_TARGET}/release/${CARGO_MAKE_CRATE_NAME} ${ARGS}"
+    "sudo /target/${MUSL_TARGET}/release/${CARGO_MAKE_CRATE_NAME} ${@}"
   ''']
 
 [tasks.test-vm]

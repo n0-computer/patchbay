@@ -77,7 +77,7 @@ pub fn run_transfer(
 
     let mut provider = state
         .lab
-        .spawn_cmd_on(provider_dev, provider_cmd)
+        .spawn_unmanaged_on(provider_dev, provider_cmd)
         .context("spawn provider")?;
 
     // Wait for the log file to appear (binary writes it before EndpointBound).
@@ -123,7 +123,7 @@ pub fn run_transfer(
 
     let mut fetcher = state
         .lab
-        .spawn_cmd_on(fetcher_dev, fetcher_cmd)
+        .spawn_unmanaged_on(fetcher_dev, fetcher_cmd)
         .context("spawn fetcher")?;
 
     // ── 4. Wait for fetcher to exit ──────────────────────────────────────

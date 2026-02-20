@@ -6,6 +6,7 @@
 //! - `auto`: probes named support and falls back to `fd`.
 
 use anyhow::{anyhow, bail, Context, Result};
+use futures::executor;
 use nix::sched::{setns, unshare, CloneFlags};
 use nix::unistd::gettid;
 use std::collections::HashMap;
@@ -13,6 +14,7 @@ use std::fs::File;
 use std::future::Future;
 use std::os::unix::fs::MetadataExt;
 use std::pin::Pin;
+use std::process::{Child, Command, ExitStatus};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
@@ -34,77 +36,41 @@ enum Backend {
 
 #[derive(Default)]
 struct FdRegistry {
-    map: Mutex<HashMap<String, FdEntry>>,
-}
-
-struct FdEntry {
-    fd: Arc<File>,
-    keeper: Option<Keeper>,
-}
-
-struct Keeper {
-    stop: mpsc::Sender<()>,
-    join: thread::JoinHandle<()>,
+    map: Mutex<HashMap<String, Arc<File>>>,
 }
 
 impl FdRegistry {
-    fn insert(&self, name: &str, fd: File, keeper: Option<Keeper>) {
+    fn insert(&self, name: &str, fd: File) {
         let mut m = self.map.lock().expect("fd registry poisoned");
-        m.insert(
-            name.to_string(),
-            FdEntry {
-                fd: Arc::new(fd),
-                keeper,
-            },
-        );
+        m.insert(name.to_string(), Arc::new(fd));
     }
 
     fn get(&self, name: &str) -> Option<Arc<File>> {
         let m = self.map.lock().expect("fd registry poisoned");
-        m.get(name).map(|entry| entry.fd.clone())
+        m.get(name).cloned()
     }
 
     fn remove(&self, name: &str) {
-        let keeper = {
-            let mut m = self.map.lock().expect("fd registry poisoned");
-            m.remove(name).and_then(|entry| entry.keeper)
-        };
-        if let Some(k) = keeper {
-            let _ = k.stop.send(());
-            let _ = k.join.join();
-        }
+        let mut m = self.map.lock().expect("fd registry poisoned");
+        m.remove(name);
     }
 
     fn remove_prefix(&self, prefix: &str) {
-        let keepers = {
-            let mut m = self.map.lock().expect("fd registry poisoned");
-            let keys: Vec<String> = m
-                .keys()
-                .filter(|k| k.starts_with(prefix))
-                .cloned()
-                .collect();
-            let mut keepers = Vec::new();
-            for key in keys {
-                if let Some(entry) = m.remove(&key) {
-                    if let Some(k) = entry.keeper {
-                        keepers.push(k);
-                    }
-                }
-            }
-            keepers
-        };
-        for k in keepers {
-            let _ = k.stop.send(());
-            let _ = k.join.join();
-        }
+        let mut m = self.map.lock().expect("fd registry poisoned");
+        m.retain(|k, _| !k.starts_with(prefix));
     }
 }
 
 static FD_REGISTRY: OnceLock<FdRegistry> = OnceLock::new();
 static BACKEND: OnceLock<Backend> = OnceLock::new();
+static GLOBAL_NETNS_MANAGER: OnceLock<NetnsManager> = OnceLock::new();
 
 fn fd_registry() -> &'static FdRegistry {
     FD_REGISTRY.get_or_init(FdRegistry::default)
+}
+
+fn global_netns_manager() -> &'static NetnsManager {
+    GLOBAL_NETNS_MANAGER.get_or_init(NetnsManager::new)
 }
 
 fn parse_backend_mode(raw: Option<&str>) -> Result<RequestedMode> {
@@ -211,8 +177,7 @@ pub async fn create_named_netns(name: &str) -> Result<()> {
 
     match backend()? {
         Backend::Fd => {
-            let (fd, keeper) =
-                create_unshared_netns_fd().context("create unshared netns with keeper")?;
+            let fd = create_unshared_netns_fd().context("create unshared netns fd")?;
             let created_ino = fd
                 .metadata()
                 .context("metadata for created netns fd")?
@@ -228,7 +193,7 @@ pub async fn create_named_netns(name: &str) -> Result<()> {
                     created_ino
                 );
             }
-            fd_registry().insert(name, fd, Some(keeper));
+            fd_registry().insert(name, fd);
         }
         Backend::Named => {
             let status = std::process::Command::new("ip")
@@ -245,10 +210,9 @@ pub async fn create_named_netns(name: &str) -> Result<()> {
     Ok(())
 }
 
-fn create_unshared_netns_fd() -> Result<(File, Keeper)> {
+fn create_unshared_netns_fd() -> Result<File> {
     let (res_tx, res_rx) = mpsc::channel();
-    let (stop_tx, stop_rx) = mpsc::channel();
-    let join = thread::spawn(move || {
+    let _ = thread::spawn(move || {
         let res: Result<()> = (|| {
             unshare(CloneFlags::CLONE_NEWNET).context("unshare CLONE_NEWNET")?;
             let fd =
@@ -257,23 +221,15 @@ fn create_unshared_netns_fd() -> Result<(File, Keeper)> {
                 .try_clone()
                 .context("clone namespace fd for parent registry")?;
             let _ = res_tx.send(Ok(fd_for_parent));
-            let _ = stop_rx.recv();
             Ok(())
         })();
         if let Err(err) = res {
             let _ = res_tx.send(Err(err));
         }
     });
-    let fd = res_rx
+    res_rx
         .recv()
-        .context("receive netns fd from helper thread")??;
-    Ok((
-        fd,
-        Keeper {
-            stop: stop_tx,
-            join,
-        },
-    ))
+        .context("receive netns fd from helper thread")?
 }
 
 fn probe_named_backend_support() -> bool {
@@ -419,6 +375,43 @@ impl NetnsManager {
     }
 }
 
+/// Run a synchronous closure in `ns` using the global namespace worker manager.
+pub fn run_closure_in_netns<F, R>(ns: &str, f: F) -> Result<R>
+where
+    F: FnOnce() -> Result<R> + Send + 'static,
+    R: Send + 'static,
+{
+    let ns_name = ns.to_string();
+    let (tx, rx) = mpsc::sync_channel::<Result<R>>(1);
+    executor::block_on(global_netns_manager().run_in(&ns_name, move || async move {
+        let _ = tx.send(f());
+        Ok(())
+    }))?;
+    rx.recv()
+        .context("receive closure result from netns worker")?
+}
+
+/// Spawn a host thread that runs a closure inside `ns`.
+pub fn spawn_closure_in_netns<F, R>(ns: String, f: F) -> thread::JoinHandle<Result<R>>
+where
+    F: FnOnce() -> Result<R> + Send + 'static,
+    R: Send + 'static,
+{
+    thread::spawn(move || run_closure_in_netns(&ns, f))
+}
+
+/// Run a command synchronously inside `ns`.
+pub fn run_command_in_netns(ns: &str, mut cmd: Command) -> Result<ExitStatus> {
+    debug!(ns = %ns, cmd = ?cmd, "netns: run command");
+    run_closure_in_netns(ns, move || cmd.status().context("run command in netns"))
+}
+
+/// Spawn a command process inside `ns`.
+pub fn spawn_command_in_netns(ns: &str, mut cmd: Command) -> Result<Child> {
+    debug!(ns = %ns, cmd = ?cmd, "netns: spawn command");
+    run_closure_in_netns(ns, move || cmd.spawn().context("spawn command in netns"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -459,9 +452,9 @@ mod tests {
     fn registry_prefix_cleanup() {
         let reg = FdRegistry::default();
         let fd = File::open("/proc/self/ns/net").unwrap();
-        reg.insert("lab-a", fd.try_clone().unwrap(), None);
-        reg.insert("lab-b", fd.try_clone().unwrap(), None);
-        reg.insert("other", fd, None);
+        reg.insert("lab-a", fd.try_clone().unwrap());
+        reg.insert("lab-b", fd.try_clone().unwrap());
+        reg.insert("other", fd);
 
         reg.remove_prefix("lab-");
 

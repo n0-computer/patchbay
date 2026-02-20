@@ -1,7 +1,6 @@
 use anyhow::{anyhow, bail, Context, Result};
 use futures::stream::TryStreamExt;
 use ipnet::Ipv4Net;
-use nix::sched::{setns, CloneFlags};
 use rtnetlink::{new_connection, Handle, LinkBridge, LinkUnspec, LinkVeth, RouteMessageBuilder};
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
@@ -10,43 +9,63 @@ use std::net::Ipv4Addr;
 use std::os::fd::AsRawFd;
 use std::process::ExitStatus;
 use std::sync::mpsc;
-use std::sync::{Arc, Mutex, Once, OnceLock};
+use std::sync::{Mutex, Once, OnceLock};
 use std::thread;
 use tracing::debug;
 
-use crate::netns as netns_backend;
+use crate::netns;
 use crate::{qdisc, Impair, NatMode};
 use nix::libc;
 
+/// Defines static addressing and naming for one lab instance.
 #[derive(Clone, Debug)]
 pub struct CoreConfig {
+    /// Stores the process-unique lab prefix used for namespacing resources.
     pub prefix: String,
+    /// Stores the dedicated lab root namespace name.
     pub root_ns: String,
+    /// Stores the IX bridge interface name inside the lab root namespace.
     pub ix_br: String,
+    /// Stores the IX gateway IPv4 address.
     pub ix_gw: Ipv4Addr,
+    /// Stores the IX subnet CIDR.
     pub ix_cidr: Ipv4Net,
+    /// Stores the base private downstream address pool.
     pub private_cidr: Ipv4Net,
+    /// Stores the base public downstream address pool.
     pub public_cidr: Ipv4Net,
 }
 
+/// Identifies a node in the topology graph.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct NodeId(pub u64);
 
+/// Identifies a device node.
 pub type DeviceId = NodeId;
+/// Identifies a router node.
 pub type RouterId = NodeId;
+/// Identifies a switch node.
 pub type SwitchId = NodeId;
 
+/// Selects the address pool used for router downstream links.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DownstreamPool {
+    /// Uses private RFC1918 addressing.
     Private,
+    /// Uses public routable addressing.
     Public,
 }
 
+/// Configures per-router NAT and downstream behavior.
 #[derive(Clone, Debug)]
 pub struct RouterConfig {
+    /// Selects router NAT behavior.
     pub nat: Option<NatMode>,
+    /// Enables ISP-style CGNAT on the IX-facing interface.
     pub cgnat: bool,
+    /// Stores the downstream bridge name.
     pub downlink_bridge: String,
+    /// Selects which pool to allocate downstream subnets from.
     pub downstream_pool: DownstreamPool,
 }
 
@@ -55,7 +74,7 @@ pub struct RouterConfig {
 pub struct DeviceIface {
     /// Interface name inside the device namespace (e.g. `"eth0"`).
     pub ifname: String,
-    /// Switch this interface is attached to.
+    /// Stores the switch this interface is attached to.
     pub uplink: SwitchId,
     /// Assigned IP address.
     pub ip: Option<Ipv4Addr>,
@@ -68,8 +87,11 @@ pub struct DeviceIface {
 /// A network endpoint with one or more interfaces.
 #[derive(Clone, Debug)]
 pub struct Device {
+    /// Identifies the device.
     pub id: DeviceId,
+    /// Stores the device name.
     pub name: String,
+    /// Stores the device namespace name.
     pub ns: String,
     /// Interfaces in declaration order.
     pub interfaces: Vec<DeviceIface>,
@@ -78,17 +100,17 @@ pub struct Device {
 }
 
 impl Device {
-    /// Look up an interface by name.
+    /// Looks up an interface by name.
     pub fn iface(&self, name: &str) -> Option<&DeviceIface> {
         self.interfaces.iter().find(|i| i.ifname == name)
     }
 
-    /// Look up an interface mutably by name.
+    /// Looks up an interface mutably by name.
     pub fn iface_mut(&mut self, name: &str) -> Option<&mut DeviceIface> {
         self.interfaces.iter_mut().find(|i| i.ifname == name)
     }
 
-    /// Return the interface that carries the default route.
+    /// Returns the interface that carries the default route.
     ///
     /// # Panics
     /// Panics if `default_via` does not name a known interface (invariant
@@ -99,27 +121,45 @@ impl Device {
     }
 }
 
+/// Represents a router and its L3 connectivity state.
 #[derive(Clone, Debug)]
 pub struct Router {
+    /// Identifies the router.
     pub id: RouterId,
+    /// Stores the router name.
     pub name: String,
+    /// Stores the router namespace name.
     pub ns: String,
+    /// Stores the optional router region label.
     pub region: Option<String>,
+    /// Stores static router configuration.
     pub cfg: RouterConfig,
+    /// Stores the uplink switch identifier.
     pub uplink: Option<SwitchId>,
+    /// Stores the router uplink IPv4 address.
     pub upstream_ip: Option<Ipv4Addr>,
+    /// Stores the downstream switch identifier.
     pub downlink: Option<SwitchId>,
+    /// Stores the downstream subnet CIDR.
     pub downstream_cidr: Option<Ipv4Net>,
+    /// Stores the downstream gateway address.
     pub downstream_gw: Option<Ipv4Addr>,
 }
 
+/// Represents an L2 switch/bridge attachment point.
 #[derive(Clone, Debug)]
 pub struct Switch {
+    /// Identifies the switch.
     pub id: SwitchId,
+    /// Stores the switch name.
     pub name: String,
+    /// Stores the switch subnet if assigned.
     pub cidr: Option<Ipv4Net>,
+    /// Stores the switch gateway address if assigned.
     pub gw: Option<Ipv4Addr>,
+    /// Stores the owning router for managed downstream switches.
     pub owner_router: Option<RouterId>,
+    /// Stores the backing bridge name.
     pub bridge: Option<String>,
     next_host: u8,
 }
@@ -141,9 +181,10 @@ struct IfaceBuild {
     idx: u64,
 }
 
+/// Stores mutable topology state and build-time allocators.
 pub struct LabCore {
     cfg: CoreConfig,
-    netns: netns_backend::NetnsManager,
+    netns: netns::NetnsManager,
     next_id: u64,
     next_private_subnet: u16,
     next_public_subnet: u16,
@@ -167,6 +208,7 @@ struct ResourceState {
     prefixes: HashSet<String>,
 }
 
+/// Tracks resources for best-effort cleanup on panic/exit.
 #[derive(Default)]
 pub struct ResourceList {
     state: Mutex<ResourceState>,
@@ -174,39 +216,8 @@ pub struct ResourceList {
 
 static RESOURCES: OnceLock<ResourceList> = OnceLock::new();
 static INIT_HOOKS: Once = Once::new();
-static NETNS_REGISTRY: OnceLock<NetnsRegistry> = OnceLock::new();
 
-#[derive(Default)]
-struct NetnsRegistry {
-    map: Mutex<HashMap<String, Arc<File>>>,
-}
-
-fn netns_registry() -> &'static NetnsRegistry {
-    NETNS_REGISTRY.get_or_init(NetnsRegistry::default)
-}
-
-impl NetnsRegistry {
-    fn insert(&self, name: &str, fd: File) {
-        let mut m = self.map.lock().unwrap();
-        m.insert(name.to_string(), Arc::new(fd));
-    }
-
-    fn get(&self, name: &str) -> Option<Arc<File>> {
-        let m = self.map.lock().unwrap();
-        m.get(name).cloned()
-    }
-
-    fn remove(&self, name: &str) {
-        let mut m = self.map.lock().unwrap();
-        m.remove(name);
-    }
-
-    fn remove_prefix(&self, prefix: &str) {
-        let mut m = self.map.lock().unwrap();
-        m.retain(|k, _| !k.starts_with(prefix));
-    }
-}
-
+/// Returns the global process resource tracker.
 pub fn resources() -> &'static ResourceList {
     RESOURCES.get_or_init(|| {
         INIT_HOOKS.call_once(|| {
@@ -228,21 +239,25 @@ extern "C" fn cleanup_at_exit() {
 }
 
 impl ResourceList {
+    /// Registers a link name for cleanup.
     pub fn register_link(&self, name: &str) {
         let mut st = self.state.lock().unwrap();
         st.links.insert(name.to_string());
     }
 
+    /// Registers a namespace name for cleanup.
     pub fn register_netns(&self, name: &str) {
         let mut st = self.state.lock().unwrap();
         st.netns.insert(name.to_string());
     }
 
+    /// Registers a resource-name prefix for broad cleanup.
     pub fn register_prefix(&self, prefix: &str) {
         let mut st = self.state.lock().unwrap();
         st.prefixes.insert(prefix.to_string());
     }
 
+    /// Removes all explicitly registered links and namespaces.
     pub fn cleanup_all(&self) {
         let (links, netns) = {
             let st = self.state.lock().unwrap();
@@ -259,6 +274,7 @@ impl ResourceList {
         }
     }
 
+    /// Removes links and namespaces that match `prefix`.
     pub fn cleanup_everything_with_prefix(&self, prefix: &str) {
         let output = std::process::Command::new("ip")
             .args(["-o", "link", "show"])
@@ -297,9 +313,10 @@ impl ResourceList {
                 }
             }
         }
-        netns_backend::cleanup_registry_prefix(prefix);
+        netns::cleanup_registry_prefix(prefix);
     }
 
+    /// Removes resources for all registered prefixes.
     pub fn cleanup_everything(&self) {
         let prefixes = {
             let st = self.state.lock().unwrap();
@@ -311,10 +328,11 @@ impl ResourceList {
     }
 }
 impl LabCore {
+    /// Constructs a new topology core and pre-creates the IX switch.
     pub fn new(cfg: CoreConfig) -> Self {
         let mut core = Self {
             cfg,
-            netns: netns_backend::NetnsManager::new(),
+            netns: netns::NetnsManager::new(),
             next_id: 1,
             next_private_subnet: 1,
             next_public_subnet: 1,
@@ -347,14 +365,17 @@ impl LabCore {
             .await
     }
 
+    /// Returns the IX gateway address.
     pub fn ix_gw(&self) -> Ipv4Addr {
         self.cfg.ix_gw
     }
 
+    /// Returns the IX bridge name.
     pub fn ix_br(&self) -> &str {
         &self.cfg.ix_br
     }
 
+    /// Allocates the next low-end IX host address.
     pub fn alloc_ix_ip_low(&mut self) -> Ipv4Addr {
         let o = self.cfg.ix_gw.octets();
         let ip = Ipv4Addr::new(o[0], o[1], o[2], self.next_ix_low);
@@ -362,6 +383,7 @@ impl LabCore {
         ip
     }
 
+    /// Allocates the next high-end IX host address.
     pub fn alloc_ix_ip_high(&mut self) -> Ipv4Addr {
         let o = self.cfg.ix_gw.octets();
         let ip = Ipv4Addr::new(o[0], o[1], o[2], self.next_ix_high);
@@ -369,14 +391,17 @@ impl LabCore {
         ip
     }
 
+    /// Returns the IX switch identifier.
     pub fn ix_sw(&self) -> SwitchId {
         self.ix_sw
     }
 
+    /// Returns the lab root namespace name.
     pub fn root_ns(&self) -> &str {
         &self.cfg.root_ns
     }
 
+    /// Returns the namespace name for router `id`.
     pub fn router_ns(&self, id: RouterId) -> Result<&str> {
         self.routers
             .get(&id)
@@ -384,6 +409,7 @@ impl LabCore {
             .ok_or_else(|| anyhow!("unknown router id"))
     }
 
+    /// Returns the namespace name for device `id`.
     pub fn device_ns(&self, id: DeviceId) -> Result<&str> {
         self.devices
             .get(&id)
@@ -391,26 +417,32 @@ impl LabCore {
             .ok_or_else(|| anyhow!("unknown device id"))
     }
 
+    /// Returns router data for `id`.
     pub fn router(&self, id: RouterId) -> Option<&Router> {
         self.routers.get(&id)
     }
 
+    /// Returns device data for `id`.
     pub fn device(&self, id: DeviceId) -> Option<&Device> {
         self.devices.get(&id)
     }
 
+    /// Returns mutable device data for `id`.
     pub fn device_mut(&mut self, id: DeviceId) -> Option<&mut Device> {
         self.devices.get_mut(&id)
     }
 
+    /// Returns switch data for `id`.
     pub fn switch(&self, id: SwitchId) -> Option<&Switch> {
         self.switches.get(&id)
     }
 
+    /// Returns the node identifier mapped from `name`.
     pub fn node_id_by_name(&self, name: &str) -> Option<NodeId> {
         self.nodes_by_name.get(name).copied()
     }
 
+    /// Adds a router node and returns its identifier.
     pub fn add_router(
         &mut self,
         name: &str,
@@ -438,7 +470,7 @@ impl LabCore {
         id
     }
 
-    /// Create a device shell with no interfaces yet.
+    /// Creates a device shell with no interfaces yet.
     ///
     /// Call [`add_device_iface`] one or more times to attach interfaces, then
     /// optionally [`set_device_default_via`] to override the default route
@@ -459,7 +491,7 @@ impl LabCore {
         id
     }
 
-    /// Add an interface to a device, connected to `router`'s downstream switch.
+    /// Adds an interface to a device, connected to `router`'s downstream switch.
     ///
     /// Allocates an IP from the router's downstream pool.  The first interface
     /// added becomes the `default_via` unless [`set_device_default_via`] is
@@ -498,7 +530,7 @@ impl LabCore {
         Ok(assigned)
     }
 
-    /// Change which interface carries the default route.
+    /// Changes which interface carries the default route.
     pub fn set_device_default_via(&mut self, device: DeviceId, ifname: &str) -> Result<()> {
         let dev = self
             .devices
@@ -511,7 +543,7 @@ impl LabCore {
         Ok(())
     }
 
-    /// Return the gateway IP of a router's downstream switch.
+    /// Returns the gateway IP of a router's downstream switch.
     ///
     /// Used by dynamic operations that need to re-issue `ip route add default`.
     pub fn router_downlink_gw_for_switch(&self, sw: SwitchId) -> Result<Ipv4Addr> {
@@ -521,6 +553,7 @@ impl LabCore {
             .ok_or_else(|| anyhow!("switch missing gateway ip"))
     }
 
+    /// Adds a switch node and returns its identifier.
     pub fn add_switch(
         &mut self,
         name: &str,
@@ -544,6 +577,7 @@ impl LabCore {
         id
     }
 
+    /// Connects `router` to uplink switch `sw` and returns its uplink IP.
     pub fn connect_router_uplink(
         &mut self,
         router: RouterId,
@@ -563,6 +597,7 @@ impl LabCore {
         Ok(assigned)
     }
 
+    /// Connects `router` to downstream switch `sw` and returns `(cidr, gw)`.
     pub fn connect_router_downlink(
         &mut self,
         router: RouterId,
@@ -621,6 +656,7 @@ impl LabCore {
         Ok((cidr, gw))
     }
 
+    /// Builds all namespaces, links, addressing, routing, and NAT state.
     pub async fn build(&mut self, region_latencies: &[(String, String, u32)]) -> Result<()> {
         debug!("build: ensure /var/run/netns exists");
         ensure_netns_dir()?;
@@ -1062,6 +1098,7 @@ impl LabCore {
         format!("{}{}{}", self.cfg.prefix, tag, id)
     }
 
+    /// Returns all namespace names owned by the lab.
     pub fn all_ns_names(&self) -> Vec<String> {
         let mut v = vec![self.cfg.root_ns.clone()];
         for r in self.routers.values() {
@@ -1086,77 +1123,81 @@ fn add_host(cidr: Ipv4Net, host: u8) -> Result<Ipv4Addr> {
 // Netns + process helpers
 // ─────────────────────────────────────────────
 
+/// Ensures netns runtime prerequisites are initialized.
 pub fn ensure_netns_dir() -> Result<()> {
-    netns_backend::ensure_netns_dir()
+    netns::ensure_netns_dir()
 }
 
+/// Opens a namespace file descriptor for `name`.
 pub fn open_netns_fd(name: &str) -> Result<File> {
-    netns_backend::open_netns_fd(name)
+    netns::open_netns_fd(name)
 }
 
+/// Cleans up a namespace by name.
 pub fn cleanup_netns(name: &str) {
-    netns_backend::cleanup_netns(name);
+    netns::cleanup_netns(name);
 }
 
+/// Creates a namespace entry and registers it for cleanup.
 pub async fn create_named_netns(name: &str) -> Result<()> {
-    netns_backend::create_named_netns(name).await?;
+    netns::create_named_netns(name).await?;
     resources().register_netns(name);
     Ok(())
 }
 
-pub fn spawn_in_netns_thread<F, R>(ns: String, f: F) -> thread::JoinHandle<Result<R>>
+/// Spawns a worker-thread task that runs a closure inside `ns`.
+pub fn spawn_closure_in_namespace_thread<F, R>(ns: String, f: F) -> thread::JoinHandle<Result<R>>
 where
     F: FnOnce() -> Result<R> + Send + 'static,
     R: Send + 'static,
 {
-    thread::spawn(move || {
-        let target = open_netns_fd(&ns)?;
-        setns(&target, CloneFlags::CLONE_NEWNET).context("setns target")?;
-        f()
-    })
+    netns::spawn_closure_in_netns(ns, f)
 }
 
-pub fn with_netns_thread<F, R>(ns: &str, f: F) -> Result<R>
+/// Runs a synchronous closure inside `ns`.
+pub fn run_closure_in_namespace<F, R>(ns: &str, f: F) -> Result<R>
 where
     F: FnOnce() -> Result<R> + Send + 'static,
     R: Send + 'static,
 {
-    let join = spawn_in_netns_thread(ns.to_string(), f);
-    match join.join() {
-        Ok(res) => res,
-        Err(_) => Err(anyhow!("netns thread panicked")),
-    }
+    netns::run_closure_in_netns(ns, f)
 }
 
-pub fn run_in_netns(ns: &str, mut cmd: std::process::Command) -> Result<ExitStatus> {
-    debug!(ns = %ns, cmd = ?cmd, "netns: run command");
-    with_netns_thread(ns, move || cmd.status().context("run command in netns"))
+/// Runs a command to completion inside `ns`.
+pub fn run_command_in_namespace(ns: &str, cmd: std::process::Command) -> Result<ExitStatus> {
+    netns::run_command_in_netns(ns, cmd)
 }
 
-pub fn spawn_in_netns(ns: &str, mut cmd: std::process::Command) -> Result<std::process::Child> {
-    debug!(ns = %ns, cmd = ?cmd, "netns: spawn command");
-    with_netns_thread(ns, move || cmd.spawn().context("spawn command in netns"))
+/// Spawns a command process inside `ns`.
+pub fn spawn_command_in_namespace(
+    ns: &str,
+    cmd: std::process::Command,
+) -> Result<std::process::Child> {
+    netns::spawn_command_in_netns(ns, cmd)
 }
 
+/// Sets a sysctl value in the current namespace.
 pub fn set_sysctl_root(path: &str, val: &str) -> Result<()> {
     debug!(path = %path, val = %val, "sysctl: set in root");
     std::fs::write(format!("/proc/sys/{}", path), val)
         .with_context(|| format!("sysctl write {}", path))
 }
 
+/// Sets a sysctl value inside `ns`.
 pub fn set_sysctl_in(ns: &str, path: &str, val: &str) -> Result<()> {
     debug!(ns = %ns, path = %path, val = %val, "sysctl: set in namespace");
     let path = path.to_string();
     let val = val.to_string();
-    with_netns_thread(ns, move || set_sysctl_root(&path, &val))
+    run_closure_in_namespace(ns, move || set_sysctl_root(&path, &val))
 }
 
+/// Applies nftables rules inside `ns`.
 pub async fn run_nft_in(ns: &str, rules: &str) -> Result<()> {
     debug!(ns = %ns, rules = %rules, "nft: apply rules");
     let rules = rules.to_string();
     let ns = ns.to_string();
     let ns_err = ns.clone();
-    with_netns_thread(&ns, move || {
+    run_closure_in_namespace(&ns, move || {
         let mut child = std::process::Command::new("nft")
             .args(["-f", "-"])
             .stdin(std::process::Stdio::piped())
@@ -1179,6 +1220,7 @@ pub async fn run_nft_in(ns: &str, rules: &str) -> Result<()> {
     })
 }
 
+/// Applies home-router NAT rules in `ns` for `mode`.
 pub async fn apply_home_nat(
     ns: &str,
     mode: NatMode,
@@ -1217,6 +1259,7 @@ table ip nat {{
     run_nft_in(ns, &rules).await
 }
 
+/// Applies ISP CGNAT masquerade rules in `ns` on `ix_if`.
 pub async fn apply_isp_cgnat(ns: &str, ix_if: &str) -> Result<()> {
     let rules = format!(
         r#"
@@ -1232,6 +1275,7 @@ table ip nat {{
     run_nft_in(ns, &rules).await
 }
 
+/// Applies per-destination latency filters on `ifname` inside `ns`.
 pub fn apply_region_latency(ns: &str, ifname: &str, filters: &[(Ipv4Net, u32)]) -> Result<()> {
     if filters.is_empty() {
         return Ok(());
@@ -1239,6 +1283,7 @@ pub fn apply_region_latency(ns: &str, ifname: &str, filters: &[(Ipv4Net, u32)]) 
     qdisc::apply_region_latency(ns, ifname, filters)
 }
 
+/// Applies an impairment preset or manual limits on `ifname` inside `ns`.
 pub fn apply_impair_in(ns: &str, ifname: &str, impair: Impair) {
     debug!(ns = %ns, ifname = %ifname, impair = ?impair, "tc: apply impairment");
     let limits = match impair {
@@ -1268,6 +1313,7 @@ pub fn apply_impair_in(ns: &str, ifname: &str, impair: Impair) {
     }
 }
 
+/// Controls a background task spawned by the lab.
 #[derive(Clone)]
 pub struct TaskHandle {
     stop: mpsc::Sender<()>,
@@ -1278,6 +1324,7 @@ impl TaskHandle {
         Self { stop }
     }
 
+    /// Signals the task to stop.
     pub fn stop(&self) {
         let _ = self.stop.send(());
     }

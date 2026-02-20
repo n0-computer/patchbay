@@ -2,7 +2,7 @@ use anyhow::{bail, Result};
 use ipnet::Ipv4Net;
 use std::process::Command;
 
-use crate::core::run_in_netns;
+use crate::core::run_command_in_namespace;
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct ImpairLimits {
@@ -57,7 +57,7 @@ pub(crate) fn remove_qdisc(ns: &str, ifname: &str) {
 ///
 /// Exit code 2 from `tc` (ENOENT — no qdisc to remove) is treated as success.
 pub(crate) fn remove_qdisc_r(ns: &str, ifname: &str) -> Result<()> {
-    let status = run_in_netns(ns, {
+    let status = run_command_in_namespace(ns, {
         let mut cmd = Command::new("tc");
         cmd.args(["qdisc", "del", "dev", ifname, "root"]);
         cmd.stderr(std::process::Stdio::null());
@@ -79,7 +79,7 @@ impl<'a> Qdisc<'a> {
     }
 
     fn clear_root(&self, ns: &str) {
-        let _ = run_in_netns(ns, {
+        let _ = run_command_in_namespace(ns, {
             let mut cmd = Command::new("tc");
             cmd.args(["qdisc", "del", "dev", self.ifname, "root"]);
             cmd.stderr(std::process::Stdio::null());
@@ -247,7 +247,7 @@ impl<'a> Qdisc<'a> {
 }
 
 fn ensure_success(ns: &str, cmd: Command, context: &str) -> Result<()> {
-    let status = run_in_netns(ns, cmd)?;
+    let status = run_command_in_namespace(ns, cmd)?;
     if status.success() {
         Ok(())
     } else {

@@ -211,7 +211,7 @@ fn execute_step(state: &mut SimState, step: &Step, log_dir: &Path) -> Result<()>
 
             let mut child = state
                 .lab
-                .spawn_cmd_on(device, cmd)
+                .spawn_unmanaged_on(device, cmd)
                 .with_context(|| format!("spawn '{}'", id))?;
 
             if let Some(after) = &step.ready_after {
