@@ -1,0 +1,53 @@
+[sim]
+name = "ported-iroh-iroh_200ms-2_to_10"
+binaries = "iroh-defaults.toml"
+chuck_compat = true
+
+[[router]]
+name = "dc"
+
+[device.provider]
+count = 2
+
+[device.provider.eth0]
+gateway = "dc"
+
+[device.fetcher]
+count = 10
+
+[device.fetcher.eth0]
+gateway = "dc"
+
+[[step]]
+action    = "set-impair"
+device    = "fetcher-0"
+interface = "eth0"
+impair    = { rate = 100000, loss = 0.0, latency = 200 }
+
+[[step]]
+action   = "spawn"
+kind     = "iroh-transfer"
+id       = "xfer-0"
+provider = "provider-0"
+fetchers = ["fetcher-0", "fetcher-2", "fetcher-4", "fetcher-6", "fetcher-8"]
+strategy = "endpoint_id_with_direct_addrs"
+duration = "20s"
+fetch_args = ["--size=1G"]
+
+[[step]]
+action   = "spawn"
+kind     = "iroh-transfer"
+id       = "xfer-1"
+provider = "provider-1"
+fetchers = ["fetcher-1", "fetcher-3", "fetcher-5", "fetcher-7", "fetcher-9"]
+strategy = "endpoint_id_with_direct_addrs"
+duration = "20s"
+fetch_args = ["--size=1G"]
+
+[[step]]
+action = "wait-for"
+id     = "xfer-0"
+
+[[step]]
+action = "wait-for"
+id     = "xfer-1"

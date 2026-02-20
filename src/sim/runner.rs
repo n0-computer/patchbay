@@ -39,6 +39,7 @@ pub struct SimState {
     pub binaries: HashMap<String, PathBuf>,
     pub work_dir: PathBuf,
     pub sim_name: String,
+    pub chuck_compat: bool,
 }
 
 struct GenericProcess {
@@ -162,6 +163,7 @@ async fn run_single_sim(
         binaries: binary_paths,
         work_dir: run_work_dir.clone(),
         sim_name: sim_name.clone(),
+        chuck_compat: sim.sim.chuck_compat,
     };
 
     // ── Execute steps ────────────────────────────────────────────────────
@@ -181,6 +183,7 @@ async fn run_single_sim(
         &state.sim_name,
         &state.results,
         &state.iperf_results,
+        state.chuck_compat,
     )
     .await
     .context("write results")?;

@@ -53,6 +53,13 @@ pub struct SimMeta {
     ///
     /// This is loaded in addition to inline `[[binary]]` entries.
     pub binaries: Option<String>,
+    /// Emit Chuck-compatible result artifacts under `<work_dir>/report/`.
+    ///
+    /// When enabled, netsim writes:
+    /// - `report/<sim-name>__transfer.json` (`raw`/`sum`/`avg` throughput stats)
+    /// - `report/integration_<sim-name>__transfer.json` (connection outcome entries)
+    #[serde(default)]
+    pub chuck_compat: bool,
 }
 
 /// Binary source specification inside a `[[binary]]` entry.

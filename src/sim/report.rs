@@ -179,6 +179,7 @@ pub async fn write_results(
     sim_name: &str,
     results: &[TransferResult],
     iperf_results: &[IperfResult],
+    chuck_compat: bool,
 ) -> Result<()> {
     if results.is_empty() && iperf_results.is_empty() {
         return Ok(());
@@ -240,6 +241,120 @@ pub async fn write_results(
         .await
         .context("write results.md")?;
 
+    if chuck_compat {
+        write_chuck_compat_reports(work_dir, sim_name, results)
+            .await
+            .context("write Chuck-compatible reports")?;
+    }
+
+    Ok(())
+}
+
+async fn write_chuck_compat_reports(
+    work_dir: &Path,
+    sim_name: &str,
+    results: &[TransferResult],
+) -> Result<()> {
+    if results.is_empty() {
+        return Ok(());
+    }
+    let report_dir = work_dir.join("report");
+    tokio::fs::create_dir_all(&report_dir)
+        .await
+        .context("create chuck report dir")?;
+
+    #[derive(Serialize)]
+    struct ChuckPerfRow {
+        data_len: u64,
+        elapsed: f64,
+        mbits: f64,
+        reported_mbits: f64,
+        reported_time: f64,
+    }
+    #[derive(Serialize)]
+    struct ChuckPerfAgg {
+        data_len: f64,
+        elapsed: f64,
+        mbits: f64,
+        reported_mbits: f64,
+        reported_time: f64,
+    }
+    #[derive(Serialize)]
+    struct ChuckPerfReport {
+        raw: Vec<ChuckPerfRow>,
+        sum: ChuckPerfAgg,
+        avg: ChuckPerfAgg,
+    }
+
+    let mut raw = Vec::new();
+    for r in results {
+        if let (Some(size), Some(elapsed), Some(mbps)) = (r.size_bytes, r.elapsed_s, r.mbps) {
+            raw.push(ChuckPerfRow {
+                data_len: size,
+                elapsed,
+                mbits: mbps,
+                reported_mbits: mbps,
+                reported_time: elapsed,
+            });
+        }
+    }
+    if raw.is_empty() {
+        return Ok(());
+    }
+
+    let sum = ChuckPerfAgg {
+        data_len: raw.iter().map(|r| r.data_len as f64).sum(),
+        elapsed: raw.iter().map(|r| r.elapsed).sum(),
+        mbits: raw.iter().map(|r| r.mbits).sum(),
+        reported_mbits: raw.iter().map(|r| r.reported_mbits).sum(),
+        reported_time: raw.iter().map(|r| r.reported_time).sum(),
+    };
+    let n = raw.len() as f64;
+    let avg = ChuckPerfAgg {
+        data_len: sum.data_len / n,
+        elapsed: sum.elapsed / n,
+        mbits: sum.mbits / n,
+        reported_mbits: sum.reported_mbits / n,
+        reported_time: sum.reported_time / n,
+    };
+    let perf = ChuckPerfReport { raw, sum, avg };
+    tokio::fs::write(
+        report_dir.join(format!("{sim_name}__transfer.json")),
+        serde_json::to_string_pretty(&perf).context("serialize chuck perf report")?,
+    )
+    .await
+    .context("write chuck perf report")?;
+
+    #[derive(Serialize)]
+    struct ChuckIntegrationRow {
+        conn_upgrade: String,
+        transfer_success: String,
+        final_conn_direct: String,
+        conn_events: usize,
+        node: String,
+    }
+    let integration: Vec<ChuckIntegrationRow> = results
+        .iter()
+        .map(|r| ChuckIntegrationRow {
+            conn_upgrade: r
+                .conn_upgrade
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "false".to_string()),
+            transfer_success: (r.size_bytes.is_some() && r.elapsed_s.is_some()).to_string(),
+            final_conn_direct: r
+                .final_conn_direct
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "false".to_string()),
+            conn_events: r.conn_events,
+            node: format!("{sim_name}__{}", r.fetcher),
+        })
+        .collect();
+    tokio::fs::write(
+        report_dir.join(format!("integration_{sim_name}__transfer.json")),
+        serde_json::to_string_pretty(&integration).context("serialize chuck integration report")?,
+    )
+    .await
+    .context("write chuck integration report")?;
     Ok(())
 }
 
@@ -740,7 +855,7 @@ mod tests {
             delta_mbps: None,
             delta_pct: None,
         }];
-        write_results(&dir, "sim-a", &transfers, &iperf)
+        write_results(&dir, "sim-a", &transfers, &iperf, false)
             .await
             .unwrap();
 
@@ -783,8 +898,12 @@ mod tests {
             conn_upgrade: Some(false),
             conn_events: 1,
         }];
-        write_results(&run_a, "sim-a", &r1, &[]).await.unwrap();
-        write_results(&run_b, "sim-b", &r2, &[]).await.unwrap();
+        write_results(&run_a, "sim-a", &r1, &[], false)
+            .await
+            .unwrap();
+        write_results(&run_b, "sim-b", &r2, &[], false)
+            .await
+            .unwrap();
 
         write_combined_results_for_runs(&root, &["sim-a-260220-120000".to_string()])
             .await
@@ -796,5 +915,33 @@ mod tests {
         assert!(!json.contains("\"run\": \"sim-b-260220-120500\""));
         assert!(md.contains("| sim-a | 1 | 0.8 | 100% |"));
         assert!(!md.contains("sim-b"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn write_results_emits_chuck_compat_reports_when_enabled() {
+        let dir = temp_dir("report-chuck");
+        let transfers = vec![TransferResult {
+            id: "xfer".to_string(),
+            provider: "provider".to_string(),
+            fetcher: "fetcher".to_string(),
+            size_bytes: Some(1000),
+            elapsed_s: Some(2.0),
+            mbps: Some(0.004),
+            final_conn_direct: Some(true),
+            conn_upgrade: Some(true),
+            conn_events: 2,
+        }];
+
+        write_results(&dir, "sim-a", &transfers, &[], true)
+            .await
+            .unwrap();
+
+        let perf = std::fs::read_to_string(dir.join("report/sim-a__transfer.json")).unwrap();
+        let itg =
+            std::fs::read_to_string(dir.join("report/integration_sim-a__transfer.json")).unwrap();
+        assert!(perf.contains("\"raw\""));
+        assert!(perf.contains("\"reported_mbits\""));
+        assert!(itg.contains("\"transfer_success\": \"true\""));
+        assert!(itg.contains("\"final_conn_direct\": \"true\""));
     }
 }

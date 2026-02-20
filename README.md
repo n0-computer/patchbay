@@ -129,6 +129,10 @@ Shared binary defaults are in:
 
 - `iroh-integration/iroh-defaults.toml`
 
+Ported legacy Chuck/iroh suites are available in:
+
+- `./iroh-integration/sims-ported/` (63 converted cases from `resources/iroh-sims`)
+
 ## Iperf Parser
 
 Use `parser = "iperf3-json"` on a `run` or `spawn` step to parse `iperf3 -J`
@@ -154,6 +158,15 @@ baseline = "iperf-baseline"
 ```
 
 When `baseline` is set, report rows include `delta_mbps` and `delta_pct`.
+
+## Chuck-Compatible Reports (Optional)
+
+Set `chuck_compat = true` in `[sim]` to additionally emit Chuck-style artifacts:
+
+- `<work_dir>/latest/report/<sim-name>__transfer.json`
+- `<work_dir>/latest/report/integration_<sim-name>__transfer.json`
+
+This is enabled in all generated files under `iroh-integration/sims-ported/`.
 
 ## Binary Overrides
 

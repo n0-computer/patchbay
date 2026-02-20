@@ -1,0 +1,51 @@
+[sim]
+name = "ported-paused-adverse-nat_both_lossy"
+binaries = "iroh-defaults.toml"
+chuck_compat = true
+
+[[router]]
+name = "dc"
+
+[[router]]
+name = "lan-provider"
+nat = "destination-independent"
+
+[[router]]
+name = "lan-fetcher"
+nat = "destination-independent"
+
+[device.relay.eth0]
+gateway = "dc"
+
+[device.provider.eth0]
+gateway = "lan-provider"
+
+[device.fetcher.eth0]
+gateway = "lan-fetcher"
+
+[[step]]
+action      = "spawn"
+id          = "relay"
+device      = "relay"
+cmd         = ["${binary.relay}", "--dev"]
+ready_after = "2s"
+
+[[step]]
+action    = "set-impair"
+device    = "fetcher"
+interface = "eth0"
+impair    = { rate = 8000, loss = 1.0, latency = 200 }
+
+[[step]]
+action   = "spawn"
+kind     = "iroh-transfer"
+id       = "xfer"
+provider = "provider"
+fetcher  = "fetcher"
+strategy = "endpoint_id_with_direct_addrs"
+duration = "30s"
+relay_url = "http://$NETSIM_IP_relay:3340"
+
+[[step]]
+action = "wait-for"
+id     = "xfer"

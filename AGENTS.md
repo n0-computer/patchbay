@@ -112,6 +112,9 @@ when a task is ready run the checks then ask to commit, don't commit without ask
 after confirmation commit with "feat: short description" etc and some details afterwards. elaborate open issues a little, explain decisions taken concisely
 
 ## Recent Changes
+- Added optional Chuck-compatible reporting output for sim runs:
+  - New `[sim] chuck_compat = true` emits `report/<sim>__transfer.json` and `report/integration_<sim>__transfer.json` alongside standard netsim reports (`src/sim/mod.rs`, `src/sim/report.rs`, `src/sim/runner.rs`).
+- Ported legacy iroh/chuck JSON suites from `resources/iroh-sims` into current TOML format under `iroh-integration/sims-ported/` (63 case files) with conversion notes in `iroh-integration/sims-ported/PORTED_FROM_RESOURCES.md`.
 - Added generic iperf parsing and comparison support in sim runner/reporting:
   - `step.parser = "iperf3-json"` now parses `iperf3 -J` output from step logs into `results.json`/`results.md` and combined reports (`src/sim/runner.rs`, `src/sim/report.rs`).
   - Added optional `baseline` on steps to compute `delta_mbps`/`delta_pct` against a prior iperf result id in the same run (`src/sim/mod.rs`, `src/sim/runner.rs`).

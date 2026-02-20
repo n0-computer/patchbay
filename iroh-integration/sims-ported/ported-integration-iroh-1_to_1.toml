@@ -1,0 +1,26 @@
+[sim]
+name = "ported-integration-iroh-1_to_1"
+binaries = "iroh-defaults.toml"
+chuck_compat = true
+
+[[router]]
+name = "dc"
+
+[device.provider.eth0]
+gateway = "dc"
+
+[device.fetcher.eth0]
+gateway = "dc"
+
+[[step]]
+action   = "spawn"
+kind     = "iroh-transfer"
+id       = "xfer"
+provider = "provider"
+fetcher  = "fetcher"
+strategy = "endpoint_id_with_direct_addrs"
+duration = "10s"
+
+[[step]]
+action = "wait-for"
+id     = "xfer"
