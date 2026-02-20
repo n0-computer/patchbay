@@ -52,3 +52,12 @@ Status key: ✅ implemented, ⚠️ partially implemented, ❌ not implemented.
 | `netsim-vm-split.md` | 4. Add `netsim-vm test` for VM test execution parity (`test-vm`) | ✅ | Implemented `netsim-vm test`: host `cargo test --no-run --message-format json`, staging to `/work/binaries/tests`, guest execution + summary (`crates/netsim-vm/src/vm.rs`). |
 | `netsim-vm-split.md` | 5. Replace Makefile VM tasks and retire `qemu-vm.sh` | ⚠️ | Makefile VM tasks now call `cargo run -p netsim-vm -- ...`; `qemu-vm.sh` still present in repo pending explicit removal (`Makefile.toml`). |
 | `netsim-vm-split.md` | 6. Remove `netsim run-vm` path and finalize docs split | ⚠️ | Deferred by request to avoid altering `netsim` crate behavior; docs/plans updated but `netsim run-vm` remains available. |
+| `ui.md` | 1. Scaffold Vite + React + TS project at `ui/` | ✅ | `ui/package.json`, `vite.config.ts`, `tsconfig.json`; builds to single `dist/index.html` via `vite-plugin-singlefile` (`ui/`). |
+| `ui.md` | 2. Dev server: serve `.netsim-work` + run listing endpoint | ✅ | Vite plugin serves work root files; `GET /__netsim/runs` returns dir listing; default path `<repo>/.netsim-work`; `NETSIMS=` override (`ui/vite.config.ts`). |
+| `ui.md` | 3. Perf tab: sortable tables + two-run compare | ✅ | Transfers + iperf tables, all-runs overview, compare diff with Δmbps/Δ% colour coding (`ui/src/components/PerfTab.tsx`). |
+| `ui.md` | 4. Logs tab: ANSI tracing + iroh NDJSON rendering + filters | ✅ | Tracing text formatted as `TIME LEVL target: message`; iroh events with badges; level/regex/iroh-only filters; sidebar file tree from manifest (`ui/src/components/LogsTab.tsx`). |
+| `ui.md` | 5. Timeline tab: SVG swimlane, Y=time, X=node lanes | ✅ | iroh NDJSON events + tracing WARN/ERROR/INFO + iroh::_events spans; scroll/zoom; tooltips; kind filter toggles (`ui/src/components/TimelineTab.tsx`). |
+| `ui.md` | 6. Qlog tab: JSON-seq event table | ✅ | Parses JSON-seq qlog; virtualised table; filter; expand-on-click; category colouring (`ui/src/components/QlogTab.tsx`). |
+| `ui.md` | 7. Rust: write `manifest.json` per run dir | ❌ | Pending; UI falls back to heuristic path inference from `results.json`. |
+| `ui.md` | 8. Rust: embed `dist/index.html` + write to work root | ❌ | Pending; also needs `netsim serve` command. |
+| `ui.md` | 9. Qlog auto-discovery (index.json per qlog dir) | ❌ | Pending Rust support; qlog tab requires manual paste of path for now. |

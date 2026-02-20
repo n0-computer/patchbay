@@ -81,9 +81,22 @@ Namespaces use `lab-p####-N`.
 - `src/netns.rs`: namespace backend selection + lifecycle helpers.
 - `src/qdisc.rs`: tc/qdisc abstraction, netem/tbf/htb.
 - `src/main.rs`: demo CLI; calls `check_caps()`.
+- `src/sim/report.rs`: result parsing, `results.json`/`results.md`, `combined-results.json`.
+- `src/sim/runner.rs`: step executor, binary resolution.
+- `src/sim/transfer.rs`: iroh-transfer spawn/wait lifecycle.
 - `Makefile.toml`: local + VM tasks.
 - `lima.yaml`: VM definition.
 - `setcap.sh`: capability setup script.
+- `ui/`: Vite + React browser UI (see `plans/ui.md`).
+
+## UI (`ui/`)
+Browser UI for viewing sim results, logs, timeline and qlogs.
+- **Build**: `cd ui && npm install && npm run build` → `ui/dist/index.html` (~175 KB, self-contained).
+- **Dev**: `cd ui && npm run dev` — serves `<repo_root>/.netsim-work` by default; override with `NETSIMS=/path npm run dev`.
+- **Dev endpoint**: `GET /__netsim/runs` returns `{workRoot, runs[]}` (all subdirs, newest-first); the UI uses this to populate the run picker and auto-select the latest run.
+- Output is a single inlined `index.html` (via `vite-plugin-singlefile`); can be dropped into any work root and opened via a local HTTP server.
+- Four tabs: **Perf** (sortable tables, two-run diff), **Logs** (ANSI/iroh NDJSON rendering), **Timeline** (SVG swimlane, Y=time), **Qlog** (event table).
+- Pending Rust work: write `manifest.json` per run dir; embed `dist/index.html` and write to work root after each run (see `plans/ui.md` TODOs).
 
 ## Notes on Tests
 Tests use `#[tokio::test(flavor = "current_thread")]` due to `setns` thread-local behavior.
@@ -115,6 +128,14 @@ after confirmation commit with "feat: short description" etc and some details af
 - Sim runner now emits run/sim metadata manifests:
   - Each invocation run root writes `manifest.json` with environment metadata, start/end timestamps, total runtime, overall success, and per-sim runtime/status entries.
   - Each per-sim directory writes `sim.json` with start/end timestamps, runtime, setup/topology summary, status (`ok`/`error`), and structured failure details (phase + failing step metadata when available) (`src/sim/runner.rs`).
+- Added browser UI at `ui/` (Vite + React + TypeScript, single-file output via `vite-plugin-singlefile`):
+  - Perf tab: sortable transfer + iperf tables, all-runs overview, two-run compare diff with Δmbps/Δ%.
+  - Logs tab: ANSI-stripped tracing text rendered as formatted log lines (level-coloured); iroh NDJSON events rendered with inline badges (⚡ DIRECT / ↔ RELAY / ✓ DONE). Regex + level filters, "iroh events only" toggle.
+  - Timeline tab: SVG swimlane (Y=time, X=node lanes) from iroh NDJSON + tracing logs; scroll/zoom; tooltips.
+  - Qlog tab: JSON-seq parser, virtualised event table, filter, expand-on-click.
+  - Dev server (`npm run dev`) serves `<repo_root>/.netsim-work` by default; `NETSIMS=/path` overrides. Vite plugin exposes `GET /__netsim/runs` for run-dir listing. Run picker auto-selects newest run.
+  - See `plans/ui.md` for full design and remaining TODOs.
+
 - Added standalone workspace binary crate `crates/netsim-vm` with CLI commands: `up`, `down`, `status`, `cleanup`, `ssh`, `run`, and `test`.
 - `netsim-vm run` now supports `--netsim-version` sources: `latest`, release tags (e.g. `0.10.0`), and git refs via `git:<ref>` (e.g. `git:feat/foo`), staging guest runner binary under `/work/.netsim-bin/netsim`.
 - Implemented artifact strategy A staging in `netsim-vm`: `--binary` overrides (`path|build|fetch`) are resolved on host and rewritten to staged guest paths under `/work/binaries/*`.

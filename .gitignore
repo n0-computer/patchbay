@@ -3,3 +3,5 @@
 /log-*
 /.qemu-vm
 /.netsim-work
+/ui/node_modules
+/ui/dist
