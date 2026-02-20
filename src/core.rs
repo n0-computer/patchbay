@@ -22,6 +22,7 @@ use nix::libc;
 #[derive(Clone, Debug)]
 pub struct CoreConfig {
     pub prefix: String,
+    pub root_ns: String,
     pub ix_br: String,
     pub ix_gw: Ipv4Addr,
     pub ix_cidr: Ipv4Net,
@@ -50,14 +51,53 @@ pub struct RouterConfig {
     pub downstream_pool: DownstreamPool,
 }
 
+/// One network interface on a device, connected to a router's downstream switch.
+#[derive(Clone, Debug)]
+pub struct DeviceIface {
+    /// Interface name inside the device namespace (e.g. `"eth0"`).
+    pub ifname: String,
+    /// Switch this interface is attached to.
+    pub uplink: SwitchId,
+    /// Assigned IP address.
+    pub ip: Option<Ipv4Addr>,
+    /// Optional link impairment applied via `tc netem`.
+    pub impair: Option<Impair>,
+    /// Unique index used to name the root-namespace veth ends.
+    pub(crate) idx: u64,
+}
+
+/// A network endpoint with one or more interfaces.
 #[derive(Clone, Debug)]
 pub struct Device {
     pub id: DeviceId,
     pub name: String,
     pub ns: String,
-    pub uplink: Option<SwitchId>,
-    pub ip: Option<Ipv4Addr>,
-    pub impair_upstream: Option<Impair>,
+    /// Interfaces in declaration order.
+    pub interfaces: Vec<DeviceIface>,
+    /// `ifname` of the interface that carries the default route.
+    pub default_via: String,
+}
+
+impl Device {
+    /// Look up an interface by name.
+    pub fn iface(&self, name: &str) -> Option<&DeviceIface> {
+        self.interfaces.iter().find(|i| i.ifname == name)
+    }
+
+    /// Look up an interface mutably by name.
+    pub fn iface_mut(&mut self, name: &str) -> Option<&mut DeviceIface> {
+        self.interfaces.iter_mut().find(|i| i.ifname == name)
+    }
+
+    /// Return the interface that carries the default route.
+    ///
+    /// # Panics
+    /// Panics if `default_via` does not name a known interface (invariant
+    /// maintained by `add_device_iface` / `set_device_default_via`).
+    pub fn default_iface(&self) -> &DeviceIface {
+        self.iface(&self.default_via)
+            .expect("default_via names a valid interface")
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -85,7 +125,8 @@ pub struct Switch {
     next_host: u8,
 }
 
-struct DevBuild {
+/// Per-interface wiring job collected by `build()`.
+struct IfaceBuild {
     dev_ns: String,
     gw_ns: String,
     gw_ip: Ipv4Addr,
@@ -93,7 +134,12 @@ struct DevBuild {
     dev_ip: Ipv4Addr,
     prefix_len: u8,
     impair: Option<Impair>,
-    idx: u32,
+    /// Interface name inside the device namespace.
+    ifname: String,
+    /// Only this interface gets `ip route add default`.
+    is_default: bool,
+    /// Unique index drives veth naming in the lab-root namespace.
+    idx: u64,
 }
 
 pub struct LabCore {
@@ -310,6 +356,10 @@ impl LabCore {
         self.ix_sw
     }
 
+    pub fn root_ns(&self) -> &str {
+        &self.cfg.root_ns
+    }
+
     pub fn router_ns(&self, id: RouterId) -> Result<&str> {
         self.routers
             .get(&id)
@@ -367,7 +417,12 @@ impl LabCore {
         id
     }
 
-    pub fn add_device(&mut self, name: &str, ns: String, impair: Option<Impair>) -> DeviceId {
+    /// Create a device shell with no interfaces yet.
+    ///
+    /// Call [`add_device_iface`] one or more times to attach interfaces, then
+    /// optionally [`set_device_default_via`] to override the default route
+    /// interface (first interface by default).
+    pub fn add_device(&mut self, name: &str, ns: String) -> DeviceId {
         let id = NodeId(self.alloc_id());
         self.nodes_by_name.insert(name.to_string(), id);
         self.devices.insert(
@@ -376,12 +431,77 @@ impl LabCore {
                 id,
                 name: name.to_string(),
                 ns,
-                uplink: None,
-                ip: None,
-                impair_upstream: impair,
+                interfaces: vec![],
+                default_via: String::new(),
             },
         );
         id
+    }
+
+    /// Add an interface to a device, connected to `router`'s downstream switch.
+    ///
+    /// Allocates an IP from the router's downstream pool.  The first interface
+    /// added becomes the `default_via` unless [`set_device_default_via`] is
+    /// called afterwards.
+    ///
+    /// Returns the allocated IP address.
+    pub fn add_device_iface(
+        &mut self,
+        device: DeviceId,
+        ifname: &str,
+        router: RouterId,
+        impair: Option<Impair>,
+    ) -> Result<Ipv4Addr> {
+        let downlink = self
+            .routers
+            .get(&router)
+            .and_then(|r| r.downlink)
+            .ok_or_else(|| anyhow!("router missing downlink switch"))?;
+        let assigned = self.alloc_from_switch(downlink)?;
+        let idx = self.alloc_id();
+        let dev = self
+            .devices
+            .get_mut(&device)
+            .ok_or_else(|| anyhow!("unknown device id"))?;
+        // First interface becomes the default unless overridden later.
+        if dev.default_via.is_empty() {
+            dev.default_via = ifname.to_string();
+        }
+        dev.interfaces.push(DeviceIface {
+            ifname: ifname.to_string(),
+            uplink: downlink,
+            ip: Some(assigned),
+            impair,
+            idx,
+        });
+        Ok(assigned)
+    }
+
+    /// Change which interface carries the default route.
+    pub fn set_device_default_via(&mut self, device: DeviceId, ifname: &str) -> Result<()> {
+        let dev = self
+            .devices
+            .get_mut(&device)
+            .ok_or_else(|| anyhow!("unknown device id"))?;
+        if !dev.interfaces.iter().any(|i| i.ifname == ifname) {
+            bail!(
+                "interface '{}' not found on device '{}'",
+                ifname,
+                dev.name
+            );
+        }
+        dev.default_via = ifname.to_string();
+        Ok(())
+    }
+
+    /// Return the gateway IP of a router's downstream switch.
+    ///
+    /// Used by dynamic operations that need to re-issue `ip route add default`.
+    pub fn router_downlink_gw_for_switch(&self, sw: SwitchId) -> Result<Ipv4Addr> {
+        self.switches
+            .get(&sw)
+            .and_then(|s| s.gw)
+            .ok_or_else(|| anyhow!("switch missing gateway ip"))
     }
 
     pub fn add_switch(
@@ -484,40 +604,22 @@ impl LabCore {
         Ok((cidr, gw))
     }
 
-    pub fn connect_device_to_router(
-        &mut self,
-        device: DeviceId,
-        router: RouterId,
-    ) -> Result<Ipv4Addr> {
-        let downlink = self
-            .routers
-            .get(&router)
-            .and_then(|r| r.downlink)
-            .ok_or_else(|| anyhow!("router missing downlink"))?;
-        let assigned = self.alloc_from_switch(downlink)?;
-        let dev = self
-            .devices
-            .get_mut(&device)
-            .ok_or_else(|| anyhow!("unknown device id"))?;
-        dev.uplink = Some(downlink);
-        dev.ip = Some(assigned);
-        Ok(assigned)
-    }
-
     pub async fn build(&mut self, region_latencies: &[(String, String, u32)]) -> Result<()> {
         debug!("build: ensure /var/run/netns exists");
         ensure_netns_dir()?;
+        let root_ns = self.cfg.root_ns.clone();
 
         for ns in self.all_ns_names() {
             debug!(ns = %ns, "build: create named netns");
             create_named_netns(&ns).await?;
         }
 
-        // IX bridge in root namespace.
+        // IX bridge in the lab root namespace.
         let ix_br = self.cfg.ix_br.clone();
         let ix_cidr = format!("{}/{}", self.cfg.ix_gw, self.cfg.ix_cidr.prefix_len());
-        with_root_netlink(async |h| {
-            debug!(bridge = %ix_br, "build: ensure root IX bridge");
+        with_netns(&root_ns, async |h| {
+            debug!(bridge = %ix_br, root_ns = %root_ns, "build: ensure lab-root IX bridge");
+            h.set_link_up("lo").await?;
             h.ensure_link_deleted(&ix_br).await.ok();
             h.add_bridge(&ix_br).await?;
             h.set_link_up(&ix_br).await?;
@@ -525,7 +627,7 @@ impl LabCore {
             Ok(())
         })
         .await?;
-        set_sysctl_root("net/ipv4/ip_forward", "1")?;
+        set_sysctl_in(&root_ns, "net/ipv4/ip_forward", "1")?;
 
         // Routers attached to IX.
         for (id, router) in self.routers.clone() {
@@ -539,7 +641,7 @@ impl LabCore {
             let router_ns = router.ns.clone();
             let ns_if2 = ns_if.clone();
             let root_if2 = root_if.clone();
-            with_root_netlink(async |h| {
+            with_netns(&root_ns, async |h| {
                 h.ensure_link_deleted(&root_if2).await.ok();
                 h.ensure_link_deleted(&ns_if2).await.ok();
                 h.add_veth(&root_if2, &ns_if2).await?;
@@ -663,7 +765,7 @@ impl LabCore {
             let root_b = self.root_if("b", id.0);
             let owner_ns2 = owner_ns.clone();
             let router_ns2 = router.ns.clone();
-            with_root_netlink(async |h| {
+            with_netns(&root_ns, async |h| {
                 h.ensure_link_deleted(&root_a).await.ok();
                 h.ensure_link_deleted(&root_b).await.ok();
                 h.add_veth(&root_a, &root_b).await?;
@@ -713,38 +815,41 @@ impl LabCore {
             }
         }
 
-        // Devices
-        let mut dev_data = Vec::new();
+        // Devices — one IfaceBuild per (device, interface) pair.
+        let mut iface_data = Vec::new();
         for dev in self.devices.values() {
-            let sw_id = dev.uplink.ok_or_else(|| anyhow!("device missing uplink"))?;
-            let sw = self
-                .switches
-                .get(&sw_id)
-                .ok_or_else(|| anyhow!("device switch missing"))?;
-            let gw_router = sw
-                .owner_router
-                .ok_or_else(|| anyhow!("device switch missing owner"))?;
-            let gw = sw.gw.ok_or_else(|| anyhow!("device switch missing gw"))?;
-            let gw_br = sw.bridge.clone().unwrap_or_else(|| "br-lan".to_string());
-            let gw_ns = self.routers.get(&gw_router).unwrap().ns.clone();
-            dev_data.push(DevBuild {
-                dev_ns: dev.ns.clone(),
-                gw_ns,
-                gw_ip: gw,
-                gw_br,
-                dev_ip: dev.ip.unwrap(),
-                prefix_len: sw.cidr.unwrap().prefix_len(),
-                impair: dev.impair_upstream.clone(),
-                idx: dev.id.0 as u32,
-            });
+            for iface in &dev.interfaces {
+                let sw = self
+                    .switches
+                    .get(&iface.uplink)
+                    .ok_or_else(|| anyhow!("device '{}' iface '{}' switch missing", dev.name, iface.ifname))?;
+                let gw_router = sw
+                    .owner_router
+                    .ok_or_else(|| anyhow!("device '{}' iface '{}' switch missing owner", dev.name, iface.ifname))?;
+                let gw = sw.gw.ok_or_else(|| anyhow!("device switch missing gw"))?;
+                let gw_br = sw.bridge.clone().unwrap_or_else(|| "br-lan".to_string());
+                let gw_ns = self.routers.get(&gw_router).unwrap().ns.clone();
+                iface_data.push(IfaceBuild {
+                    dev_ns: dev.ns.clone(),
+                    gw_ns,
+                    gw_ip: gw,
+                    gw_br,
+                    dev_ip: iface.ip.unwrap(),
+                    prefix_len: sw.cidr.unwrap().prefix_len(),
+                    impair: iface.impair,
+                    ifname: iface.ifname.clone(),
+                    is_default: iface.ifname == dev.default_via,
+                    idx: iface.idx,
+                });
+            }
         }
 
-        for dev in dev_data {
-            self.wire_device(dev).await?;
+        for iface in iface_data {
+            self.wire_iface(iface).await?;
         }
 
-        // Root-ns return routes to public downstreams behind IX routers.
-        with_root_netlink(async |h| {
+        // Lab-root return routes to public downstreams behind IX routers.
+        with_netns(&root_ns, async |h| {
             for router in self.routers.values() {
                 if router.uplink != Some(self.ix_sw) {
                     continue;
@@ -757,7 +862,7 @@ impl LabCore {
                     debug!(
                         dst = %format!("{}/{}", net, cidr.prefix_len()),
                         via = %router.upstream_ip.unwrap(),
-                        "build: add root return route"
+                        "build: add lab-root return route"
                     );
                     h.add_route_v4(
                         &format!("{}/{}", net, cidr.prefix_len()),
@@ -772,7 +877,6 @@ impl LabCore {
         .await
         .ok();
 
-        let _ = region_latencies;
         Ok(())
     }
 
@@ -782,20 +886,25 @@ impl LabCore {
         id
     }
 
-    async fn wire_device(&self, dev: DevBuild) -> Result<()> {
+    /// Wire one device interface: create veth pair, move ends to correct
+    /// namespaces, assign IP, and optionally add a default route and impairment.
+    async fn wire_iface(&self, dev: IfaceBuild) -> Result<()> {
         debug!(
             dev_ns = %dev.dev_ns,
             gw_ns = %dev.gw_ns,
             gw_ip = %dev.gw_ip,
             gw_br = %dev.gw_br,
             dev_ip = %dev.dev_ip,
+            ifname = %dev.ifname,
             impair = ?dev.impair,
-            "build: connect device to gateway"
+            is_default = dev.is_default,
+            "build: connect device interface to gateway"
         );
-        let root_gw = self.root_if("g", dev.idx as u64);
-        let root_dev = self.root_if("e", dev.idx as u64);
+        let root_gw = self.root_if("g", dev.idx);
+        let root_dev = self.root_if("e", dev.idx);
+        let root_ns = self.cfg.root_ns.clone();
 
-        with_root_netlink(async |h| {
+        with_netns(&root_ns, async |h| {
             h.ensure_link_deleted(&root_gw).await.ok();
             h.ensure_link_deleted(&root_dev).await.ok();
             h.add_veth(&root_gw, &root_dev).await?;
@@ -808,12 +917,17 @@ impl LabCore {
         .await?;
 
         let ip_cidr = format!("{}/{}", dev.dev_ip, dev.prefix_len);
+        let ifname = dev.ifname.clone();
+        let is_default = dev.is_default;
+        let gw_ip = dev.gw_ip;
         with_netns(&dev.dev_ns, async |h| {
             h.set_link_up("lo").await?;
-            h.rename_link(&root_dev, "eth0").await?;
-            h.set_link_up("eth0").await?;
-            h.add_addr4("eth0", &ip_cidr).await?;
-            h.add_default_route_v4(dev.gw_ip).await?;
+            h.rename_link(&root_dev, &ifname).await?;
+            h.set_link_up(&ifname).await?;
+            h.add_addr4(&ifname, &ip_cidr).await?;
+            if is_default {
+                h.add_default_route_v4(gw_ip).await?;
+            }
             Ok(())
         })
         .await?;
@@ -827,7 +941,7 @@ impl LabCore {
         .await?;
 
         if let Some(imp) = dev.impair {
-            apply_impair_in(&dev.dev_ns, "eth0", imp);
+            apply_impair_in(&dev.dev_ns, &dev.ifname, imp);
         }
         Ok(())
     }
@@ -878,7 +992,7 @@ impl LabCore {
     }
 
     pub fn all_ns_names(&self) -> Vec<String> {
-        let mut v = Vec::new();
+        let mut v = vec![self.cfg.root_ns.clone()];
         for r in self.routers.values() {
             v.push(r.ns.clone());
         }
@@ -902,12 +1016,17 @@ fn add_host(cidr: Ipv4Net, host: u8) -> Result<Ipv4Addr> {
 // ─────────────────────────────────────────────
 
 pub fn ensure_netns_dir() -> Result<()> {
-    debug!("netns: using in-memory namespace registry");
+    debug!("netns: ensure /var/run/netns exists");
+    let _ = std::fs::create_dir_all("/var/run/netns");
     Ok(())
 }
 
 pub fn open_netns_fd(name: &str) -> Result<File> {
     debug!(ns = %name, "netns: open namespace fd");
+    let path = format!("/var/run/netns/{name}");
+    if let Ok(fd) = File::open(&path) {
+        return Ok(fd);
+    }
     let fd = netns_registry()
         .get(name)
         .ok_or_else(|| anyhow!("netns '{}' not found in registry", name))?;
@@ -916,15 +1035,27 @@ pub fn open_netns_fd(name: &str) -> Result<File> {
 }
 
 pub fn cleanup_netns(name: &str) {
+    let _ = std::process::Command::new("ip")
+        .args(["netns", "del", name])
+        .stderr(std::process::Stdio::null())
+        .status();
     netns_registry().remove(name);
 }
 
 pub async fn create_named_netns(name: &str) -> Result<()> {
     debug!(ns = %name, "netns: create named namespace");
     cleanup_netns(name);
-    let fd = create_unshared_netns_fd().context("create unshared netns")?;
-    netns_registry().insert(name, fd);
-    let _ = open_netns_fd(name)?;
+    let created_with_ip = std::process::Command::new("ip")
+        .args(["netns", "add", name])
+        .status()
+        .map(|st| st.success())
+        .unwrap_or(false);
+    if !created_with_ip {
+        debug!(ns = %name, "netns: falling back to in-memory namespace registry");
+        let fd = create_unshared_netns_fd().context("create unshared netns")?;
+        netns_registry().insert(name, fd);
+    }
+    let _ = open_netns_fd(name).with_context(|| format!("open netns fd for '{name}'"))?;
     resources().register_netns(name);
     Ok(())
 }
@@ -1035,6 +1166,9 @@ pub async fn apply_home_nat(
         }
         NatMode::DestinationDependent => {
             format!("oif \"{wan}\" masquerade random", wan = wan_if)
+        }
+        NatMode::None | NatMode::Cgnat => {
+            unreachable!("apply_home_nat called with non-home NAT mode {:?}", mode)
         }
     };
 
@@ -1248,7 +1382,13 @@ impl Netlink {
         self.bump();
         debug!(via = %via, "netlink: add default route");
         let msg = RouteMessageBuilder::<Ipv4Addr>::new().gateway(via).build();
-        self.handle.route().add(msg).execute().await?;
+        if let Err(err) = self.handle.route().add(msg).execute().await {
+            if err.to_string().contains("File exists") {
+                debug!(via = %via, "netlink: default route already exists");
+                return Ok(());
+            }
+            return Err(err.into());
+        }
         Ok(())
     }
 
@@ -1263,17 +1403,6 @@ impl Netlink {
         self.handle.route().add(msg).execute().await?;
         Ok(())
     }
-}
-
-async fn with_root_netlink<F>(f: F) -> Result<()>
-where
-    F: AsyncFnOnce(&mut Netlink) -> Result<()>,
-{
-    debug!("netlink: open root rtnetlink connection");
-    let (conn, handle, _) = new_connection().context("rtnetlink new_connection")?;
-    tokio::spawn(conn);
-    let mut nl = Netlink::new(handle);
-    f(&mut nl).await
 }
 
 async fn with_netns<F>(ns: &str, f: F) -> Result<()>

@@ -13,6 +13,7 @@ This file captures key context, conventions, and workflows learned while working
 ## Key Concepts / Architecture
 - **LabCore**: low-level topology and build logic (routers/switches/devices).
 - **Lab**: convenience wrapper with dc/home/isp shorthands; maps to `LabCore`.
+- **Lab root namespace**: IX and transit links are built in a dedicated lab namespace (`<prefix>-root`), not host root.
 - **Namespaces**: created and managed via `ip netns add` (see `create_named_netns`).
 - **Netlink**: `Netlink` struct in `src/core.rs` wraps `rtnetlink::Handle` and provides helper methods.
 - **Qdisc**: all `tc`/`qdisc` command invocation is in `src/qdisc.rs`.
@@ -66,6 +67,7 @@ Namespaces use `lab-p####-N`.
 
 ## Common Pitfalls
 - **Netns creation**: prefer `ip netns add` for stable `/var/run/netns/*` entries.
+- **Host root leakage**: never run lab dataplane operations in host root netns; keep all IX/transit operations inside the dedicated lab root namespace.
 - **Capabilities**: running tests without caps will fail; use `check_caps()`.
 - **TC warnings**: use `r2q 1000` in HTB root to avoid large quantum warnings.
 - **Makefile target dir**: do not assume `./target`, always use `cargo make target-dir`.

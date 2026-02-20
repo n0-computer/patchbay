@@ -4,29 +4,32 @@ use std::{
 };
 
 use anyhow::Result;
-use netsim::{check_caps, udp_rtt_in_ns, Gateway, Impair, Lab};
+use netsim::{check_caps, udp_rtt_in_ns, Impair, Lab, NatMode};
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
     check_caps()?;
     let mut lab = Lab::new();
-    let dc_eu = lab.add_dc("dc-eu", "eu")?;
-    let dc_us = lab.add_dc("dc-us", "us")?;
+    let dc_eu = lab.add_router("dc-eu", Some("eu"), None, NatMode::None)?;
+    let dc_us = lab.add_router("dc-us", Some("us"), None, NatMode::None)?;
     lab.add_region_latency("eu", "us", 20);
     lab.add_region_latency("us", "eu", 20);
-    let dev = lab.add_device(
-        "dev1",
-        Gateway::Dc(dc_eu),
-        Some(Impair::Manual {
-            rate: 10_000,
-            loss: 0.0,
-            latency: 60,
-        }),
-    )?;
+    let dev = lab
+        .add_device("dev1")
+        .iface(
+            "eth0",
+            dc_eu,
+            Some(Impair::Manual {
+                rate: 10_000,
+                loss: 0.0,
+                latency: 60,
+            }),
+        )
+        .build()?;
     lab.build().await?;
 
-    let dc_us_ip = lab.dc_ix_ip(dc_us)?;
+    let dc_us_ip = lab.router_uplink_ip(dc_us)?;
     let r = SocketAddr::new(IpAddr::V4(dc_us_ip), 9020);
     let dc_us_ns = lab.node_ns(dc_us)?.to_string();
     lab.spawn_reflector(&dc_us_ns, r)?;
@@ -41,5 +44,3 @@ async fn main() -> Result<()> {
     );
     Ok(())
 }
-
- 
