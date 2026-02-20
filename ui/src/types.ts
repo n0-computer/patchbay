@@ -23,49 +23,50 @@ export interface IperfResult {
   delta_pct?: number
 }
 
-export interface RunResults {
-  run: string
-  sim_dir?: string
-  sim: string
-  transfers: TransferResult[]
-  iperf: IperfResult[]
-}
-
-export interface CombinedResults {
-  runs: RunResults[]
-}
-
 export interface SimResults {
   sim: string
   transfers: TransferResult[]
   iperf: IperfResult[]
 }
 
-// manifest.json — written by netsim into each run dir
-export type LogKind = 'tracing-ansi' | 'iroh-ndjson' | 'qlog-dir' | 'text'
+export type LogKind = 'transfer' | 'text' | 'qlog'
 
-export interface ManifestLog {
+export interface SimLogEntry {
   node: string
+  kind: LogKind | string
   path: string
-  kind: LogKind
 }
 
-export interface Manifest {
+export interface SimSummary {
+  sim: string
+  sim_dir: string
+  status: 'ok' | 'error' | string
+  started_at: string
+  ended_at: string
+  runtime_ms: number
+  logs: SimLogEntry[]
+  error?: {
+    phase?: string
+    message?: string
+  } | null
+}
+
+export interface ManifestSimSummary {
+  sim: string
+  sim_dir: string
+  status: string
+  runtime_ms?: number | null
+  sim_json?: string | null
+}
+
+export interface RunManifest {
   run: string
-  status?: string
+  status?: 'running' | 'done' | string
   started_at?: string
   ended_at?: string | null
   runtime_ms?: number | null
   success?: boolean | null
-  simulations?: Array<{
-    sim: string
-    sim_dir: string
-    status: string
-    runtime_ms?: number | null
-    sim_json?: string | null
-  }>
-  sim?: string
-  logs: ManifestLog[]
+  simulations: ManifestSimSummary[]
 }
 
 export interface ProgressSim {
@@ -89,50 +90,7 @@ export interface RunProgress {
   simulations: ProgressSim[]
 }
 
-// ── parsed log line types ─────────────────────────────────────────────────────
-
-export type LogLevel = 'ERROR' | 'WARN' | 'INFO' | 'DEBUG' | 'TRACE'
-
-/** One parsed entry from a tracing-formatted text log (plain or ANSI) */
-export interface TracingEntry {
-  type: 'tracing'
-  raw: string
-  timestamp: string
-  level: LogLevel
-  target: string
-  message: string
-}
-
-/** One event from iroh NDJSON log (kind-tagged) */
-export interface IrohEvent {
-  type: 'iroh'
-  raw: string
-  kind: string
-  [key: string]: unknown
-}
-
-/** Unparseable line — render verbatim */
-export interface RawLine {
-  type: 'raw'
-  raw: string
-}
-
-export type LogLine = TracingEntry | IrohEvent | RawLine
-
-// ── qlog ─────────────────────────────────────────────────────────────────────
-
-export interface QlogEvent {
-  time: number   // ms relative to connection start
-  name: string
-  data: Record<string, unknown>
-  tuple?: string
-}
-
-export interface QlogFile {
-  file_schema?: string
-  trace?: {
-    title?: string
-    vantage_point?: { type: string }
-    events?: QlogEvent[]
-  }
+export interface RunIndex {
+  workRoot: string
+  runs: string[]
 }

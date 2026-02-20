@@ -1,219 +1,216 @@
-import { useState, useEffect, useCallback } from 'react'
-import type { CombinedResults, SimResults, Manifest, ManifestLog, RunProgress } from './types'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import PerfTab from './components/PerfTab'
 import LogsTab from './components/LogsTab'
 import TimelineTab from './components/TimelineTab'
-import QlogTab from './components/QlogTab'
+import type { RunIndex, RunManifest, RunProgress, SimResults, SimSummary } from './types'
 
-type Tab = 'perf' | 'logs' | 'timeline' | 'qlog'
-
-function getHashTab(): Tab {
-  const h = window.location.hash.slice(1) as Tab
-  return ['perf', 'logs', 'timeline', 'qlog'].includes(h) ? h : 'perf'
-}
-
-function getRunParam(): string | null {
-  return new URLSearchParams(window.location.search).get('run')
-}
-
-function runBase(runName: string | null): string {
-  return runName ? `./${runName}/` : './'
-}
+type Tab = 'perf' | 'logs' | 'timeline'
 
 async function fetchJson<T>(url: string): Promise<T | null> {
   try {
-    const r = await fetch(url)
-    if (!r.ok) return null
-    return await r.json() as T
+    const res = await fetch(url)
+    if (!res.ok) return null
+    return await res.json() as T
   } catch {
     return null
   }
 }
 
-function inferManifest(results: SimResults, base: string): Manifest {
-  const logs: ManifestLog[] = [{ node: 'relay', path: `${base}logs/relay.log`, kind: 'tracing-ansi' }]
-  const seen = new Set<string>()
-  for (const t of results.transfers) {
-    if (!seen.has(t.provider)) {
-      seen.add(t.provider)
-      logs.push({ node: t.provider, path: `${base}logs/xfer/provider.log`, kind: 'iroh-ndjson' })
-      logs.push({ node: t.provider, path: `${base}logs/xfer/provider/`, kind: 'qlog-dir' })
-    }
-    const key = `${t.fetcher}-${t.id}`
-    if (!seen.has(key)) {
-      seen.add(key)
-      logs.push({ node: t.fetcher, path: `${base}logs/xfer/${t.fetcher}.log`, kind: 'iroh-ndjson' })
-      logs.push({ node: t.fetcher, path: `${base}logs/xfer/${t.fetcher}/`, kind: 'qlog-dir' })
-    }
-  }
-  return { sim: results.sim, run: '', logs }
+function baseForRun(run: string | null): string {
+  return run ? `./${run}/` : './'
 }
 
 export default function App() {
-  const [tab, setTab] = useState<Tab>(getHashTab)
-  const [combined, setCombined] = useState<CombinedResults | null>(null)
-  const [results, setResults] = useState<SimResults | null>(null)
-  const [manifest, setManifest] = useState<Manifest | null>(null)
+  const [runs, setRuns] = useState<string[]>([])
+  const [workRoot, setWorkRoot] = useState<string>('')
+  const [selectedRun, setSelectedRun] = useState<string | null>(null)
+
+  const [manifest, setManifest] = useState<RunManifest | null>(null)
   const [progress, setProgress] = useState<RunProgress | null>(null)
-  const [selectedRun, setSelectedRun] = useState<string | null>(getRunParam)
   const [selectedSimDir, setSelectedSimDir] = useState<string | null>(null)
-  const [loading, setLoading] = useState(true)
-  const [devRuns, setDevRuns] = useState<string[] | null>(null)
-  const [workRoot, setWorkRoot] = useState<string | null>(null)
+  const [simSummary, setSimSummary] = useState<SimSummary | null>(null)
+  const [simResults, setSimResults] = useState<SimResults | null>(null)
+  const [tab, setTab] = useState<Tab>('perf')
 
-  useEffect(() => {
-    const onHash = () => setTab(getHashTab())
-    window.addEventListener('hashchange', onHash)
-    return () => window.removeEventListener('hashchange', onHash)
-  }, [])
+  const refreshRuns = useCallback(async () => {
+    const idx = await fetchJson<RunIndex>('/__netsim/runs')
+    if (!idx) return
+    setRuns(idx.runs)
+    setWorkRoot(idx.workRoot)
+    if (!selectedRun && idx.runs.length > 0) setSelectedRun(idx.runs[0])
+  }, [selectedRun])
 
-  const switchTab = useCallback((t: Tab) => {
-    window.location.hash = t
-    setTab(t)
-  }, [])
-
-  const onSelectRun = useCallback((run: string) => {
-    const url = new URL(window.location.href)
-    if (run) {
-      url.searchParams.set('run', run)
-    } else {
-      url.searchParams.delete('run')
-    }
-    window.history.pushState({}, '', url)
-    setSelectedRun(run || null)
-    setSelectedSimDir(null)
-  }, [])
-
-  const refreshRunList = useCallback(async () => {
-    const data = await fetchJson<{ workRoot: string; runs: string[] }>('/__netsim/runs')
-    if (!data) return
-    setDevRuns(data.runs)
-    setWorkRoot(data.workRoot)
-    if (!selectedRun && data.runs.length > 0) {
-      onSelectRun(data.runs[0])
-    }
-  }, [onSelectRun, selectedRun])
-
-  useEffect(() => {
-    refreshRunList()
-    const id = setInterval(refreshRunList, 1500)
-    return () => clearInterval(id)
-  }, [refreshRunList])
-
-  const refreshData = useCallback(async () => {
-    setLoading(true)
-    const base = runBase(selectedRun)
-    const [c, p, m] = await Promise.all([
-      fetchJson<CombinedResults>(`${base}combined-results.json`),
+  const refreshRun = useCallback(async () => {
+    const base = baseForRun(selectedRun)
+    const [m, p] = await Promise.all([
+      fetchJson<RunManifest>(`${base}manifest.json`),
       fetchJson<RunProgress>(`${base}progress.json`),
-      fetchJson<Manifest>(`${base}manifest.json`),
     ])
-    setCombined(c)
+    setManifest(m)
     setProgress(p)
 
-    let simDir = selectedSimDir
-    if (!simDir) {
-      const running = p?.simulations?.find(s => s.status === 'running' && s.sim_dir)?.sim_dir
-      const firstDone = p?.simulations?.find(s => s.sim_dir)?.sim_dir
-      const firstManifest = m?.simulations?.find(s => s.sim_dir)?.sim_dir
-      simDir = running ?? firstDone ?? firstManifest ?? null
-      setSelectedSimDir(simDir)
-    }
+    const nextSim =
+      selectedSimDir
+      ?? p?.simulations.find((s) => s.status === 'running' && s.sim_dir)?.sim_dir
+      ?? p?.simulations.find((s) => s.sim_dir)?.sim_dir
+      ?? m?.simulations.find((s) => s.sim_dir)?.sim_dir
+      ?? null
+    setSelectedSimDir(nextSim)
+  }, [selectedRun, selectedSimDir])
 
-    if (simDir) {
-      const simBase = `${base}${simDir}/`
-      const r = await fetchJson<SimResults>(`${simBase}results.json`)
-      setResults(r)
-      setManifest(r ? inferManifest(r, simBase) : null)
-    } else {
-      setResults(null)
-      setManifest(null)
+  const refreshSim = useCallback(async () => {
+    if (!selectedRun || !selectedSimDir) {
+      setSimSummary(null)
+      setSimResults(null)
+      return
     }
-    setLoading(false)
+    const simBase = `${baseForRun(selectedRun)}${selectedSimDir}/`
+    const [summary, results] = await Promise.all([
+      fetchJson<SimSummary>(`${simBase}sim.json`),
+      fetchJson<SimResults>(`${simBase}results.json`),
+    ])
+    setSimSummary(summary)
+    setSimResults(results)
   }, [selectedRun, selectedSimDir])
 
   useEffect(() => {
-    refreshData()
-  }, [refreshData])
+    refreshRuns()
+    const id = setInterval(refreshRuns, 2000)
+    return () => clearInterval(id)
+  }, [refreshRuns])
+
+  useEffect(() => {
+    refreshRun()
+  }, [refreshRun])
+
+  useEffect(() => {
+    refreshSim()
+  }, [refreshSim])
 
   useEffect(() => {
     if (progress?.status !== 'running') return
-    const id = setInterval(refreshData, 1000)
+    const id = setInterval(() => {
+      refreshRun()
+      refreshSim()
+    }, 1000)
     return () => clearInterval(id)
-  }, [progress?.status, refreshData])
+  }, [progress?.status, refreshRun, refreshSim])
 
-  const combinedRunNames = combined?.runs.map(r => r.run) ?? []
-  const allRunNames = devRuns
-    ? [...new Set([...devRuns, ...combinedRunNames])]
-    : combinedRunNames
+  const simRows = useMemo(() => {
+    const byProgress = new Map((progress?.simulations ?? []).map((s) => [s.sim_dir ?? '', s]))
+    const fromManifest = manifest?.simulations ?? []
+    return fromManifest.map((s) => {
+      const p = byProgress.get(s.sim_dir)
+      return {
+        sim: s.sim,
+        sim_dir: s.sim_dir,
+        status: p?.status ?? s.status,
+      }
+    })
+  }, [manifest, progress])
+
+  const runBase = baseForRun(selectedRun)
+  const showSimView = Boolean(selectedSimDir)
 
   return (
     <div className="app">
       <div className="topbar">
         <h1>netsim</h1>
+        <select
+          value={selectedRun ?? ''}
+          onChange={(e) => {
+            setSelectedRun(e.target.value || null)
+            setSelectedSimDir(null)
+          }}
+        >
+          <option value="">select run</option>
+          {runs.map((r) => <option key={r} value={r}>{r}</option>)}
+        </select>
         {progress && (
           <span style={{ color: 'var(--text-muted)', fontSize: 12 }}>
             {progress.status} · {progress.completed}/{progress.total}
             {progress.current_sim ? ` · ${progress.current_sim}` : ''}
           </span>
         )}
-
-        {allRunNames.length > 0 && (
-          <span style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12 }}>
-            <span style={{ color: 'var(--text-muted)' }}>run</span>
-            <select value={selectedRun ?? ''} onChange={e => onSelectRun(e.target.value)}>
-              <option value="">— overview —</option>
-              {allRunNames.map(r => <option key={r} value={r}>{r}</option>)}
-            </select>
-          </span>
-        )}
-
-        {workRoot && (
-          <span
-            title={workRoot}
-            style={{
-              marginLeft: 'auto', fontSize: 10, color: 'var(--text-muted)',
-              maxWidth: 300, overflow: 'hidden', textOverflow: 'ellipsis',
-              whiteSpace: 'nowrap', direction: 'rtl', textAlign: 'right',
-            }}
-          >
-            {workRoot}
-          </span>
-        )}
+        {workRoot && <span style={{ marginLeft: 'auto', color: 'var(--text-muted)' }}>{workRoot}</span>}
       </div>
 
-      <div className="tabs">
-        {(['perf', 'logs', 'timeline', 'qlog'] as Tab[]).map(t => (
-          <button
-            key={t}
-            className={`tab-btn${tab === t ? ' active' : ''}`}
-            onClick={() => switchTab(t)}
-            disabled={t !== 'perf' && !results}
-          >
-            {t}
-          </button>
-        ))}
-      </div>
+      {!showSimView && (
+        <div className="perf-layout">
+          <div className="section">
+            <div className="section-header">simulations</div>
+            <div className="tbl-wrap">
+              <table>
+                <thead>
+                  <tr><th>sim</th><th>status</th><th>open</th></tr>
+                </thead>
+                <tbody>
+                  {simRows.map((row) => (
+                    <tr key={row.sim_dir}>
+                      <td>{row.sim}</td>
+                      <td>{row.status}</td>
+                      <td>
+                        <button className="btn" onClick={() => setSelectedSimDir(row.sim_dir)}>
+                          open
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      )}
 
-      <div className="tab-content">
-        {loading && <div className="loading">loading…</div>}
-        {!loading && tab === 'perf' && (
-          <PerfTab
-            results={results}
-            combined={combined}
-            onSelectRun={onSelectRun}
-          />
-        )}
-        {!loading && tab === 'logs' && results && manifest && (
-          <LogsTab manifest={manifest} base={runBase(selectedRun)} />
-        )}
-        {!loading && tab === 'timeline' && results && manifest && (
-          <TimelineTab manifest={manifest} base={runBase(selectedRun)} results={results} />
-        )}
-        {!loading && tab === 'qlog' && results && manifest && (
-          <QlogTab manifest={manifest} base={runBase(selectedRun)} />
-        )}
-      </div>
+      {showSimView && (
+        <div style={{ display: 'flex', flex: 1, minHeight: 0 }}>
+          <div className="logs-sidebar" style={{ width: 260 }}>
+            <div className="node-label">simulations</div>
+            {simRows.map((row) => (
+              <div
+                key={row.sim_dir}
+                className={`file-item${selectedSimDir === row.sim_dir ? ' active' : ''}`}
+                onClick={() => setSelectedSimDir(row.sim_dir)}
+              >
+                {row.sim} [{row.status}]
+              </div>
+            ))}
+            <div className="node-group">
+              <div className="file-item" onClick={() => setSelectedSimDir(null)}>← back to run table</div>
+            </div>
+          </div>
+
+          <div style={{ display: 'flex', flexDirection: 'column', flex: 1, minWidth: 0 }}>
+            <div className="tabs">
+              {(['perf', 'logs', 'timeline'] as Tab[]).map((t) => (
+                <button
+                  key={t}
+                  className={`tab-btn${tab === t ? ' active' : ''}`}
+                  onClick={() => setTab(t)}
+                >
+                  {t}
+                </button>
+              ))}
+            </div>
+            <div className="tab-content">
+              {tab === 'perf' && <PerfTab results={simResults} />}
+              {tab === 'logs' && (
+                <LogsTab
+                  base={`${runBase}${selectedSimDir}/`}
+                  logs={simSummary?.logs ?? []}
+                />
+              )}
+              {tab === 'timeline' && (
+                <TimelineTab
+                  base={`${runBase}${selectedSimDir}/`}
+                  logs={simSummary?.logs ?? []}
+                />
+              )}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

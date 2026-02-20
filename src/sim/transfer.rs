@@ -32,12 +32,7 @@ pub struct TransferHandle {
 }
 
 /// Start a transfer and return a handle that is finalized in `wait-for`.
-pub fn start_transfer(
-    state: &mut SimState,
-    step: &Step,
-    log_dir: &Path,
-    binary: &Path,
-) -> Result<TransferHandle> {
+pub fn start_transfer(state: &mut SimState, step: &Step, binary: &Path) -> Result<TransferHandle> {
     let step_id = step.id.as_deref().context("iroh-transfer: missing id")?;
     let provider_dev = step
         .provider
@@ -45,13 +40,10 @@ pub fn start_transfer(
         .context("iroh-transfer: missing provider")?;
     let fetcher_devs = resolve_fetchers(step)?;
 
-    let step_dir = log_dir.join(sanitize_for_file(step_id));
-    std::fs::create_dir_all(&step_dir)
-        .with_context(|| format!("create transfer step dir {}", step_dir.display()))?;
-    let provider_logs_dir = step_dir.join("provider");
-    let provider_stdio_log = step_dir.join("provider.log");
+    let provider_logs_dir = node_transfer_dir(&state.work_dir, provider_dev, step_id, "provider");
     std::fs::create_dir_all(&provider_logs_dir)
         .with_context(|| format!("create provider logs dir {}", provider_logs_dir.display()))?;
+    let provider_stdio_log = provider_logs_dir.join("out.log");
 
     let mut provider_cmd = std::process::Command::new(binary);
     let mut provider_args = vec![
@@ -109,10 +101,15 @@ pub fn start_transfer(
 
     let mut fetchers = Vec::with_capacity(fetcher_devs.len());
     for (idx, fetcher_dev) in fetcher_devs.iter().enumerate() {
-        let fetcher_log = step_dir.join(format!("fetcher-{}", idx));
+        let fetcher_log = node_transfer_dir(
+            &state.work_dir,
+            fetcher_dev,
+            step_id,
+            &format!("fetcher-{}", idx),
+        );
         std::fs::create_dir_all(&fetcher_log)
             .with_context(|| format!("create fetcher logs dir {}", fetcher_log.display()))?;
-        let fetcher_stdio_log = step_dir.join(format!("fetcher-{}.log", idx));
+        let fetcher_stdio_log = fetcher_log.join("out.log");
 
         let mut fetcher_cmd = std::process::Command::new(binary);
         let mut fetcher_args = vec![
@@ -256,7 +253,6 @@ fn add_env_to_cmd(cmd: &mut std::process::Command, state: &SimState, keylog_suff
     cmd.env("RUST_LOG", rust_log);
     let keylog = state
         .work_dir
-        .join("logs")
         .join(format!("keylog_{}.txt", sanitize_for_file(keylog_suffix)));
     cmd.env("SSLKEYLOGFILE", keylog);
 }
@@ -388,6 +384,17 @@ fn parse_endpoint_bound_line(line: &str) -> Option<EndpointBoundInfo> {
         endpoint_id,
         direct_addr,
     })
+}
+
+fn node_transfer_dir(work_dir: &Path, node: &str, step_id: &str, role: &str) -> PathBuf {
+    work_dir
+        .join("nodes")
+        .join(sanitize_for_file(node))
+        .join(format!(
+            "transfer-{}-{}",
+            sanitize_for_file(step_id),
+            sanitize_for_file(role)
+        ))
 }
 
 fn sanitize_for_file(name: &str) -> String {

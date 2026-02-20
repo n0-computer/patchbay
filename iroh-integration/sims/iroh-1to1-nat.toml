@@ -18,7 +18,7 @@ id        = "xfer"
 provider  = "provider"
 fetcher   = "fetcher"
 relay_url = "http://$NETSIM_IP_relay:3340"
-fetch_args = ["--duration=10s"]
+fetch_args = ["--duration=10"]
 
 [[step]]
 action = "wait-for"

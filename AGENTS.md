@@ -125,6 +125,11 @@ when a task is ready run the checks then ask to commit, don't commit without ask
 after confirmation commit with "feat: short description" etc and some details afterwards. elaborate open issues a little, explain decisions taken concisely
 
 ## Recent Changes
+- Refactored sim artifact layout + UI flow to be manifest/progress-driven:
+  - Sim logs now write under per-node directories: `<sim>/nodes/<node>/...`; generic node stdout/stderr goes to `out.log`, and transfer runs emit under `transfer-<step>-<role>/` with their own `out.log` + iroh `--logs-path` artifacts (`src/sim/runner.rs`, `src/sim/transfer.rs`).
+  - `sim.json` now includes a `logs[]` index (`node`, `kind`, `path`) so UI can render file browsing without heuristics (`src/sim/runner.rs`).
+  - UI was reworked to: run-level main table (all sims + status), click-through sim workspace with left sim sidebar, and tabs limited to **Perf / Logs / Timeline** (`ui/src/App.tsx`, `ui/src/components/*.tsx`, `ui/src/types.ts`).
+  - Logs tab now handles all manifest-listed files; `kind=transfer` logs get tracing/event parsing, `kind=qlog` gets parsed event table, other files use plain text rendering.
 - VM ownership split completed in CLI surface:
   - Removed `netsim run-vm` from `src/main.rs` and deleted obsolete `src/vm.rs`; VM execution remains in `crates/netsim-vm`.
   - Added `serve` subcommands to both `netsim` and `netsim-vm`, backed by shared embedded UI server code in `src/serve.rs` (`include_str!("../ui/dist/index.html")`).
@@ -161,7 +166,7 @@ after confirmation commit with "feat: short description" etc and some details af
 - Updated `Makefile.toml` VM tasks to invoke `cargo run -p netsim-vm -- ...` (`run-vm`, `test-vm`, `setup-vm`, `vm-status`, `vm-down`) instead of `qemu-vm.sh`.
 - Sim runner output layout was refactored to invocation-scoped roots:
   - `netsim run ...` now creates `sim-<yymmdd>-<hhmmss>[-N]` under the selected work dir, keeps `latest` as a relative symlink to that run root, writes one subdirectory per sim inside the run root, and writes `combined-results.{json,md}` into that same run root (`src/sim/runner.rs`, `src/sim/report.rs`).
-- `kind = "iroh-transfer"` no longer injects an implicit `--duration=10s` or uses `step.duration`; transfer duration is now passed explicitly via `fetch_args` when needed (e.g. `fetch_args = ["--duration=20s"]`) (`src/sim/transfer.rs`, `iroh-integration/sims/*.toml`).
+- `kind = "iroh-transfer"` no longer injects an implicit `--duration=10` or uses `step.duration`; transfer duration is now passed explicitly via `fetch_args` when needed (e.g. `fetch_args = ["--duration=20"]`) (`src/sim/transfer.rs`, `iroh-integration/sims/*.toml`).
 - Added optional Chuck-compatible reporting output for sim runs:
   - New `[sim] chuck_compat = true` emits `report/<sim>__transfer.json` and `report/integration_<sim>__transfer.json` alongside standard netsim reports (`src/sim/mod.rs`, `src/sim/report.rs`, `src/sim/runner.rs`).
 - Ported legacy iroh/chuck JSON suites from `resources/iroh-sims` into current TOML format under `iroh-integration/sims-ported/` (63 case files) with conversion notes in `iroh-integration/sims-ported/PORTED_FROM_RESOURCES.md`.

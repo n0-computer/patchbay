@@ -124,7 +124,7 @@ pub struct Step {
     pub relay_url: Option<String>,
     /// Extra CLI arguments passed to the fetcher binary.
     ///
-    /// Use this for transfer-runtime knobs (for example, `--duration=20s`).
+    /// Use this for transfer-runtime knobs (for example, `--duration=20`).
     pub fetch_args: Option<Vec<String>>,
     /// Connection strategy: `"endpoint_id"` (default) or
     /// `"iroh_transfer_with_addrs"`.

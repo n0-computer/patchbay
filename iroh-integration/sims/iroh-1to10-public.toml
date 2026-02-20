@@ -21,7 +21,7 @@ fetchers = [
   "fetcher-8",
   "fetcher-9",
 ]
-fetch_args = ["--duration=20s"]
+fetch_args = ["--duration=20"]
 
 [[step]]
 action = "wait-for"

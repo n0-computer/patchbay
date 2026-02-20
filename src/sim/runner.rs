@@ -93,6 +93,13 @@ struct SimSetupSummary {
 }
 
 #[derive(Debug, Clone, Serialize)]
+struct SimLogEntry {
+    node: String,
+    kind: String,
+    path: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
 struct SimSummary {
     sim: String,
     sim_dir: String,
@@ -101,6 +108,7 @@ struct SimSummary {
     ended_at: String,
     runtime_ms: u128,
     setup: SimSetupSummary,
+    logs: Vec<SimLogEntry>,
     error: Option<SimFailureInfo>,
 }
 
@@ -362,15 +370,10 @@ async fn run_single_sim(
     tokio::fs::create_dir_all(&run_work_dir)
         .await
         .context("create work dir")?;
-    let log_dir = run_work_dir.join("logs");
-    tokio::fs::create_dir_all(&log_dir)
-        .await
-        .context("create log dir")?;
 
     let execute = execute_single_sim(
         &sim_path,
         &run_work_dir,
-        &log_dir,
         &sim_name,
         parsed_sim,
         setup.clone(),
@@ -392,6 +395,7 @@ async fn run_single_sim(
                 ended_at: format_timestamp(SystemTime::now()),
                 runtime_ms: started_instant.elapsed().as_millis(),
                 setup: resolved_setup,
+                logs: collect_sim_logs(&run_work_dir)?,
                 error: None,
             };
             write_sim_summary(&run_work_dir, &summary).await?;
@@ -416,6 +420,7 @@ async fn run_single_sim(
                 ended_at: format_timestamp(SystemTime::now()),
                 runtime_ms: started_instant.elapsed().as_millis(),
                 setup: resolved_setup,
+                logs: collect_sim_logs(&run_work_dir).unwrap_or_default(),
                 error: Some(failure),
             };
             write_sim_summary(&run_work_dir, &summary).await?;
@@ -519,7 +524,6 @@ fn prepare_sim_dir(run_root: &Path, sim_name: &str) -> Result<PathBuf> {
 async fn execute_single_sim(
     sim_path: &Path,
     run_work_dir: &Path,
-    log_dir: &Path,
     sim_name: &str,
     sim: SimFile,
     setup_base: SimSetupSummary,
@@ -572,7 +576,7 @@ async fn execute_single_sim(
 
     // ── Execute steps ────────────────────────────────────────────────────
     for (idx, step) in sim.steps.iter().enumerate() {
-        if let Err(err) = execute_step(&mut state, step, log_dir) {
+        if let Err(err) = execute_step(&mut state, step) {
             let step_info = StepFailureInfo {
                 index: idx,
                 action: step.action.clone(),
@@ -671,6 +675,7 @@ async fn finalize_failed_sim(
             sim_path: sim_path.display().to_string(),
             ..setup
         },
+        logs: collect_sim_logs(&run_work_dir).unwrap_or_default(),
         error: Some(failure),
     };
     write_sim_summary(&run_work_dir, &summary).await?;
@@ -1005,7 +1010,7 @@ async fn stage_override_binary(name: &str, source: &Path, work_dir: &Path) -> Re
 // Step executor
 // ─────────────────────────────────────────────
 
-fn execute_step(state: &mut SimState, step: &Step, log_dir: &Path) -> Result<()> {
+fn execute_step(state: &mut SimState, step: &Step) -> Result<()> {
     tracing::info!(
         action = %step.action,
         id = ?step.id,
@@ -1029,7 +1034,7 @@ fn execute_step(state: &mut SimState, step: &Step, log_dir: &Path) -> Result<()>
                 "sim: run command"
             );
             let mut cmd = prepare_cmd(&cmd_parts, &step.env, state)?;
-            let log_path = step_log_path(step, log_dir);
+            let log_path = node_out_log_path(&state.work_dir, device)?;
             let log = OpenOptions::new()
                 .create(true)
                 .append(true)
@@ -1057,7 +1062,7 @@ fn execute_step(state: &mut SimState, step: &Step, log_dir: &Path) -> Result<()>
                     .get("transfer")
                     .cloned()
                     .ok_or_else(|| anyhow!("iroh-transfer: no binary named 'transfer'"))?;
-                let handle = start_transfer(state, step, log_dir, &binary)?;
+                let handle = start_transfer(state, step, &binary)?;
                 state.transfers.insert(id.to_string(), handle);
                 return Ok(());
             }
@@ -1074,7 +1079,7 @@ fn execute_step(state: &mut SimState, step: &Step, log_dir: &Path) -> Result<()>
                 "sim: spawn command"
             );
             let mut cmd = prepare_cmd(&cmd_parts, &step.env, state)?;
-            let log_path = step_log_path(step, log_dir);
+            let log_path = node_out_log_path(&state.work_dir, device)?;
             if step.captures.is_empty() {
                 let log = OpenOptions::new()
                     .create(true)
@@ -1405,19 +1410,69 @@ fn shell_escape(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\"'\"'"))
 }
 
-fn step_log_path(step: &Step, log_dir: &Path) -> PathBuf {
-    let file_stem = if let Some(id) = &step.id {
-        id.clone()
-    } else {
-        let action = sanitize_for_filename(&step.action);
-        let dev = step
-            .device
-            .as_deref()
-            .map(sanitize_for_filename)
-            .unwrap_or_else(|| "step".to_string());
-        format!("{}_{}", action, dev)
-    };
-    log_dir.join(format!("{}.log", sanitize_for_filename(&file_stem)))
+fn node_out_log_path(work_dir: &Path, node: &str) -> Result<PathBuf> {
+    let node_dir = work_dir.join("nodes").join(sanitize_for_filename(node));
+    std::fs::create_dir_all(&node_dir)
+        .with_context(|| format!("create node log dir {}", node_dir.display()))?;
+    Ok(node_dir.join("out.log"))
+}
+
+fn collect_sim_logs(sim_dir: &Path) -> Result<Vec<SimLogEntry>> {
+    let nodes_dir = sim_dir.join("nodes");
+    if !nodes_dir.is_dir() {
+        return Ok(vec![]);
+    }
+    let mut out = Vec::new();
+    for node_entry in std::fs::read_dir(&nodes_dir)
+        .with_context(|| format!("read node dir {}", nodes_dir.display()))?
+    {
+        let node_entry = node_entry?;
+        let node_path = node_entry.path();
+        if !node_path.is_dir() {
+            continue;
+        }
+        let Some(node_name) = node_path.file_name().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        collect_node_logs(sim_dir, node_name, &node_path, &mut out)?;
+    }
+    out.sort_by(|a, b| a.path.cmp(&b.path));
+    Ok(out)
+}
+
+fn collect_node_logs(
+    sim_dir: &Path,
+    node_name: &str,
+    dir: &Path,
+    out: &mut Vec<SimLogEntry>,
+) -> Result<()> {
+    for entry in
+        std::fs::read_dir(dir).with_context(|| format!("read node logs {}", dir.display()))?
+    {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_dir() {
+            collect_node_logs(sim_dir, node_name, &path, out)?;
+            continue;
+        }
+        let rel = path
+            .strip_prefix(sim_dir)
+            .with_context(|| format!("compute relative path for {}", path.display()))?;
+        let rel_str = rel.to_string_lossy().replace('\\', "/");
+        let kind = if rel_str.ends_with(".qlog") || rel_str.contains("/qlog/") {
+            "qlog"
+        } else if rel_str.contains("/transfer-") {
+            "transfer"
+        } else {
+            "text"
+        };
+        out.push(SimLogEntry {
+            node: node_name.to_string(),
+            kind: kind.to_string(),
+            path: rel_str,
+        });
+    }
+    Ok(())
 }
 
 fn sanitize_for_filename(s: &str) -> String {
