@@ -50,6 +50,8 @@ use tracing::debug;
 
 /// Shared binary/source path parsing and target shortcut resolution helpers.
 pub mod assets;
+/// Shared URL-binary cache helpers.
+pub mod binary_cache;
 /// Exposes low-level topology and namespace construction primitives.
 pub mod core;
 mod netns;

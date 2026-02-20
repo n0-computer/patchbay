@@ -1,5 +1,6 @@
 use anyhow::{bail, Context, Result};
 use netsim::assets::{resolve_binary_source_path, PathResolveMode};
+use netsim::binary_cache::cached_binary_for_url;
 use std::path::{Path, PathBuf};
 
 use crate::sim::BinarySpec;
@@ -47,93 +48,11 @@ pub async fn build_local_binary(name: &str, source_dir: &Path, work_dir: &Path) 
 }
 
 async fn download_binary(url: &str, work_dir: &Path) -> Result<PathBuf> {
-    let bins_dir = work_dir.join("bins");
-    tokio::fs::create_dir_all(&bins_dir)
+    let url = url.to_string();
+    let work_dir = work_dir.to_path_buf();
+    tokio::task::spawn_blocking(move || cached_binary_for_url(&url, &work_dir))
         .await
-        .context("create bins dir")?;
-
-    // Derive a local filename from the URL.
-    let filename = url
-        .rsplit('/')
-        .next()
-        .unwrap_or("binary")
-        .split('?')
-        .next()
-        .unwrap_or("binary");
-    let dest = bins_dir.join(filename);
-
-    if dest.exists() {
-        tracing::debug!(?dest, "binary already cached, skipping download");
-        // If it's an archive, find the actual binary inside.
-        if filename.ends_with(".tar.gz") || filename.ends_with(".tgz") {
-            return find_in_archive(&dest, &bins_dir).await;
-        }
-        return Ok(dest);
-    }
-
-    tracing::info!(url, dest = %dest.display(), "downloading binary");
-    let response = reqwest::get(url).await.context("GET binary url")?;
-    if !response.status().is_success() {
-        bail!("download failed: {} {}", url, response.status());
-    }
-    let bytes = response.bytes().await.context("read binary response")?;
-    tokio::fs::write(&dest, &bytes)
-        .await
-        .context("write binary")?;
-
-    if filename.ends_with(".tar.gz") || filename.ends_with(".tgz") {
-        find_in_archive(&dest, &bins_dir).await
-    } else {
-        // Mark as executable.
-        set_executable(&dest)?;
-        Ok(dest)
-    }
-}
-
-async fn find_in_archive(archive: &Path, extract_dir: &Path) -> Result<PathBuf> {
-    let archive = archive.to_owned();
-    let extract_dir = extract_dir.to_owned();
-    tokio::task::spawn_blocking(move || extract_first_binary(&archive, &extract_dir))
-        .await
-        .context("join extract task")?
-}
-
-fn extract_first_binary(archive: &Path, extract_dir: &Path) -> Result<PathBuf> {
-    use flate2::read::GzDecoder;
-    use tar::Archive;
-
-    let file = std::fs::File::open(archive).context("open archive")?;
-    let gz = GzDecoder::new(file);
-    let mut tar = Archive::new(gz);
-
-    let mut found: Option<PathBuf> = None;
-    for entry in tar.entries().context("read tar entries")? {
-        let mut entry = entry.context("read tar entry")?;
-        if !entry.header().entry_type().is_file() {
-            continue;
-        }
-        let path = entry.path().context("entry path")?.into_owned();
-        // Skip directories and dotfiles
-        if path.components().count() == 0 {
-            continue;
-        }
-        let name = path.file_name().unwrap_or_default().to_string_lossy();
-        if name.starts_with('.') {
-            continue;
-        }
-        // Take the first regular file that looks like a binary (no extension
-        // or known extension list)
-        let ext = path.extension().unwrap_or_default().to_string_lossy();
-        if ext.is_empty() || ext == "bin" {
-            let dest = extract_dir.join(&*name);
-            entry.unpack(&dest).context("unpack entry")?;
-            set_executable(&dest)?;
-            found = Some(dest);
-            break;
-        }
-    }
-
-    found.ok_or_else(|| anyhow::anyhow!("no binary found in archive {}", archive.display()))
+        .context("join cached URL binary task")?
 }
 
 fn build_local_binary_blocking(name: &str, source_dir: &Path, work_dir: &Path) -> Result<PathBuf> {
@@ -302,19 +221,6 @@ fn git_clone_or_update(repo: &str, commit: &str, dir: &Path) -> Result<()> {
     Ok(())
 }
 
-fn set_executable(path: &Path) -> Result<()> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut perms = std::fs::metadata(path)
-            .context("stat binary")?
-            .permissions();
-        perms.set_mode(perms.mode() | 0o111);
-        std::fs::set_permissions(path, perms).context("chmod binary")?;
-    }
-    Ok(())
-}
-
 fn artifact_path_from_target_dir(
     target_dir: &str,
     binary_name: &str,
@@ -349,6 +255,42 @@ fn local_target_artifact_path(
     }
     path.push(binary_name);
     path
+}
+
+#[cfg(test)]
+fn extract_first_binary(archive: &Path, extract_dir: &Path) -> Result<PathBuf> {
+    use flate2::read::GzDecoder;
+    use tar::Archive;
+
+    let file = std::fs::File::open(archive).context("open archive")?;
+    let gz = GzDecoder::new(file);
+    let mut tar = Archive::new(gz);
+
+    for entry in tar.entries().context("read tar entries")? {
+        let mut entry = entry.context("read tar entry")?;
+        if !entry.header().entry_type().is_file() {
+            continue;
+        }
+        let path = entry.path().context("entry path")?.into_owned();
+        let name = path.file_name().unwrap_or_default().to_string_lossy();
+        if name.is_empty() || name.starts_with('.') {
+            continue;
+        }
+        let ext = path.extension().unwrap_or_default().to_string_lossy();
+        if ext.is_empty() || ext == "bin" {
+            let dest = extract_dir.join(&*name);
+            entry.unpack(&dest).context("unpack entry")?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mut perms = std::fs::metadata(&dest)?.permissions();
+                perms.set_mode(perms.mode() | 0o111);
+                std::fs::set_permissions(&dest, perms)?;
+            }
+            return Ok(dest);
+        }
+    }
+    bail!("no binary found in archive {}", archive.display())
 }
 
 #[cfg(test)]

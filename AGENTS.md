@@ -125,6 +125,12 @@ when a task is ready run the checks then ask to commit, don't commit without ask
 after confirmation commit with "feat: short description" etc and some details afterwards. elaborate open issues a little, explain decisions taken concisely
 
 ## Recent Changes
+- Cleanup logging verbosity adjusted:
+  - `netsim cleanup` progress logs in `src/main.rs` now use `tracing::debug!` instead of `println!`.
+- Shared URL binary cache added and reused across `netsim` + `netsim-vm`:
+  - New `src/binary_cache.rs` caches URL artifacts under a shared work-root cache (`.binary-cache/<url-hash>/...`) and reuses extracted binaries across sims/runs.
+  - `src/sim/build.rs` now resolves URL binary specs through this shared cache.
+  - `crates/netsim-vm/src/util.rs` now stages fetch overrides from the same shared cache instead of re-downloading per sim.
 - Refactored sim artifact layout + UI flow to be manifest/progress-driven:
   - Sim logs now write under per-node directories: `<sim>/nodes/<node>/...`; generic node stdout/stderr goes to `out.log`, and transfer runs emit under `transfer-<step>-<role>/` with their own `out.log` + iroh `--logs-path` artifacts (`src/sim/runner.rs`, `src/sim/transfer.rs`).
   - `sim.json` now includes a `logs[]` index (`node`, `kind`, `path`) so UI can render file browsing without heuristics (`src/sim/runner.rs`).

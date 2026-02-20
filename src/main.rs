@@ -135,9 +135,9 @@ fn cleanup_command(prefixes: Vec<String>) -> Result<()> {
 
 fn perform_cleanup(prefixes: &[String]) -> Result<()> {
     if prefixes.is_empty() {
-        println!("netsim cleanup: starting (prefixes: registered)");
+        tracing::debug!("netsim cleanup: starting (prefixes: registered)");
     } else {
-        println!(
+        tracing::debug!(
             "netsim cleanup: starting (prefixes: {})",
             prefixes.join(", ")
         );
@@ -153,7 +153,7 @@ fn perform_cleanup(prefixes: &[String]) -> Result<()> {
     if !prefixes.is_empty() {
         resources.cleanup_everything();
     }
-    println!("netsim cleanup: done");
+    tracing::debug!("netsim cleanup: done");
     Ok(())
 }
 

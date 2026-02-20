@@ -1,11 +1,10 @@
 use anyhow::{bail, Context, Result};
-use flate2::read::GzDecoder;
 use netsim::assets::{
     parse_binary_overrides, resolve_binary_source_path, BinaryOverride, PathResolveMode,
 };
+use netsim::binary_cache::cached_binary_for_url;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use tar::Archive;
 
 pub fn stage_binary_overrides(
     raw: &[String],
@@ -21,7 +20,7 @@ pub fn stage_binary_overrides(
     for (name, ov) in parsed {
         let staged = match ov {
             BinaryOverride::Path(src) => stage_path_binary(&name, &src, &bins_dir)?,
-            BinaryOverride::Fetch(url) => stage_fetch_binary(&url, &bins_dir)?,
+            BinaryOverride::Fetch(url) => stage_fetch_binary(&name, &url, work_dir, &bins_dir)?,
             BinaryOverride::Build(src) => {
                 stage_build_binary(&name, &src, &bins_dir, target_dir, target)?
             }
@@ -51,32 +50,17 @@ fn stage_path_binary(name: &str, src: &Path, bins_dir: &Path) -> Result<PathBuf>
     Ok(dest)
 }
 
-fn stage_fetch_binary(url: &str, bins_dir: &Path) -> Result<PathBuf> {
-    let filename = url
-        .rsplit('/')
-        .next()
-        .unwrap_or("binary")
-        .split('?')
-        .next()
+fn stage_fetch_binary(name: &str, url: &str, work_dir: &Path, bins_dir: &Path) -> Result<PathBuf> {
+    let cached = cached_binary_for_url(url, work_dir)?;
+    let file_name = cached
+        .file_name()
+        .and_then(|s| s.to_str())
         .unwrap_or("binary");
-    let archive = bins_dir.join(filename);
-    if !archive.exists() {
-        let status = Command::new("curl")
-            .args(["-fL", url, "-o"])
-            .arg(&archive)
-            .status()
-            .with_context(|| format!("download {}", url))?;
-        if !status.success() {
-            bail!("download failed: {}", url);
-        }
-    }
-
-    if filename.ends_with(".tar.gz") || filename.ends_with(".tgz") {
-        extract_first_binary(&archive, bins_dir)
-    } else {
-        set_executable(&archive)?;
-        Ok(archive)
-    }
+    let dest = bins_dir.join(format!("{}-fetch-{}", name, file_name));
+    std::fs::copy(&cached, &dest)
+        .with_context(|| format!("copy {} -> {}", cached.display(), dest.display()))?;
+    set_executable(&dest)?;
+    Ok(dest)
 }
 
 fn stage_build_binary(
@@ -128,32 +112,6 @@ fn stage_build_binary(
         .with_context(|| format!("copy {} -> {}", built.display(), dest.display()))?;
     set_executable(&dest)?;
     Ok(dest)
-}
-
-fn extract_first_binary(archive: &Path, extract_dir: &Path) -> Result<PathBuf> {
-    let file = std::fs::File::open(archive).context("open archive")?;
-    let gz = GzDecoder::new(file);
-    let mut tar = Archive::new(gz);
-
-    for entry in tar.entries().context("read tar entries")? {
-        let mut entry = entry.context("read tar entry")?;
-        if !entry.header().entry_type().is_file() {
-            continue;
-        }
-        let path = entry.path().context("entry path")?.into_owned();
-        let name = path.file_name().unwrap_or_default().to_string_lossy();
-        if name.is_empty() || name.starts_with('.') {
-            continue;
-        }
-        let ext = path.extension().unwrap_or_default().to_string_lossy();
-        if ext.is_empty() || ext == "bin" {
-            let dest = extract_dir.join(&*name);
-            entry.unpack(&dest).context("unpack entry")?;
-            set_executable(&dest)?;
-            return Ok(dest);
-        }
-    }
-    bail!("no executable binary found in {}", archive.display())
 }
 
 pub fn set_executable(path: &Path) -> Result<()> {
