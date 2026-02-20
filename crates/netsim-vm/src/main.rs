@@ -2,9 +2,11 @@ mod util;
 mod vm;
 
 use std::path::PathBuf;
+use std::time::Duration;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+use netsim::serve::start_ui_server;
 
 #[derive(Parser)]
 #[command(name = "netsim-vm", about = "Standalone VM runner for netsim")]
@@ -43,6 +45,19 @@ enum Command {
         recreate: bool,
         #[arg(long, default_value = "latest")]
         netsim_version: String,
+        #[arg(long, default_value_t = false)]
+        open: bool,
+        #[arg(long, default_value = "127.0.0.1:0")]
+        bind: String,
+    },
+    /// Serve embedded UI + work directory over HTTP.
+    Serve {
+        #[arg(long, default_value = ".netsim-work")]
+        work_dir: PathBuf,
+        #[arg(long, default_value = "127.0.0.1:8080")]
+        bind: String,
+        #[arg(long, default_value_t = false)]
+        open: bool,
     },
     /// Build and run tests in VM (replaces legacy test-vm flow).
     Test {
@@ -73,13 +88,46 @@ fn main() -> Result<()> {
             binary_overrides,
             recreate,
             netsim_version,
-        } => vm::run_sims_in_vm(vm::RunVmArgs {
-            sim_inputs: sims,
+            open,
+            bind,
+        } => {
+            let _server = if open {
+                let srv = start_ui_server(work_dir.clone(), &bind)?;
+                println!("netsim UI: {}", srv.url());
+                srv.open_browser()?;
+                Some(srv)
+            } else {
+                None
+            };
+            let res = vm::run_sims_in_vm(vm::RunVmArgs {
+                sim_inputs: sims,
+                work_dir,
+                binary_overrides,
+                recreate,
+                netsim_version,
+            });
+            if open && res.is_ok() {
+                println!("run finished; UI server still running (Ctrl-C to exit)");
+                loop {
+                    std::thread::sleep(Duration::from_secs(60));
+                }
+            }
+            res
+        }
+        Command::Serve {
             work_dir,
-            binary_overrides,
-            recreate,
-            netsim_version,
-        }),
+            bind,
+            open,
+        } => {
+            let _server = start_ui_server(work_dir, &bind)?;
+            println!("netsim UI: {}", _server.url());
+            if open {
+                _server.open_browser()?;
+            }
+            loop {
+                std::thread::sleep(Duration::from_secs(60));
+            }
+        }
         Command::Test {
             target,
             packages,

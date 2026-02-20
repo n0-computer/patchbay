@@ -2,14 +2,15 @@
 
 mod caps;
 mod sim;
-mod vm;
 
 use std::path::PathBuf;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 
 use netsim::check_caps;
+use netsim::serve::start_ui_server;
 
 #[derive(Parser)]
 #[command(name = "netsim", about = "Run a netsim simulation")]
@@ -33,28 +34,30 @@ enum Command {
         /// Binary override in `<name>:<mode>:<value>` form.
         #[arg(long = "binary")]
         binary_overrides: Vec<String>,
-    },
-    /// Run one or more sims in the local QEMU VM.
-    RunVm {
-        /// One or more sim TOML files or directories containing `*.toml`.
-        #[arg(required = true)]
-        sims: Vec<PathBuf>,
 
-        /// Work directory for logs, binaries, and results.
+        /// Start embedded UI server and open browser.
+        #[arg(long, default_value_t = false)]
+        open: bool,
+
+        /// Bind address for embedded UI server.
+        #[arg(long, default_value = "127.0.0.1:0")]
+        bind: String,
+    },
+    /// Serve embedded UI + work directory over HTTP.
+    Serve {
+        /// Work directory containing run outputs.
         #[arg(long, default_value = ".netsim-work")]
         work_dir: PathBuf,
-
-        /// Binary override in `<name>:<mode>:<value>` form.
-        #[arg(long = "binary")]
-        binary_overrides: Vec<String>,
-
-        /// Recreate VM if running with different mount paths.
-        #[arg(long)]
-        recreate: bool,
+        /// Bind address for HTTP server.
+        #[arg(long, default_value = "127.0.0.1:8080")]
+        bind: String,
+        /// Open browser after server start.
+        #[arg(long, default_value_t = false)]
+        open: bool,
     },
     /// Apply capabilities to this binary and required system tools.
     SetupCaps,
-    /// Clean leaked labs by prefix and stop the local VM if running.
+    /// Clean leaked labs by prefix.
     Cleanup {
         /// Resource name prefix to clean (repeatable).
         ///
@@ -73,25 +76,41 @@ async fn main() -> Result<()> {
             sims,
             work_dir,
             binary_overrides,
+            open,
+            bind,
         } => {
             check_caps()?;
-            install_signal_cleanup_handler(vec![], false)?;
-            sim::run_sims(sims, work_dir, binary_overrides).await
+            install_signal_cleanup_handler(vec![])?;
+            let _server = if open {
+                let srv = start_ui_server(work_dir.clone(), &bind)?;
+                println!("netsim UI: {}", srv.url());
+                srv.open_browser()?;
+                Some(srv)
+            } else {
+                None
+            };
+            let res = sim::run_sims(sims, work_dir, binary_overrides).await;
+            if open && res.is_ok() {
+                println!("run finished; UI server still running (Ctrl-C to exit)");
+                loop {
+                    std::thread::sleep(Duration::from_secs(60));
+                }
+            }
+            res
         }
-        Command::RunVm {
-            sims,
+        Command::Serve {
             work_dir,
-            binary_overrides,
-            recreate,
+            bind,
+            open,
         } => {
-            install_signal_cleanup_handler(vec![], true)?;
-            vm::run_sims_in_vm(vm::RunVmArgs {
-                sim_inputs: sims,
-                work_dir,
-                binary_overrides,
-                recreate,
-            })
-            .await
+            let _server = start_ui_server(work_dir, &bind)?;
+            println!("netsim UI: {}", _server.url());
+            if open {
+                _server.open_browser()?;
+            }
+            loop {
+                std::thread::sleep(Duration::from_secs(60));
+            }
         }
         Command::SetupCaps => caps::setup_caps_for_self_and_tools(),
         Command::Cleanup { prefixes } => cleanup_command(prefixes),
@@ -111,10 +130,10 @@ fn cleanup_command(prefixes: Vec<String>) -> Result<()> {
     } else {
         prefixes
     };
-    perform_cleanup(&use_prefixes, true)
+    perform_cleanup(&use_prefixes)
 }
 
-fn perform_cleanup(prefixes: &[String], stop_vm: bool) -> Result<()> {
+fn perform_cleanup(prefixes: &[String]) -> Result<()> {
     if prefixes.is_empty() {
         println!("netsim cleanup: starting (prefixes: registered)");
     } else {
@@ -134,18 +153,14 @@ fn perform_cleanup(prefixes: &[String], stop_vm: bool) -> Result<()> {
     if !prefixes.is_empty() {
         resources.cleanup_everything();
     }
-    if stop_vm {
-        println!("netsim cleanup: stopping local VM (if running)");
-        vm::stop_vm_if_running()?;
-    }
     println!("netsim cleanup: done");
     Ok(())
 }
 
-fn install_signal_cleanup_handler(prefixes: Vec<String>, stop_vm: bool) -> Result<()> {
+fn install_signal_cleanup_handler(prefixes: Vec<String>) -> Result<()> {
     ctrlc::set_handler(move || {
         eprintln!("netsim: received interrupt, running cleanup...");
-        let _ = perform_cleanup(&prefixes, stop_vm);
+        let _ = perform_cleanup(&prefixes);
         // SAFETY: immediate process termination after best-effort cleanup in signal path.
         unsafe { nix::libc::_exit(130) };
     })

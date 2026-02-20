@@ -11,3 +11,4 @@ dirs = "5"
 nix = { version = "0.30", features = ["signal", "process"] }
 flate2 = "1"
 tar = "0.4"
+netsim = { path = "../.." }

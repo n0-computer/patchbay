@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react'
-import type { CombinedResults, SimResults, Manifest, ManifestLog } from './types'
+import type { CombinedResults, SimResults, Manifest, ManifestLog, RunProgress } from './types'
 import PerfTab from './components/PerfTab'
 import LogsTab from './components/LogsTab'
 import TimelineTab from './components/TimelineTab'
@@ -16,7 +16,6 @@ function getRunParam(): string | null {
   return new URLSearchParams(window.location.search).get('run')
 }
 
-/** Relative base URL for a run dir, always ends with '/'. */
 function runBase(runName: string | null): string {
   return runName ? `./${runName}/` : './'
 }
@@ -31,11 +30,8 @@ async function fetchJson<T>(url: string): Promise<T | null> {
   }
 }
 
-// Build a manifest from results.json when manifest.json doesn't exist yet.
 function inferManifest(results: SimResults, base: string): Manifest {
-  const logs: ManifestLog[] = [
-    { node: 'relay', path: `${base}logs/relay.log`, kind: 'tracing-ansi' },
-  ]
+  const logs: ManifestLog[] = [{ node: 'relay', path: `${base}logs/relay.log`, kind: 'tracing-ansi' }]
   const seen = new Set<string>()
   for (const t of results.transfers) {
     if (!seen.has(t.provider)) {
@@ -43,13 +39,11 @@ function inferManifest(results: SimResults, base: string): Manifest {
       logs.push({ node: t.provider, path: `${base}logs/xfer/provider.log`, kind: 'iroh-ndjson' })
       logs.push({ node: t.provider, path: `${base}logs/xfer/provider/`, kind: 'qlog-dir' })
     }
-    const fKey = `${t.fetcher}-${t.id}`
-    if (!seen.has(fKey)) {
-      seen.add(fKey)
-      const idx = [...seen].filter(k => k.startsWith(t.fetcher)).length - 1
-      const suffix = idx === 0 ? '' : `-${idx}`
-      logs.push({ node: t.fetcher, path: `${base}logs/xfer/${t.fetcher}${suffix}.log`, kind: 'iroh-ndjson' })
-      logs.push({ node: t.fetcher, path: `${base}logs/xfer/${t.fetcher}${suffix}/`, kind: 'qlog-dir' })
+    const key = `${t.fetcher}-${t.id}`
+    if (!seen.has(key)) {
+      seen.add(key)
+      logs.push({ node: t.fetcher, path: `${base}logs/xfer/${t.fetcher}.log`, kind: 'iroh-ndjson' })
+      logs.push({ node: t.fetcher, path: `${base}logs/xfer/${t.fetcher}/`, kind: 'qlog-dir' })
     }
   }
   return { sim: results.sim, run: '', logs }
@@ -60,14 +54,13 @@ export default function App() {
   const [combined, setCombined] = useState<CombinedResults | null>(null)
   const [results, setResults] = useState<SimResults | null>(null)
   const [manifest, setManifest] = useState<Manifest | null>(null)
+  const [progress, setProgress] = useState<RunProgress | null>(null)
   const [selectedRun, setSelectedRun] = useState<string | null>(getRunParam)
+  const [selectedSimDir, setSelectedSimDir] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
-
-  // Dev-mode run listing from vite plugin
   const [devRuns, setDevRuns] = useState<string[] | null>(null)
   const [workRoot, setWorkRoot] = useState<string | null>(null)
 
-  // Sync tab to URL hash
   useEffect(() => {
     const onHash = () => setTab(getHashTab())
     window.addEventListener('hashchange', onHash)
@@ -79,42 +72,6 @@ export default function App() {
     setTab(t)
   }, [])
 
-  // Try the dev-mode runs endpoint once on mount
-  useEffect(() => {
-    fetchJson<{ workRoot: string; runs: string[] }>('/__netsim/runs').then(data => {
-      if (data) {
-        setDevRuns(data.runs)
-        setWorkRoot(data.workRoot)
-        // Auto-select latest run if nothing is in the URL
-        if (!getRunParam() && data.runs.length > 0) {
-          setSelectedRun(data.runs[0])
-        }
-      }
-    })
-  }, [])
-
-  // Load data whenever selectedRun changes
-  useEffect(() => {
-    ;(async () => {
-      setLoading(true)
-      setResults(null)
-      setManifest(null)
-
-      const c = await fetchJson<CombinedResults>('./combined-results.json')
-      setCombined(c)
-
-      const base = runBase(selectedRun)
-      const r = await fetchJson<SimResults>(`${base}results.json`)
-      setResults(r)
-
-      if (r) {
-        const m = await fetchJson<Manifest>(`${base}manifest.json`)
-        setManifest(m ?? inferManifest(r, base))
-      }
-      setLoading(false)
-    })()
-  }, [selectedRun])
-
   const onSelectRun = useCallback((run: string) => {
     const url = new URL(window.location.href)
     if (run) {
@@ -124,42 +81,91 @@ export default function App() {
     }
     window.history.pushState({}, '', url)
     setSelectedRun(run || null)
+    setSelectedSimDir(null)
   }, [])
 
-  // Merge run lists: dev API (has all subdirs) + combined-results (has perf data)
+  const refreshRunList = useCallback(async () => {
+    const data = await fetchJson<{ workRoot: string; runs: string[] }>('/__netsim/runs')
+    if (!data) return
+    setDevRuns(data.runs)
+    setWorkRoot(data.workRoot)
+    if (!selectedRun && data.runs.length > 0) {
+      onSelectRun(data.runs[0])
+    }
+  }, [onSelectRun, selectedRun])
+
+  useEffect(() => {
+    refreshRunList()
+    const id = setInterval(refreshRunList, 1500)
+    return () => clearInterval(id)
+  }, [refreshRunList])
+
+  const refreshData = useCallback(async () => {
+    setLoading(true)
+    const base = runBase(selectedRun)
+    const [c, p, m] = await Promise.all([
+      fetchJson<CombinedResults>(`${base}combined-results.json`),
+      fetchJson<RunProgress>(`${base}progress.json`),
+      fetchJson<Manifest>(`${base}manifest.json`),
+    ])
+    setCombined(c)
+    setProgress(p)
+
+    let simDir = selectedSimDir
+    if (!simDir) {
+      const running = p?.simulations?.find(s => s.status === 'running' && s.sim_dir)?.sim_dir
+      const firstDone = p?.simulations?.find(s => s.sim_dir)?.sim_dir
+      const firstManifest = m?.simulations?.find(s => s.sim_dir)?.sim_dir
+      simDir = running ?? firstDone ?? firstManifest ?? null
+      setSelectedSimDir(simDir)
+    }
+
+    if (simDir) {
+      const simBase = `${base}${simDir}/`
+      const r = await fetchJson<SimResults>(`${simBase}results.json`)
+      setResults(r)
+      setManifest(r ? inferManifest(r, simBase) : null)
+    } else {
+      setResults(null)
+      setManifest(null)
+    }
+    setLoading(false)
+  }, [selectedRun, selectedSimDir])
+
+  useEffect(() => {
+    refreshData()
+  }, [refreshData])
+
+  useEffect(() => {
+    if (progress?.status !== 'running') return
+    const id = setInterval(refreshData, 1000)
+    return () => clearInterval(id)
+  }, [progress?.status, refreshData])
+
   const combinedRunNames = combined?.runs.map(r => r.run) ?? []
   const allRunNames = devRuns
-    ? [...new Set([...devRuns, ...combinedRunNames])] // dev API is already newest-first
+    ? [...new Set([...devRuns, ...combinedRunNames])]
     : combinedRunNames
 
   return (
     <div className="app">
       <div className="topbar">
         <h1>netsim</h1>
-        {results && (
-          <span style={{ color: 'var(--text-muted)', fontSize: 12 }}>{results.sim}</span>
+        {progress && (
+          <span style={{ color: 'var(--text-muted)', fontSize: 12 }}>
+            {progress.status} · {progress.completed}/{progress.total}
+            {progress.current_sim ? ` · ${progress.current_sim}` : ''}
+          </span>
         )}
 
         {allRunNames.length > 0 && (
           <span style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12 }}>
             <span style={{ color: 'var(--text-muted)' }}>run</span>
-            <select
-              value={selectedRun ?? ''}
-              onChange={e => onSelectRun(e.target.value)}
-            >
+            <select value={selectedRun ?? ''} onChange={e => onSelectRun(e.target.value)}>
               <option value="">— overview —</option>
-              {allRunNames.map(r => (
-                <option key={r} value={r}>{r}</option>
-              ))}
+              {allRunNames.map(r => <option key={r} value={r}>{r}</option>)}
             </select>
           </span>
-        )}
-
-        {selectedRun && (
-          <button className="btn" style={{ fontSize: 11 }}
-            onClick={() => onSelectRun('')}>
-            ✕
-          </button>
         )}
 
         {workRoot && (
@@ -206,9 +212,6 @@ export default function App() {
         )}
         {!loading && tab === 'qlog' && results && manifest && (
           <QlogTab manifest={manifest} base={runBase(selectedRun)} />
-        )}
-        {!loading && tab !== 'perf' && !results && (
-          <div className="empty">select a run with results to view {tab}</div>
         )}
       </div>
     </div>

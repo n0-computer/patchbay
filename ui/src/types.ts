@@ -25,6 +25,7 @@ export interface IperfResult {
 
 export interface RunResults {
   run: string
+  sim_dir?: string
   sim: string
   transfers: TransferResult[]
   iperf: IperfResult[]
@@ -50,10 +51,42 @@ export interface ManifestLog {
 }
 
 export interface Manifest {
-  sim: string
   run: string
+  status?: string
   started_at?: string
+  ended_at?: string | null
+  runtime_ms?: number | null
+  success?: boolean | null
+  simulations?: Array<{
+    sim: string
+    sim_dir: string
+    status: string
+    runtime_ms?: number | null
+    sim_json?: string | null
+  }>
+  sim?: string
   logs: ManifestLog[]
+}
+
+export interface ProgressSim {
+  sim: string
+  status: string
+  sim_dir?: string | null
+  runtime_ms?: number | null
+  sim_json?: string | null
+}
+
+export interface RunProgress {
+  run: string
+  status: 'running' | 'done' | string
+  started_at: string
+  updated_at: string
+  total: number
+  completed: number
+  ok: number
+  error: number
+  current_sim?: string | null
+  simulations: ProgressSim[]
 }
 
 // ── parsed log line types ─────────────────────────────────────────────────────

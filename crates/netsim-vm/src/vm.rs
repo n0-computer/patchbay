@@ -439,6 +439,9 @@ fn run_in_guest(vm: &VmConfig, args: &RunVmArgs) -> Result<()> {
 
     let mut parts = vec![
         "sudo".to_string(),
+        "env".to_string(),
+        "NETSIM_IN_VM=1".to_string(),
+        "NETSIM_TARGET_DIR=/target".to_string(),
         guest_exe,
         "run".to_string(),
         "--work-dir".to_string(),

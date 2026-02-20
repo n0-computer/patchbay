@@ -29,6 +29,7 @@ tar         = "0.4"
 comfy-table = "7"
 dirs        = "5"
 ctrlc       = "3"
+webbrowser  = "1"
 
 [dev-dependencies]
 serial_test = "3"

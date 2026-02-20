@@ -1,54 +1,11 @@
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{bail, Context, Result};
 use flate2::read::GzDecoder;
-use std::collections::HashMap;
+use netsim::assets::{
+    parse_binary_overrides, resolve_binary_source_path, BinaryOverride, PathResolveMode,
+};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use tar::Archive;
-
-#[derive(Debug, Clone)]
-pub enum BinaryOverride {
-    Build(PathBuf),
-    Fetch(String),
-    Path(PathBuf),
-}
-
-pub fn parse_binary_overrides(raw: &[String]) -> Result<HashMap<String, BinaryOverride>> {
-    let mut out = HashMap::new();
-    for item in raw {
-        let mut parts = item.splitn(3, ':');
-        let name = parts
-            .next()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .ok_or_else(|| anyhow!("invalid --binary override '{}': missing name", item))?;
-        let mode = parts
-            .next()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .ok_or_else(|| anyhow!("invalid --binary override '{}': missing mode", item))?;
-        let value = parts
-            .next()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .ok_or_else(|| anyhow!("invalid --binary override '{}': missing value", item))?;
-
-        if out.contains_key(name) {
-            bail!("duplicate --binary override for '{}'", name);
-        }
-        let parsed = match mode {
-            "build" => BinaryOverride::Build(PathBuf::from(value)),
-            "fetch" => BinaryOverride::Fetch(value.to_string()),
-            "path" => BinaryOverride::Path(PathBuf::from(value)),
-            _ => bail!(
-                "invalid --binary override mode '{}' in '{}'; expected build|fetch|path",
-                mode,
-                item
-            ),
-        };
-        out.insert(name.to_string(), parsed);
-    }
-    Ok(out)
-}
 
 pub fn stage_binary_overrides(
     raw: &[String],
@@ -79,16 +36,17 @@ pub fn stage_binary_overrides(
 }
 
 fn stage_path_binary(name: &str, src: &Path, bins_dir: &Path) -> Result<PathBuf> {
-    if !src.exists() || src.is_dir() {
+    let resolved = resolve_binary_source_path(src, PathResolveMode::Vm)?;
+    if !resolved.exists() || resolved.is_dir() {
         bail!(
             "binary override path for '{}' is invalid: {}",
             name,
-            src.display()
+            resolved.display()
         );
     }
     let dest = bins_dir.join(format!("{}-override", name));
-    std::fs::copy(src, &dest)
-        .with_context(|| format!("copy {} -> {}", src.display(), dest.display()))?;
+    std::fs::copy(&resolved, &dest)
+        .with_context(|| format!("copy {} -> {}", resolved.display(), dest.display()))?;
     set_executable(&dest)?;
     Ok(dest)
 }

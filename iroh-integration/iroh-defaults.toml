@@ -1,6 +1,6 @@
 [[binary]]
 name = "transfer"
-path = "/target/x86_64-unknown-linux-musl/release/examples/transfer"
+path = "target:examples/transfer"
 
 [[binary]]
 name = "relay"

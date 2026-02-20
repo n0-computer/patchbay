@@ -125,6 +125,24 @@ when a task is ready run the checks then ask to commit, don't commit without ask
 after confirmation commit with "feat: short description" etc and some details afterwards. elaborate open issues a little, explain decisions taken concisely
 
 ## Recent Changes
+- VM ownership split completed in CLI surface:
+  - Removed `netsim run-vm` from `src/main.rs` and deleted obsolete `src/vm.rs`; VM execution remains in `crates/netsim-vm`.
+  - Added `serve` subcommands to both `netsim` and `netsim-vm`, backed by shared embedded UI server code in `src/serve.rs` (`include_str!("../ui/dist/index.html")`).
+- Added shared asset/path helpers in `src/assets.rs` and reused from both binaries:
+  - Shared `--binary` override parsing.
+  - Added `target:<kind>/<name>` shortcut resolution (`examples|bin`, release-only) with target-dir precedence:
+    1) `NETSIM_TARGET_DIR`, 2) `cargo metadata target_directory`, else error.
+  - VM runs now pass `NETSIM_IN_VM=1` and `NETSIM_TARGET_DIR=/target` in guest execution; VM mode prefers musl path first when present.
+- Sim runner now writes live progress artifacts:
+  - `progress.json` in run root (`running|done`, counts, current sim, per-sim status).
+  - run `manifest.json` is written at start and updated after each sim completion.
+  - `combined-results.json` is refreshed incrementally after each completed sim.
+- CLI reporting simplified:
+  - Replaced verbose combined terminal tables with concise per-sim run summary columns: `sim`, `status`, `down_mbps`, `up_mbps` (`src/sim/report.rs`).
+- UI live-refresh support added:
+  - `ui/src/App.tsx` now polls `/__netsim/runs` and per-run `progress.json` while running, and refreshes run data during execution.
+- Updated iroh shared binary manifest default:
+  - `iroh-integration/iroh-defaults.toml` now uses `path = "target:examples/transfer"` instead of VM-only absolute `/target/...` path.
 - Sim runner now emits run/sim metadata manifests:
   - Each invocation run root writes `manifest.json` with environment metadata, start/end timestamps, total runtime, overall success, and per-sim runtime/status entries.
   - Each per-sim directory writes `sim.json` with start/end timestamps, runtime, setup/topology summary, status (`ok`/`error`), and structured failure details (phase + failing step metadata when available) (`src/sim/runner.rs`).

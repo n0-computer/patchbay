@@ -1,4 +1,5 @@
 use anyhow::{bail, Context, Result};
+use netsim::assets::{resolve_binary_source_path, PathResolveMode};
 use std::path::{Path, PathBuf};
 
 use crate::sim::BinarySpec;
@@ -6,10 +7,11 @@ use crate::sim::BinarySpec;
 /// Resolve a binary spec to a local path, building or downloading as needed.
 pub async fn build_or_fetch_binary(spec: &BinarySpec, work_dir: &Path) -> Result<PathBuf> {
     if let Some(path) = &spec.path {
-        if !path.exists() {
-            bail!("binary path does not exist: {}", path.display());
+        let resolved = resolve_binary_source_path(path, PathResolveMode::from_env())?;
+        if !resolved.exists() {
+            bail!("binary path does not exist: {}", resolved.display());
         }
-        return Ok(path.clone());
+        return Ok(resolved);
     }
 
     if let Some(url) = &spec.url {

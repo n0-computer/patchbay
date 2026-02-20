@@ -48,10 +48,14 @@ use std::{
 };
 use tracing::debug;
 
+/// Shared binary/source path parsing and target shortcut resolution helpers.
+pub mod assets;
 /// Exposes low-level topology and namespace construction primitives.
 pub mod core;
 mod netns;
 mod qdisc;
+/// Embedded UI HTTP serving helpers.
+pub mod serve;
 use crate::core::{
     apply_impair_in, cleanup_netns, resources, run_closure_in_namespace, run_command_in_namespace,
     spawn_closure_in_namespace_thread, spawn_command_in_namespace, CoreConfig, DownstreamPool,

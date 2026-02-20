@@ -361,6 +361,7 @@ async fn write_chuck_compat_reports(
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct RunResults {
     run: String,
+    sim_dir: String,
     sim: String,
     transfers: Vec<TransferResult>,
     iperf: Vec<IperfResult>,
@@ -512,182 +513,51 @@ pub async fn write_combined_results_for_runs(work_root: &Path, run_names: &[Stri
     Ok(())
 }
 
-/// Print combined results for selected runs as terminal tables.
-pub fn print_combined_results_table_for_runs(work_root: &Path, run_names: &[String]) -> Result<()> {
+/// Print a concise per-sim summary for one invocation run.
+pub fn print_run_summary_table_for_runs(work_root: &Path, run_names: &[String]) -> Result<()> {
     let runs = load_runs(work_root, run_names)?;
     if runs.is_empty() {
         return Ok(());
     }
 
-    let mut transfer_by_sim: BTreeMap<String, Vec<&TransferResult>> = BTreeMap::new();
-    let mut iperf_by_sim: BTreeMap<String, Vec<&IperfResult>> = BTreeMap::new();
-    for run in &runs {
-        for t in &run.transfers {
-            transfer_by_sim.entry(run.sim.clone()).or_default().push(t);
-        }
-        for i in &run.iperf {
-            iperf_by_sim.entry(run.sim.clone()).or_default().push(i);
-        }
+    #[derive(Deserialize)]
+    struct SimStatus {
+        status: Option<String>,
     }
 
-    let mut summary = Table::new();
-    summary.load_preset(UTF8_FULL);
-    summary.set_header(vec!["sim", "transfers", "avg_mbps", "direct_final_pct"]);
-    for (sim, transfers) in &transfer_by_sim {
-        let mut mbps_sum = 0.0f64;
-        let mut mbps_count = 0usize;
-        let mut direct_total = 0usize;
-        let mut direct_yes = 0usize;
-        for t in transfers {
-            if let Some(v) = t.mbps {
-                mbps_sum += v;
-                mbps_count += 1;
-            }
-            if let Some(v) = t.final_conn_direct {
-                direct_total += 1;
-                if v {
-                    direct_yes += 1;
-                }
-            }
-        }
-        let avg_mbps = if mbps_count > 0 {
-            format!("{:.1}", mbps_sum / mbps_count as f64)
+    let mut table = Table::new();
+    table.load_preset(UTF8_FULL);
+    table.set_header(vec!["sim", "status", "down_mbps", "up_mbps"]);
+    for run in &runs {
+        let status = std::fs::read_to_string(work_root.join(&run.sim_dir).join("sim.json"))
+            .ok()
+            .and_then(|text| serde_json::from_str::<SimStatus>(&text).ok())
+            .and_then(|s| s.status)
+            .unwrap_or_else(|| "unknown".to_string());
+        let (down_sum, down_n) = run
+            .transfers
+            .iter()
+            .filter_map(|r| r.mbps)
+            .fold((0.0f64, 0usize), |(sum, n), v| (sum + v, n + 1));
+        let (up_sum, up_n) = run
+            .iperf
+            .iter()
+            .filter_map(|r| r.mbps)
+            .fold((0.0f64, 0usize), |(sum, n), v| (sum + v, n + 1));
+        let down = if down_n > 0 {
+            format!("{:.1}", down_sum / down_n as f64)
         } else {
             "-".to_string()
         };
-        let direct_pct = if direct_total > 0 {
-            format!("{:.0}%", 100.0 * direct_yes as f64 / direct_total as f64)
+        let up = if up_n > 0 {
+            format!("{:.1}", up_sum / up_n as f64)
         } else {
             "-".to_string()
         };
-        summary.add_row(vec![
-            sim.clone(),
-            transfers.len().to_string(),
-            avg_mbps,
-            direct_pct,
-        ]);
+        table.add_row(vec![run.sim.clone(), status, down, up]);
     }
-
-    let mut details = Table::new();
-    details.load_preset(UTF8_FULL);
-    details.set_header(vec![
-        "run",
-        "sim",
-        "id",
-        "provider",
-        "fetcher",
-        "size_bytes",
-        "elapsed_s",
-        "mbps",
-        "final_direct",
-        "conn_upgrade",
-        "conn_events",
-    ]);
-    for run in &runs {
-        for r in &run.transfers {
-            details.add_row(vec![
-                run.run.clone(),
-                run.sim.clone(),
-                r.id.clone(),
-                r.provider.clone(),
-                r.fetcher.clone(),
-                r.size_bytes
-                    .map(|v| v.to_string())
-                    .unwrap_or_else(|| "-".to_string()),
-                r.elapsed_s
-                    .map(|v| format!("{:.3}", v))
-                    .unwrap_or_else(|| "-".to_string()),
-                r.mbps
-                    .map(|v| format!("{:.1}", v))
-                    .unwrap_or_else(|| "-".to_string()),
-                r.final_conn_direct
-                    .map(|v| v.to_string())
-                    .unwrap_or_else(|| "-".to_string()),
-                r.conn_upgrade
-                    .map(|v| v.to_string())
-                    .unwrap_or_else(|| "-".to_string()),
-                r.conn_events.to_string(),
-            ]);
-        }
-    }
-
-    let mut iperf_summary = Table::new();
-    iperf_summary.load_preset(UTF8_FULL);
-    iperf_summary.set_header(vec!["sim", "iperf_runs", "avg_mbps"]);
-    for (sim, rows) in &iperf_by_sim {
-        let mut mbps_sum = 0.0f64;
-        let mut mbps_count = 0usize;
-        for row in rows {
-            if let Some(mbps) = row.mbps {
-                mbps_sum += mbps;
-                mbps_count += 1;
-            }
-        }
-        let avg_mbps = if mbps_count > 0 {
-            format!("{:.3}", mbps_sum / mbps_count as f64)
-        } else {
-            "-".to_string()
-        };
-        iperf_summary.add_row(vec![sim.clone(), rows.len().to_string(), avg_mbps]);
-    }
-
-    let mut iperf_details = Table::new();
-    iperf_details.load_preset(UTF8_FULL);
-    iperf_details.set_header(vec![
-        "run",
-        "sim",
-        "id",
-        "device",
-        "bytes",
-        "seconds",
-        "mbps",
-        "retransmits",
-        "baseline",
-        "delta_mbps",
-        "delta_pct",
-    ]);
-    for run in &runs {
-        for r in &run.iperf {
-            iperf_details.add_row(vec![
-                run.run.clone(),
-                run.sim.clone(),
-                r.id.clone(),
-                r.device.clone(),
-                r.bytes
-                    .map(|v| v.to_string())
-                    .unwrap_or_else(|| "-".to_string()),
-                r.seconds
-                    .map(|v| format!("{:.3}", v))
-                    .unwrap_or_else(|| "-".to_string()),
-                r.mbps
-                    .map(|v| format!("{:.3}", v))
-                    .unwrap_or_else(|| "-".to_string()),
-                r.retransmits
-                    .map(|v| v.to_string())
-                    .unwrap_or_else(|| "-".to_string()),
-                r.baseline.clone().unwrap_or_else(|| "-".to_string()),
-                r.delta_mbps
-                    .map(|v| format!("{:.3}", v))
-                    .unwrap_or_else(|| "-".to_string()),
-                r.delta_pct
-                    .map(|v| format!("{:.1}", v))
-                    .unwrap_or_else(|| "-".to_string()),
-            ]);
-        }
-    }
-
-    if !transfer_by_sim.is_empty() {
-        println!("\nCombined Summary:");
-        println!("{summary}");
-        println!("\nCombined Transfers:");
-        println!("{details}");
-    }
-    if !iperf_by_sim.is_empty() {
-        println!("\nCombined Iperf Summary:");
-        println!("{iperf_summary}");
-        println!("\nCombined Iperf Runs:");
-        println!("{iperf_details}");
-    }
+    println!("\nRun Summary:");
+    println!("{table}");
     Ok(())
 }
 
@@ -748,6 +618,7 @@ fn load_runs(work_root: &Path, run_names: &[String]) -> Result<Vec<RunResults>> 
         .context("parse iperf array")?;
         runs.push(RunResults {
             run: run_name.clone(),
+            sim_dir: name.to_string(),
             sim,
             transfers,
             iperf,

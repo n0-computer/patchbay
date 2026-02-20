@@ -1,4 +1,7 @@
 use anyhow::{anyhow, bail, Context, Result};
+use netsim::assets::{
+    parse_binary_overrides, resolve_binary_source_path, BinaryOverride, PathResolveMode,
+};
 use std::collections::{BTreeSet, HashMap};
 use std::fs::OpenOptions;
 use std::io::{BufRead, BufReader};
@@ -14,7 +17,7 @@ use crate::sim::build::build_local_binary;
 use crate::sim::build::build_or_fetch_binary;
 use crate::sim::env::SimEnv;
 use crate::sim::report::{
-    parse_iperf3_json_log, print_combined_results_table_for_runs, write_combined_results_for_runs,
+    parse_iperf3_json_log, print_run_summary_table_for_runs, write_combined_results_for_runs,
     write_results, IperfResult, TransferResult,
 };
 use crate::sim::topology::load_topology;
@@ -124,19 +127,43 @@ struct ManifestSimSummary {
     sim: String,
     sim_dir: String,
     status: String,
-    runtime_ms: u128,
-    sim_json: String,
+    runtime_ms: Option<u128>,
+    sim_json: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
 struct RunManifest {
     run: String,
     started_at: String,
-    ended_at: String,
-    runtime_ms: u128,
-    success: bool,
+    status: String,
+    ended_at: Option<String>,
+    runtime_ms: Option<u128>,
+    success: Option<bool>,
     environment: RunEnvironment,
     simulations: Vec<ManifestSimSummary>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ProgressSim {
+    sim: String,
+    status: String,
+    sim_dir: Option<String>,
+    runtime_ms: Option<u128>,
+    sim_json: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct RunProgress {
+    run: String,
+    status: String,
+    started_at: String,
+    updated_at: String,
+    total: usize,
+    completed: usize,
+    ok: usize,
+    error: usize,
+    current_sim: Option<String>,
+    simulations: Vec<ProgressSim>,
 }
 
 impl Drop for SimState {
@@ -165,24 +192,102 @@ pub async fn run_sims(
     let run_root = prepare_run_root(&work_dir)?;
     let run_start = SystemTime::now();
     let run_start_instant = Instant::now();
+    let run_name = run_root
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("sim-run")
+        .to_string();
+    let sim_names: Vec<String> = sims
+        .iter()
+        .map(|sim| {
+            sim.file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("sim")
+                .to_string()
+        })
+        .collect();
+    let mut progress = RunProgress {
+        run: run_name.clone(),
+        status: "running".to_string(),
+        started_at: format_timestamp(run_start),
+        updated_at: format_timestamp(run_start),
+        total: sims.len(),
+        completed: 0,
+        ok: 0,
+        error: 0,
+        current_sim: sim_names.first().cloned(),
+        simulations: sim_names
+            .iter()
+            .map(|sim| ProgressSim {
+                sim: sim.clone(),
+                status: "pending".to_string(),
+                sim_dir: None,
+                runtime_ms: None,
+                sim_json: None,
+            })
+            .collect(),
+    };
+    write_progress(&run_root, &progress).await?;
+    let initial_manifest =
+        build_run_manifest(&run_root, run_start, None, None, None, &progress, &[])?;
+    write_run_manifest(&run_root, &initial_manifest).await?;
+
     let mut sim_dir_names = Vec::new();
     let mut outcomes = Vec::new();
-    for sim in sims {
+    for (idx, sim) in sims.into_iter().enumerate() {
+        if let Some(item) = progress.simulations.get_mut(idx) {
+            item.status = "running".to_string();
+        }
+        progress.current_sim = progress.simulations.get(idx).map(|s| s.sim.clone());
+        progress.updated_at = format_timestamp(SystemTime::now());
+        write_progress(&run_root, &progress).await?;
+
         let outcome = run_single_sim(sim, run_root.clone(), binary_overrides.clone()).await?;
         sim_dir_names.push(outcome.sim_dir_name.clone());
+        if let Some(item) = progress.simulations.get_mut(idx) {
+            item.status = outcome.summary.status.clone();
+            item.sim_dir = Some(outcome.summary.sim_dir.clone());
+            item.runtime_ms = Some(outcome.summary.runtime_ms);
+            item.sim_json = Some(format!("{}/sim.json", outcome.summary.sim_dir));
+            item.sim = outcome.summary.sim.clone();
+        }
+        progress.completed = outcomes.len() + 1;
+        if outcome.success {
+            progress.ok += 1;
+        } else {
+            progress.error += 1;
+        }
+        progress.current_sim = progress
+            .simulations
+            .iter()
+            .find(|s| s.status == "pending")
+            .map(|s| s.sim.clone());
+        progress.updated_at = format_timestamp(SystemTime::now());
+        write_progress(&run_root, &progress).await?;
         outcomes.push(outcome);
+        write_combined_results_for_runs(&run_root, &sim_dir_names)
+            .await
+            .context("write incremental combined results")?;
+        let running_manifest =
+            build_run_manifest(&run_root, run_start, None, None, None, &progress, &outcomes)?;
+        write_run_manifest(&run_root, &running_manifest).await?;
     }
     write_combined_results_for_runs(&run_root, &sim_dir_names)
         .await
         .context("write combined results")?;
-    print_combined_results_table_for_runs(&run_root, &sim_dir_names)
-        .context("print combined results table")?;
+    print_run_summary_table_for_runs(&run_root, &sim_dir_names)
+        .context("print run summary table")?;
     let run_end = SystemTime::now();
+    progress.status = "done".to_string();
+    progress.updated_at = format_timestamp(run_end);
+    write_progress(&run_root, &progress).await?;
     let run_manifest = build_run_manifest(
         &run_root,
         run_start,
-        run_end,
-        run_start_instant.elapsed(),
+        Some(run_end),
+        Some(run_start_instant.elapsed()),
+        Some(outcomes.iter().all(|o| o.success)),
+        &progress,
         &outcomes,
     )?;
     write_run_manifest(&run_root, &run_manifest).await?;
@@ -587,8 +692,10 @@ async fn write_sim_summary(run_work_dir: &Path, summary: &SimSummary) -> Result<
 fn build_run_manifest(
     run_root: &Path,
     started_at: SystemTime,
-    ended_at: SystemTime,
-    elapsed: Duration,
+    ended_at: Option<SystemTime>,
+    elapsed: Option<Duration>,
+    success: Option<bool>,
+    progress: &RunProgress,
     outcomes: &[SimRunOutcome],
 ) -> Result<RunManifest> {
     let run = run_root
@@ -596,22 +703,37 @@ fn build_run_manifest(
         .and_then(|s| s.to_str())
         .unwrap_or("sim-run")
         .to_string();
-    let simulations = outcomes
+    let mut by_sim_dir: HashMap<&str, &SimRunOutcome> = HashMap::new();
+    for outcome in outcomes {
+        by_sim_dir.insert(outcome.summary.sim_dir.as_str(), outcome);
+    }
+    let simulations = progress
+        .simulations
         .iter()
-        .map(|outcome| ManifestSimSummary {
-            sim: outcome.summary.sim.clone(),
-            sim_dir: outcome.summary.sim_dir.clone(),
-            status: outcome.summary.status.clone(),
-            runtime_ms: outcome.summary.runtime_ms,
-            sim_json: format!("{}/sim.json", outcome.summary.sim_dir),
+        .map(|sim| {
+            let runtime_ms = sim.runtime_ms.or_else(|| {
+                sim.sim_dir.as_deref().and_then(|dir| {
+                    by_sim_dir
+                        .get(dir)
+                        .map(|outcome| outcome.summary.runtime_ms)
+                })
+            });
+            ManifestSimSummary {
+                sim: sim.sim.clone(),
+                sim_dir: sim.sim_dir.clone().unwrap_or_default(),
+                status: sim.status.clone(),
+                runtime_ms,
+                sim_json: sim.sim_json.clone(),
+            }
         })
         .collect();
     Ok(RunManifest {
         run,
         started_at: format_timestamp(started_at),
-        ended_at: format_timestamp(ended_at),
-        runtime_ms: elapsed.as_millis(),
-        success: outcomes.iter().all(|o| o.success),
+        status: progress.status.clone(),
+        ended_at: ended_at.map(format_timestamp),
+        runtime_ms: elapsed.map(|e| e.as_millis()),
+        success,
         environment: collect_run_environment()?,
         simulations,
     })
@@ -622,6 +744,14 @@ async fn write_run_manifest(run_root: &Path, manifest: &RunManifest) -> Result<(
     tokio::fs::write(run_root.join("manifest.json"), text)
         .await
         .with_context(|| format!("write {}", run_root.join("manifest.json").display()))?;
+    Ok(())
+}
+
+async fn write_progress(run_root: &Path, progress: &RunProgress) -> Result<()> {
+    let text = serde_json::to_string_pretty(progress).context("serialize run progress")?;
+    tokio::fs::write(run_root.join("progress.json"), text)
+        .await
+        .with_context(|| format!("write {}", run_root.join("progress.json").display()))?;
     Ok(())
 }
 
@@ -788,51 +918,6 @@ fn merge_binary_specs(
     merged
 }
 
-#[derive(Debug, Clone)]
-enum BinaryOverride {
-    Build(PathBuf),
-    Fetch(String),
-    Path(PathBuf),
-}
-
-fn parse_binary_overrides(raw: &[String]) -> Result<HashMap<String, BinaryOverride>> {
-    let mut out = HashMap::new();
-    for item in raw {
-        let mut parts = item.splitn(3, ':');
-        let name = parts
-            .next()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .ok_or_else(|| anyhow!("invalid --binary override '{}': missing name", item))?;
-        let mode = parts
-            .next()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .ok_or_else(|| anyhow!("invalid --binary override '{}': missing mode", item))?;
-        let value = parts
-            .next()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .ok_or_else(|| anyhow!("invalid --binary override '{}': missing value", item))?;
-
-        if out.contains_key(name) {
-            bail!("duplicate --binary override for '{}'", name);
-        }
-        let parsed = match mode {
-            "build" => BinaryOverride::Build(PathBuf::from(value)),
-            "fetch" => BinaryOverride::Fetch(value.to_string()),
-            "path" => BinaryOverride::Path(PathBuf::from(value)),
-            _ => bail!(
-                "invalid --binary override mode '{}' in '{}'; expected build|fetch|path",
-                mode,
-                item
-            ),
-        };
-        out.insert(name.to_string(), parsed);
-    }
-    Ok(out)
-}
-
 fn merged_binary_names(
     specs: &HashMap<String, BinarySpec>,
     overrides: &HashMap<String, BinaryOverride>,
@@ -875,14 +960,15 @@ async fn resolve_binary_path(
 }
 
 async fn stage_override_binary(name: &str, source: &Path, work_dir: &Path) -> Result<PathBuf> {
-    if !source.exists() {
+    let resolved = resolve_binary_source_path(source, PathResolveMode::from_env())?;
+    if !resolved.exists() {
         bail!(
             "binary override path for '{}' does not exist: {}",
             name,
-            source.display()
+            resolved.display()
         );
     }
-    if source.is_dir() {
+    if resolved.is_dir() {
         bail!(
             "binary override path for '{}' is a directory; use mode=build for directories",
             name
@@ -895,14 +981,14 @@ async fn stage_override_binary(name: &str, source: &Path, work_dir: &Path) -> Re
     let staged = bins_dir.join(format!(
         "{}-override{}",
         name,
-        source
+        resolved
             .extension()
             .map(|ext| format!(".{}", ext.to_string_lossy()))
             .unwrap_or_default()
     ));
-    tokio::fs::copy(source, &staged)
+    tokio::fs::copy(&resolved, &staged)
         .await
-        .with_context(|| format!("copy override binary {}", source.display()))?;
+        .with_context(|| format!("copy override binary {}", resolved.display()))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
