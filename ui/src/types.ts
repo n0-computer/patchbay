@@ -94,3 +94,15 @@ export interface RunIndex {
   workRoot: string
   runs: string[]
 }
+
+export interface CombinedRunResult {
+  run: string
+  sim_dir?: string
+  sim: string
+  transfers: TransferResult[]
+  iperf: IperfResult[]
+}
+
+export interface CombinedResults {
+  runs: CombinedRunResult[]
+}

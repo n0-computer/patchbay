@@ -1,0 +1,31 @@
+[sim]
+name = "paused-adverse-direct_throttled"
+binaries = "iroh-defaults.toml"
+
+[[router]]
+name = "dc"
+
+[device.provider.eth0]
+gateway = "dc"
+
+[device.fetcher.eth0]
+gateway = "dc"
+
+[[step]]
+action    = "set-impair"
+device    = "fetcher"
+interface = "eth0"
+impair    = { rate = 4000, loss = 0.0, latency = 200 }
+
+[[step]]
+action   = "spawn"
+kind     = "iroh-transfer"
+id       = "xfer"
+provider = "provider"
+fetcher  = "fetcher"
+strategy = "endpoint_id_with_direct_addrs"
+duration = "30s"
+
+[[step]]
+action = "wait-for"
+id     = "xfer"

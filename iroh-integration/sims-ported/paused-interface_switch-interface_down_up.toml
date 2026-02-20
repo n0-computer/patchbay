@@ -1,0 +1,68 @@
+[sim]
+name = "paused-interface_switch-interface_down_up"
+binaries = "iroh-defaults.toml"
+
+[[router]]
+name = "dc"
+
+[[router]]
+name = "lan-provider"
+nat = "destination-independent"
+
+[[router]]
+name = "lan-fetcher"
+nat = "destination-independent"
+
+[device.relay.eth0]
+gateway = "dc"
+
+[device.provider.eth0]
+gateway = "lan-provider"
+
+[device.fetcher.eth0]
+gateway = "lan-fetcher"
+
+[[step]]
+action      = "spawn"
+id          = "relay"
+device      = "relay"
+cmd         = ["${binary.relay}", "--dev"]
+ready_after = "2s"
+
+[[step]]
+action    = "set-impair"
+device    = "fetcher"
+interface = "eth0"
+impair    = { rate = 10000, loss = 0.0, latency = 50 }
+
+[[step]]
+action   = "spawn"
+kind     = "iroh-transfer"
+id       = "xfer"
+provider = "provider"
+fetcher  = "fetcher"
+strategy = "endpoint_id_with_direct_addrs"
+duration = "15s"
+relay_url = "http://$NETSIM_IP_relay:3340"
+
+[[step]]
+action   = "wait"
+duration = "5s"
+
+[[step]]
+action    = "link-down"
+device    = "fetcher"
+interface = "eth0"
+
+[[step]]
+action   = "wait"
+duration = "2s"
+
+[[step]]
+action    = "link-up"
+device    = "fetcher"
+interface = "eth0"
+
+[[step]]
+action = "wait-for"
+id     = "xfer"

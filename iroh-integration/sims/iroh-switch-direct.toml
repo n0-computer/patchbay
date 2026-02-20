@@ -10,7 +10,6 @@ id       = "xfer"
 provider = "provider"
 fetcher  = "fetcher"
 strategy = "endpoint_id_with_direct_addrs"
-fetch_args = ["--duration=20"]
 
 [[step]]
 action   = "wait"

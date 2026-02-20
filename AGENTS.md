@@ -173,8 +173,12 @@ after confirmation commit with "feat: short description" etc and some details af
 - Sim runner output layout was refactored to invocation-scoped roots:
   - `netsim run ...` now creates `sim-<yymmdd>-<hhmmss>[-N]` under the selected work dir, keeps `latest` as a relative symlink to that run root, writes one subdirectory per sim inside the run root, and writes `combined-results.{json,md}` into that same run root (`src/sim/runner.rs`, `src/sim/report.rs`).
 - `kind = "iroh-transfer"` no longer injects an implicit `--duration=10` or uses `step.duration`; transfer duration is now passed explicitly via `fetch_args` when needed (e.g. `fetch_args = ["--duration=20"]`) (`src/sim/transfer.rs`, `iroh-integration/sims/*.toml`).
-- Added optional Chuck-compatible reporting output for sim runs:
-  - New `[sim] chuck_compat = true` emits `report/<sim>__transfer.json` and `report/integration_<sim>__transfer.json` alongside standard netsim reports (`src/sim/mod.rs`, `src/sim/report.rs`, `src/sim/runner.rs`).
+- Removed legacy Chuck-compatible reporting output from sim runs:
+  - Dropped `[sim] chuck_compat` support and associated report writers; only standard `results.json`/`results.md` and combined reports are emitted now (`src/sim/mod.rs`, `src/sim/report.rs`, `src/sim/runner.rs`, `src/sim/topology.rs`).
+- UI run page navigation now includes a dedicated `overview` item in the sidebar:
+  - The main view shows a single per-sim table for the selected run with status and summarized throughput columns (`down` from transfer results, `up` from iperf results), with direct navigation into each sim detail page (`ui/src/App.tsx`, `ui/src/types.ts`).
+- Ported sim file naming cleanup:
+  - `iroh-integration/sims-ported/ported-*.toml` files were renamed in-place to remove the `ported-` prefix while keeping them in the same folder; manifest docs and in-file `name` values were updated accordingly.
 - Ported legacy iroh/chuck JSON suites from `resources/iroh-sims` into current TOML format under `iroh-integration/sims-ported/` (63 case files) with conversion notes in `iroh-integration/sims-ported/PORTED_FROM_RESOURCES.md`.
 - Added generic iperf parsing and comparison support in sim runner/reporting:
   - `step.parser = "iperf3-json"` now parses `iperf3 -J` output from step logs into `results.json`/`results.md` and combined reports (`src/sim/runner.rs`, `src/sim/report.rs`).

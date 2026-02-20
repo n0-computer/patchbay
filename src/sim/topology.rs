@@ -94,7 +94,6 @@ gateway = "r1"
                 name: "x".into(),
                 topology: Some("a".into()),
                 binaries: None,
-                chuck_compat: false,
             },
             ..Default::default()
         };
@@ -111,7 +110,6 @@ gateway = "r1"
                 name: "x".into(),
                 topology: Some("a".into()),
                 binaries: None,
-                chuck_compat: false,
             },
             router: vec![netsim::config::RouterCfg {
                 name: "r1".into(),

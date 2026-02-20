@@ -1,7 +1,15 @@
 [sim]
-name     = "iroh-1to1-public"
-topology = "1to1-public"
+name = "integration-iroh-1_to_1"
 binaries = "iroh-defaults.toml"
+
+[[router]]
+name = "dc"
+
+[device.provider.eth0]
+gateway = "dc"
+
+[device.fetcher.eth0]
+gateway = "dc"
 
 [[step]]
 action   = "spawn"
@@ -10,8 +18,8 @@ id       = "xfer"
 provider = "provider"
 fetcher  = "fetcher"
 strategy = "endpoint_id_with_direct_addrs"
+duration = "10s"
 
 [[step]]
 action = "wait-for"
 id     = "xfer"
-timeout = "60s"

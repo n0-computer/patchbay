@@ -21,8 +21,8 @@ fetchers = [
   "fetcher-8",
   "fetcher-9",
 ]
-fetch_args = ["--duration=20"]
 
 [[step]]
 action = "wait-for"
 id     = "xfer"
+timeout = "60s"
