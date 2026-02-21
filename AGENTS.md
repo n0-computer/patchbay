@@ -125,6 +125,11 @@ when a task is ready run the checks then ask to commit, don't commit without ask
 after confirmation commit with "feat: short description" etc and some details afterwards. elaborate open issues a little, explain decisions taken concisely
 
 ## Recent Changes
+- VM invocation ergonomics tightened in `Makefile.toml`:
+  - `cargo make run-vm -- <sims...>` now prebuilds musl release artifacts for `netsim` and `examples/transfer`, then runs VM with `--netsim-version path:<target>/x86_64-unknown-linux-musl/release/netsim`.
+  - `cargo make test-vm -- ...` now forwards args directly to `netsim-vm test` so flags like `--package` / `--test` are usable without awkward separator handling.
+- `netsim-vm test` cargo passthrough fixed:
+  - `cargo_args` are now appended directly to `cargo test --no-run` (without inserting an extra `--`), so cargo-level flags are applied as intended (`crates/netsim-vm/src/vm.rs`).
 - Cleanup logging verbosity adjusted:
   - `netsim cleanup` progress logs in `src/main.rs` now use `tracing::debug!` instead of `println!`.
 - Shared URL binary cache added and reused across `netsim` + `netsim-vm`:

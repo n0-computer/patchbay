@@ -673,7 +673,6 @@ fn build_and_collect_test_binaries(
         cmd.args(["--test", test]);
     }
     if !cargo_args.is_empty() {
-        cmd.arg("--");
         cmd.args(cargo_args);
     }
     cmd.env("CARGO_TARGET_DIR", target_dir);
