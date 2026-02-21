@@ -1,17 +1,30 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import PerfTab from './components/PerfTab'
 import LogsTab from './components/LogsTab'
+import PerfTab from './components/PerfTab'
 import TimelineTab from './components/TimelineTab'
 import type {
   CombinedResults,
+  IperfResult,
   RunIndex,
   RunManifest,
   RunProgress,
   SimResults,
   SimSummary,
+  TransferResult,
 } from './types'
 
 type Tab = 'perf' | 'logs' | 'timeline'
+type SelectedItem = 'overview' | string
+
+type NodeThroughput = { node: string; up: number; down: number }
+type SimOverviewRow = {
+  sim: string
+  sim_dir: string
+  status: string
+  nodes: number | null
+  up: number | null
+  down: number | null
+}
 
 async function fetchJson<T>(url: string): Promise<T | null> {
   try {
@@ -27,57 +40,113 @@ function baseForRun(run: string | null): string {
   return run ? `./${run}/` : './'
 }
 
+function sum(nums: number[]): number {
+  return nums.reduce((acc, v) => acc + v, 0)
+}
+
+function avg(nums: number[]): number | null {
+  return nums.length ? sum(nums) / nums.length : null
+}
+
+function transferNodeThroughput(transfers: TransferResult[]): NodeThroughput[] {
+  const byNode = new Map<string, NodeThroughput>()
+  for (const transfer of transfers) {
+    const mbps = transfer.mbps ?? 0
+    if (!byNode.has(transfer.provider)) {
+      byNode.set(transfer.provider, { node: transfer.provider, up: 0, down: 0 })
+    }
+    if (!byNode.has(transfer.fetcher)) {
+      byNode.set(transfer.fetcher, { node: transfer.fetcher, up: 0, down: 0 })
+    }
+    byNode.get(transfer.provider)!.up += mbps
+    byNode.get(transfer.fetcher)!.down += mbps
+  }
+  return [...byNode.values()].sort((a, b) => a.node.localeCompare(b.node))
+}
+
+function throughputFromTransfersOrIperf(transfers: TransferResult[], iperf: IperfResult[]) {
+  const nodeRows = transferNodeThroughput(transfers)
+  if (nodeRows.length > 0) {
+    return {
+      up: sum(nodeRows.map((n) => n.up)),
+      down: sum(nodeRows.map((n) => n.down)),
+    }
+  }
+  const iperfMbps = iperf.map((row) => row.mbps).filter((v): v is number => v != null)
+  const mean = avg(iperfMbps)
+  return { up: mean, down: mean }
+}
+
+function nodeCount(summary: SimSummary | null, transfers: TransferResult[], iperf: IperfResult[]): number | null {
+  if (summary?.setup) {
+    const routers = summary.setup.routers ?? 0
+    const devices = summary.setup.devices ?? 0
+    if (routers + devices > 0) {
+      return routers + devices
+    }
+  }
+  if (summary?.logs?.length) {
+    return new Set(summary.logs.map((l) => l.node)).size
+  }
+  const inferred = new Set<string>()
+  for (const row of transfers) {
+    inferred.add(row.provider)
+    inferred.add(row.fetcher)
+  }
+  for (const row of iperf) {
+    inferred.add(row.device)
+  }
+  return inferred.size > 0 ? inferred.size : null
+}
+
+function statusForSim(simDir: string, manifest: RunManifest | null, progress: RunProgress | null, summary: SimSummary | null): string {
+  const p = progress?.simulations.find((s) => s.sim_dir === simDir)
+  if (p?.status) return p.status
+  const m = manifest?.simulations.find((s) => s.sim_dir === simDir)
+  if (m?.status) return m.status
+  if (summary?.status) return summary.status
+  return 'pending'
+}
+
+function simNameForDir(simDir: string, manifest: RunManifest | null, progress: RunProgress | null, summary: SimSummary | null, combined: CombinedResults | null): string {
+  const p = progress?.simulations.find((s) => s.sim_dir === simDir)
+  if (p?.sim) return p.sim
+  const m = manifest?.simulations.find((s) => s.sim_dir === simDir)
+  if (m?.sim) return m.sim
+  const c = combined?.runs.find((s) => s.sim_dir === simDir)
+  if (c?.sim) return c.sim
+  if (summary?.sim) return summary.sim
+  return simDir
+}
+
+function fmt(v: number | null): string {
+  return v == null ? '—' : v.toFixed(2)
+}
+
 export default function App() {
   const [runs, setRuns] = useState<string[]>([])
-  const [workRoot, setWorkRoot] = useState<string>('')
+  const [workRoot, setWorkRoot] = useState('')
   const [selectedRun, setSelectedRun] = useState<string | null>(null)
+  const [selectedItem, setSelectedItem] = useState<SelectedItem>('overview')
+  const [tab, setTab] = useState<Tab>('perf')
 
   const [manifest, setManifest] = useState<RunManifest | null>(null)
   const [progress, setProgress] = useState<RunProgress | null>(null)
   const [combined, setCombined] = useState<CombinedResults | null>(null)
-
-  const [selectedItem, setSelectedItem] = useState<string>('overview') // overview | <sim_dir>
-  const [simSummary, setSimSummary] = useState<SimSummary | null>(null)
   const [simResults, setSimResults] = useState<SimResults | null>(null)
-  const [tab, setTab] = useState<Tab>('perf')
+  const [simSummaries, setSimSummaries] = useState<Record<string, SimSummary>>({})
 
   const refreshRuns = useCallback(async () => {
     const idx = await fetchJson<RunIndex>('/__netsim/runs')
     if (!idx) return
     setRuns(idx.runs)
     setWorkRoot(idx.workRoot)
-    if (!selectedRun && idx.runs.length > 0) {
-      setSelectedRun(idx.runs[0])
-      setSelectedItem('overview')
-    }
-  }, [selectedRun])
-
-  const refreshRun = useCallback(async () => {
-    const base = baseForRun(selectedRun)
-    const [m, p, c] = await Promise.all([
-      fetchJson<RunManifest>(`${base}manifest.json`),
-      fetchJson<RunProgress>(`${base}progress.json`),
-      fetchJson<CombinedResults>(`${base}combined-results.json`),
-    ])
-    setManifest(m)
-    setProgress(p)
-    setCombined(c)
-  }, [selectedRun])
-
-  const refreshSim = useCallback(async () => {
-    if (!selectedRun || selectedItem === 'overview') {
-      setSimSummary(null)
-      setSimResults(null)
-      return
-    }
-    const simBase = `${baseForRun(selectedRun)}${selectedItem}/`
-    const [summary, results] = await Promise.all([
-      fetchJson<SimSummary>(`${simBase}sim.json`),
-      fetchJson<SimResults>(`${simBase}results.json`),
-    ])
-    setSimSummary(summary)
-    setSimResults(results)
-  }, [selectedRun, selectedItem])
+    setSelectedRun((prev) => {
+      if (idx.runs.length === 0) return null
+      if (prev && idx.runs.includes(prev)) return prev
+      return idx.runs[0]
+    })
+  }, [])
 
   useEffect(() => {
     refreshRuns()
@@ -86,55 +155,104 @@ export default function App() {
   }, [refreshRuns])
 
   useEffect(() => {
-    refreshRun()
-  }, [refreshRun])
+    setSelectedItem('overview')
+    setTab('perf')
+    setManifest(null)
+    setProgress(null)
+    setCombined(null)
+    setSimSummaries({})
+    setSimResults(null)
+  }, [selectedRun])
 
   useEffect(() => {
-    refreshSim()
-  }, [refreshSim])
+    if (!selectedRun) return
+    let dead = false
+    const load = async () => {
+      const base = baseForRun(selectedRun)
+      const [m, p, c] = await Promise.all([
+        fetchJson<RunManifest>(`${base}manifest.json`),
+        fetchJson<RunProgress>(`${base}progress.json`),
+        fetchJson<CombinedResults>(`${base}combined-results.json`),
+      ])
+      if (dead) return
+      setManifest(m)
+      setProgress(p)
+      setCombined(c)
 
-  useEffect(() => {
-    if (progress?.status !== 'running') return
-    const id = setInterval(() => {
-      refreshRun()
-      refreshSim()
-    }, 1000)
-    return () => clearInterval(id)
-  }, [progress?.status, refreshRun, refreshSim])
+      const simDirs = new Set<string>()
+      for (const row of m?.simulations ?? []) simDirs.add(row.sim_dir)
+      for (const row of p?.simulations ?? []) if (row.sim_dir) simDirs.add(row.sim_dir)
+      for (const row of c?.runs ?? []) if (row.sim_dir) simDirs.add(row.sim_dir)
 
-  const simRows = useMemo(() => {
-    const byProgress = new Map((progress?.simulations ?? []).map((s) => [s.sim_dir ?? '', s]))
-    const byManifest = new Map((manifest?.simulations ?? []).map((s) => [s.sim_dir, s]))
-    const byCombined = new Map((combined?.runs ?? []).map((s) => [s.sim_dir ?? '', s]))
-
-    const simDirs = new Set<string>([
-      ...(manifest?.simulations ?? []).map((s) => s.sim_dir),
-      ...(progress?.simulations ?? []).map((s) => s.sim_dir ?? '').filter(Boolean),
-      ...(combined?.runs ?? []).map((s) => s.sim_dir ?? '').filter(Boolean),
-    ])
-
-    return [...simDirs].map((simDir) => {
-      const m = byManifest.get(simDir)
-      const p = byProgress.get(simDir)
-      const c = byCombined.get(simDir)
-      const transfers = c?.transfers ?? []
-      const iperf = c?.iperf ?? []
-      const downRows = transfers.map((t) => t.mbps).filter((v): v is number => v != null)
-      const upRows = iperf.map((i) => i.mbps).filter((v): v is number => v != null)
-      const down = downRows.length ? downRows.reduce((a, b) => a + b, 0) / downRows.length : undefined
-      const up = upRows.length ? upRows.reduce((a, b) => a + b, 0) / upRows.length : undefined
-      return {
-        sim: p?.sim ?? m?.sim ?? c?.sim ?? simDir,
-        sim_dir: simDir,
-        status: p?.status ?? m?.status ?? 'pending',
-        down,
-        up,
+      const loaded = await Promise.all(
+        [...simDirs].map(async (simDir) => {
+          const summary = await fetchJson<SimSummary>(`${base}${simDir}/sim.json`)
+          return summary ? ([simDir, summary] as const) : null
+        }),
+      )
+      if (dead) return
+      const next: Record<string, SimSummary> = {}
+      for (const row of loaded) {
+        if (row) next[row[0]] = row[1]
       }
-    }).sort((a, b) => a.sim.localeCompare(b.sim))
-  }, [combined, manifest, progress])
+      setSimSummaries(next)
+    }
+    load()
+    const id = setInterval(load, 1000)
+    return () => {
+      dead = true
+      clearInterval(id)
+    }
+  }, [selectedRun])
 
+  useEffect(() => {
+    if (!selectedRun || selectedItem === 'overview') {
+      setSimResults(null)
+      return
+    }
+    let dead = false
+    const load = async () => {
+      const base = baseForRun(selectedRun)
+      const results = await fetchJson<SimResults>(`${base}${selectedItem}/results.json`)
+      if (!dead) setSimResults(results)
+    }
+    load()
+    const runStatus = progress?.status ?? manifest?.status
+    const intervalMs = runStatus === 'running' ? 1000 : 3000
+    const id = setInterval(load, intervalMs)
+    return () => {
+      dead = true
+      clearInterval(id)
+    }
+  }, [selectedRun, selectedItem, manifest?.status, progress?.status])
+
+  const simRows = useMemo<SimOverviewRow[]>(() => {
+    const simDirs = new Set<string>()
+    for (const row of manifest?.simulations ?? []) simDirs.add(row.sim_dir)
+    for (const row of progress?.simulations ?? []) if (row.sim_dir) simDirs.add(row.sim_dir)
+    for (const row of combined?.runs ?? []) if (row.sim_dir) simDirs.add(row.sim_dir)
+
+    return [...simDirs]
+      .map((simDir) => {
+        const simSummary = simSummaries[simDir] ?? null
+        const row = combined?.runs.find((r) => r.sim_dir === simDir)
+        const transfers = row?.transfers ?? []
+        const iperf = row?.iperf ?? []
+        const throughput = throughputFromTransfersOrIperf(transfers, iperf)
+        return {
+          sim: simNameForDir(simDir, manifest, progress, simSummary, combined),
+          sim_dir: simDir,
+          status: statusForSim(simDir, manifest, progress, simSummary),
+          nodes: nodeCount(simSummary, transfers, iperf),
+          up: throughput.up,
+          down: throughput.down,
+        }
+      })
+      .sort((a, b) => a.sim.localeCompare(b.sim))
+  }, [combined, manifest, progress, simSummaries])
+
+  const activeSummary = selectedItem === 'overview' ? null : (simSummaries[selectedItem] ?? null)
   const runBase = baseForRun(selectedRun)
-  const isOverview = selectedItem === 'overview'
 
   return (
     <div className="app">
@@ -142,13 +260,12 @@ export default function App() {
         <h1>netsim</h1>
         <select
           value={selectedRun ?? ''}
-          onChange={(e) => {
-            setSelectedRun(e.target.value || null)
-            setSelectedItem('overview')
-          }}
+          onChange={(e) => setSelectedRun(e.target.value || null)}
         >
           <option value="">select run</option>
-          {runs.map((r) => <option key={r} value={r}>{r}</option>)}
+          {runs.map((run) => (
+            <option key={run} value={run}>{run}</option>
+          ))}
         </select>
         {progress && (
           <span style={{ color: 'var(--text-muted)', fontSize: 12 }}>
@@ -156,14 +273,18 @@ export default function App() {
             {progress.current_sim ? ` · ${progress.current_sim}` : ''}
           </span>
         )}
-        {workRoot && <span style={{ marginLeft: 'auto', color: 'var(--text-muted)' }}>{workRoot}</span>}
+        {workRoot && (
+          <span style={{ marginLeft: 'auto', color: 'var(--text-muted)' }}>
+            {workRoot}
+          </span>
+        )}
       </div>
 
       <div style={{ display: 'flex', flex: 1, minHeight: 0 }}>
-        <div className="logs-sidebar" style={{ width: 260 }}>
+        <div className="logs-sidebar" style={{ width: 280 }}>
           <div className="node-label">run</div>
           <div
-            className={`file-item${isOverview ? ' active' : ''}`}
+            className={`file-item${selectedItem === 'overview' ? ' active' : ''}`}
             onClick={() => setSelectedItem('overview')}
           >
             overview
@@ -183,18 +304,19 @@ export default function App() {
         </div>
 
         <div style={{ display: 'flex', flexDirection: 'column', flex: 1, minWidth: 0 }}>
-          {isOverview ? (
+          {selectedItem === 'overview' ? (
             <div className="perf-layout">
               <div className="section">
-                <div className="section-header">overview</div>
+                <div className="section-header">run overview</div>
                 <div className="tbl-wrap">
                   <table>
                     <thead>
                       <tr>
                         <th>sim</th>
                         <th>status</th>
-                        <th>down_mbps (iroh)</th>
-                        <th>up_mbps (iperf)</th>
+                        <th>nodes</th>
+                        <th>up_mbps (iroh/iperf)</th>
+                        <th>down_mbps (iroh/iperf)</th>
                         <th>open</th>
                       </tr>
                     </thead>
@@ -203,9 +325,14 @@ export default function App() {
                         <tr key={row.sim_dir}>
                           <td>{row.sim}</td>
                           <td>{row.status}</td>
-                          <td>{row.down == null ? '—' : row.down.toFixed(2)}</td>
-                          <td>{row.up == null ? '—' : row.up.toFixed(2)}</td>
-                          <td><button className="btn" onClick={() => setSelectedItem(row.sim_dir)}>open</button></td>
+                          <td>{row.nodes ?? '—'}</td>
+                          <td>{fmt(row.up)}</td>
+                          <td>{fmt(row.down)}</td>
+                          <td>
+                            <button className="btn" onClick={() => setSelectedItem(row.sim_dir)}>
+                              open
+                            </button>
+                          </td>
                         </tr>
                       ))}
                     </tbody>
@@ -216,29 +343,23 @@ export default function App() {
           ) : (
             <>
               <div className="tabs">
-                {(['perf', 'logs', 'timeline'] as Tab[]).map((t) => (
+                {(['perf', 'logs', 'timeline'] as Tab[]).map((viewTab) => (
                   <button
-                    key={t}
-                    className={`tab-btn${tab === t ? ' active' : ''}`}
-                    onClick={() => setTab(t)}
+                    key={viewTab}
+                    className={`tab-btn${tab === viewTab ? ' active' : ''}`}
+                    onClick={() => setTab(viewTab)}
                   >
-                    {t}
+                    {viewTab}
                   </button>
                 ))}
               </div>
               <div className="tab-content">
                 {tab === 'perf' && <PerfTab results={simResults} />}
                 {tab === 'logs' && (
-                  <LogsTab
-                    base={`${runBase}${selectedItem}/`}
-                    logs={simSummary?.logs ?? []}
-                  />
+                  <LogsTab base={`${runBase}${selectedItem}/`} logs={activeSummary?.logs ?? []} />
                 )}
                 {tab === 'timeline' && (
-                  <TimelineTab
-                    base={`${runBase}${selectedItem}/`}
-                    logs={simSummary?.logs ?? []}
-                  />
+                  <TimelineTab base={`${runBase}${selectedItem}/`} logs={activeSummary?.logs ?? []} />
                 )}
               </div>
             </>

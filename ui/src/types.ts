@@ -44,6 +44,12 @@ export interface SimSummary {
   started_at: string
   ended_at: string
   runtime_ms: number
+  setup?: {
+    routers?: number
+    devices?: number
+    regions?: number
+    steps?: number
+  }
   logs: SimLogEntry[]
   error?: {
     phase?: string

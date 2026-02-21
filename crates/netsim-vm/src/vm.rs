@@ -442,11 +442,19 @@ fn run_in_guest(vm: &VmConfig, args: &RunVmArgs) -> Result<()> {
         "env".to_string(),
         "NETSIM_IN_VM=1".to_string(),
         "NETSIM_TARGET_DIR=/target".to_string(),
+    ];
+    if let Ok(rust_log) = std::env::var("NETSIM_RUST_LOG") {
+        parts.push(format!("NETSIM_RUST_LOG={rust_log}"));
+    }
+    if let Ok(rust_log) = std::env::var("RUST_LOG") {
+        parts.push(format!("RUST_LOG={rust_log}"));
+    }
+    parts.extend([
         guest_exe,
         "run".to_string(),
         "--work-dir".to_string(),
         "/work".to_string(),
-    ];
+    ]);
 
     for ov in &staged_overrides {
         parts.push("--binary".to_string());

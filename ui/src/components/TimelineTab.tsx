@@ -38,35 +38,18 @@ function parseTransferEvents(node: string, text: string): EventRow[] {
   return out
 }
 
-function parseQlogEvents(node: string, text: string): EventRow[] {
-  const out: EventRow[] = []
-  for (const line of text.split('\n')) {
-    const s = line.trim().replace(/^\x1e/, '')
-    if (!s) continue
-    try {
-      const v = JSON.parse(s) as Record<string, unknown>
-      if (typeof v.time === 'number' && typeof v.name === 'string') {
-        out.push({ node, t: v.time, label: `qlog ${v.name}` })
-      }
-    } catch { }
-  }
-  return out
-}
-
 export default function TimelineTab({ base, logs }: Props) {
   const [events, setEvents] = useState<EventRow[]>([])
 
   useEffect(() => {
     let dead = false
-    const transferLogs = logs.filter((l) => l.kind === 'transfer' || l.kind === 'qlog')
+    const transferLogs = logs.filter((l) => l.kind === 'transfer')
     Promise.all(
       transferLogs.map(async (log) => {
         const r = await fetch(`${base}${log.path}`)
         if (!r.ok) return [] as EventRow[]
         const text = await r.text()
-        return log.kind === 'qlog'
-          ? parseQlogEvents(log.node, text)
-          : parseTransferEvents(log.node, text)
+        return parseTransferEvents(log.node, text)
       }),
     ).then((rows) => {
       if (!dead) setEvents(rows.flat())

@@ -177,6 +177,11 @@ after confirmation commit with "feat: short description" etc and some details af
   - Dropped `[sim] chuck_compat` support and associated report writers; only standard `results.json`/`results.md` and combined reports are emitted now (`src/sim/mod.rs`, `src/sim/report.rs`, `src/sim/runner.rs`, `src/sim/topology.rs`).
 - UI run page navigation now includes a dedicated `overview` item in the sidebar:
   - The main view shows a single per-sim table for the selected run with status and summarized throughput columns (`down` from transfer results, `up` from iperf results), with direct navigation into each sim detail page (`ui/src/App.tsx`, `ui/src/types.ts`).
+- UI run overview/perf refactor:
+  - Overview table now reports per-sim `status`, inferred `nodes`, and `up/down` throughput using transfer-first aggregation with iperf fallback.
+  - Sim perf now includes a per-node transfer throughput table (`up/down`) derived from transfer results, with detailed transfer rows retained below.
+  - Log viewer no longer attempts to fetch/render qlog files; qlog entries remain discoverable in metadata but are ignored by `LogsTab`/timeline fetch paths.
+- VM env forwarding now passes `NETSIM_RUST_LOG` (and `RUST_LOG`) into guest `netsim run` execution (`crates/netsim-vm/src/vm.rs`) so transfer/process logging controls work in VM runs as expected.
 - Ported sim file naming cleanup:
   - `iroh-integration/sims-ported/ported-*.toml` files were renamed in-place to remove the `ported-` prefix while keeping them in the same folder; manifest docs and in-file `name` values were updated accordingly.
 - Ported legacy iroh/chuck JSON suites from `resources/iroh-sims` into current TOML format under `iroh-integration/sims-ported/` (63 case files) with conversion notes in `iroh-integration/sims-ported/PORTED_FROM_RESOURCES.md`.
