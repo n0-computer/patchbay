@@ -135,6 +135,9 @@ export default function App() {
   const [combined, setCombined] = useState<CombinedResults | null>(null)
   const [simResults, setSimResults] = useState<SimResults | null>(null)
   const [simSummaries, setSimSummaries] = useState<Record<string, SimSummary>>({})
+  const [leftCollapsed, setLeftCollapsed] = useState(false)
+  const [logJump, setLogJump] = useState<{ node: string; path: string; timeLabel: string; nonce: number } | null>(null)
+  const [manualReloadTick, setManualReloadTick] = useState(0)
 
   const refreshRuns = useCallback(async () => {
     const idx = await fetchJson<RunIndex>('/__netsim/runs')
@@ -198,12 +201,13 @@ export default function App() {
       setSimSummaries(next)
     }
     load()
-    const id = setInterval(load, 1000)
+    const shouldPoll = tab !== 'logs'
+    const id = shouldPoll ? setInterval(load, 1000) : null
     return () => {
       dead = true
-      clearInterval(id)
+      if (id) clearInterval(id)
     }
-  }, [selectedRun])
+  }, [selectedRun, tab, manualReloadTick])
 
   useEffect(() => {
     if (!selectedRun || selectedItem === 'overview') {
@@ -217,6 +221,11 @@ export default function App() {
       if (!dead) setSimResults(results)
     }
     load()
+    if (tab !== 'perf') {
+      return () => {
+        dead = true
+      }
+    }
     const runStatus = progress?.status ?? manifest?.status
     const intervalMs = runStatus === 'running' ? 1000 : 3000
     const id = setInterval(load, intervalMs)
@@ -224,7 +233,7 @@ export default function App() {
       dead = true
       clearInterval(id)
     }
-  }, [selectedRun, selectedItem, manifest?.status, progress?.status])
+  }, [selectedRun, selectedItem, manifest?.status, progress?.status, tab, manualReloadTick])
 
   const simRows = useMemo<SimOverviewRow[]>(() => {
     const simDirs = new Set<string>()
@@ -254,6 +263,11 @@ export default function App() {
   const activeSummary = selectedItem === 'overview' ? null : (simSummaries[selectedItem] ?? null)
   const runBase = baseForRun(selectedRun)
 
+  const handleJumpToLog = useCallback((target: { node: string; path: string; timeLabel: string }) => {
+    setTab('logs')
+    setLogJump({ ...target, nonce: Date.now() })
+  }, [])
+
   return (
     <div className="app">
       <div className="topbar">
@@ -273,6 +287,7 @@ export default function App() {
             {progress.current_sim ? ` · ${progress.current_sim}` : ''}
           </span>
         )}
+        <button className="btn" onClick={() => setManualReloadTick((v) => v + 1)}>reload</button>
         {workRoot && (
           <span style={{ marginLeft: 'auto', color: 'var(--text-muted)' }}>
             {workRoot}
@@ -281,26 +296,35 @@ export default function App() {
       </div>
 
       <div style={{ display: 'flex', flex: 1, minHeight: 0 }}>
-        <div className="logs-sidebar" style={{ width: 280 }}>
-          <div className="node-label">run</div>
-          <div
-            className={`file-item${selectedItem === 'overview' ? ' active' : ''}`}
-            onClick={() => setSelectedItem('overview')}
-          >
-            overview
+        <div className={`logs-sidebar ${leftCollapsed ? 'collapsed' : ''}`} style={{ width: leftCollapsed ? 44 : 280 }}>
+          <div className="node-label" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+            <span>{leftCollapsed ? '≡' : 'run'}</span>
+            <button className="btn" style={{ padding: '2px 6px' }} onClick={() => setLeftCollapsed((v) => !v)}>
+              {leftCollapsed ? '>' : '<'}
+            </button>
           </div>
-          <div className="node-group">
-            <div className="node-label">simulations</div>
-            {simRows.map((row) => (
+          {!leftCollapsed && (
+            <>
               <div
-                key={row.sim_dir}
-                className={`file-item${selectedItem === row.sim_dir ? ' active' : ''}`}
-                onClick={() => setSelectedItem(row.sim_dir)}
+                className={`file-item${selectedItem === 'overview' ? ' active' : ''}`}
+                onClick={() => setSelectedItem('overview')}
               >
-                {row.sim} [{row.status}]
+                overview
               </div>
-            ))}
-          </div>
+              <div className="node-group">
+                <div className="node-label">simulations</div>
+                {simRows.map((row) => (
+                  <div
+                    key={row.sim_dir}
+                    className={`file-item${selectedItem === row.sim_dir ? ' active' : ''}`}
+                    onClick={() => setSelectedItem(row.sim_dir)}
+                  >
+                    {row.sim} [{row.status}]
+                  </div>
+                ))}
+              </div>
+            </>
+          )}
         </div>
 
         <div style={{ display: 'flex', flexDirection: 'column', flex: 1, minWidth: 0 }}>
@@ -356,10 +380,10 @@ export default function App() {
               <div className="tab-content">
                 {tab === 'perf' && <PerfTab results={simResults} />}
                 {tab === 'logs' && (
-                  <LogsTab base={`${runBase}${selectedItem}/`} logs={activeSummary?.logs ?? []} />
+                  <LogsTab base={`${runBase}${selectedItem}/`} logs={activeSummary?.logs ?? []} jumpTarget={logJump} />
                 )}
                 {tab === 'timeline' && (
-                  <TimelineTab base={`${runBase}${selectedItem}/`} logs={activeSummary?.logs ?? []} />
+                  <TimelineTab base={`${runBase}${selectedItem}/`} logs={activeSummary?.logs ?? []} onJumpToLog={handleJumpToLog} />
                 )}
               </div>
             </>
