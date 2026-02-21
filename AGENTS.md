@@ -112,7 +112,7 @@ cargo make test-vm
 all plans are in plans/. keep overview of plans in plans/PLAN.md. 
 document important findings and changes in AGENTS.md
 always document public items, strictly adhere to official rust doc conventions and naming conventions
-run cargo check, cargo clippy --tests --examples --fix, cargo fmt before each commit (and require to be clean)
+run cargo check, cargo clippy --tests --examples --fix, cargo test, cargo fmt, and ui e2e (cd ui && npm run test:e2e) before each commit (and require all to pass cleanly)
 when a task is ready run the checks then ask to commit, don't commit without asking, but stage files already.
 after confirmation commit with "feat: short description" etc and some details afterwards. elaborate open issues a little, explain decisions taken concisely
 
