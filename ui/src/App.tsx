@@ -21,6 +21,7 @@ type SimOverviewRow = {
   sim: string
   sim_dir: string
   status: string
+  error: string | null
   nodes: number | null
   up: number | null
   down: number | null
@@ -106,6 +107,19 @@ function statusForSim(simDir: string, manifest: RunManifest | null, progress: Ru
   if (m?.status) return m.status
   if (summary?.status) return summary.status
   return 'pending'
+}
+
+function errorForSim(simDir: string, manifest: RunManifest | null, progress: RunProgress | null, summary: SimSummary | null): string | null {
+  const p = progress?.simulations.find((s) => s.sim_dir === simDir)
+  if (p?.error) return p.error
+  const m = manifest?.simulations.find((s) => s.sim_dir === simDir)
+  if (m?.error) return m.error
+  return summary?.error_line ?? null
+}
+
+function shortText(v: string | null, max = 120): string {
+  if (!v) return ''
+  return v.length > max ? `${v.slice(0, max - 1)}…` : v
 }
 
 function simNameForDir(simDir: string, manifest: RunManifest | null, progress: RunProgress | null, summary: SimSummary | null, combined: CombinedResults | null): string {
@@ -252,6 +266,7 @@ export default function App() {
           sim: simNameForDir(simDir, manifest, progress, simSummary, combined),
           sim_dir: simDir,
           status: statusForSim(simDir, manifest, progress, simSummary),
+          error: errorForSim(simDir, manifest, progress, simSummary),
           nodes: nodeCount(simSummary, transfers, iperf),
           up: throughput.up,
           down: throughput.down,
@@ -320,6 +335,7 @@ export default function App() {
                     onClick={() => setSelectedItem(row.sim_dir)}
                   >
                     {row.sim} [{row.status}]
+                    {row.error ? ` - ${shortText(row.error, 60)}` : ''}
                   </div>
                 ))}
               </div>
@@ -338,6 +354,7 @@ export default function App() {
                       <tr>
                         <th>sim</th>
                         <th>status</th>
+                        <th>error</th>
                         <th>nodes</th>
                         <th>up_mbps (iroh/iperf)</th>
                         <th>down_mbps (iroh/iperf)</th>
@@ -349,6 +366,7 @@ export default function App() {
                         <tr key={row.sim_dir}>
                           <td>{row.sim}</td>
                           <td>{row.status}</td>
+                          <td title={row.error ?? ''}>{row.error ? shortText(row.error, 140) : '—'}</td>
                           <td>{row.nodes ?? '—'}</td>
                           <td>{fmt(row.up)}</td>
                           <td>{fmt(row.down)}</td>

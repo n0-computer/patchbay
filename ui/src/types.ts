@@ -51,6 +51,7 @@ export interface SimSummary {
     steps?: number
   }
   logs: SimLogEntry[]
+  error_line?: string | null
   error?: {
     phase?: string
     message?: string
@@ -63,6 +64,7 @@ export interface ManifestSimSummary {
   status: string
   runtime_ms?: number | null
   sim_json?: string | null
+  error?: string | null
 }
 
 export interface RunManifest {
@@ -81,6 +83,7 @@ export interface ProgressSim {
   sim_dir?: string | null
   runtime_ms?: number | null
   sim_json?: string | null
+  error?: string | null
 }
 
 export interface RunProgress {

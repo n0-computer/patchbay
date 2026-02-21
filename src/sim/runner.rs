@@ -5,6 +5,7 @@ use netsim::assets::{
 use std::collections::{BTreeSet, HashMap};
 use std::fs::OpenOptions;
 use std::io::{BufRead, BufReader};
+use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -44,6 +45,7 @@ pub struct SimState {
     pub binaries: HashMap<String, PathBuf>,
     pub work_dir: PathBuf,
     pub sim_name: String,
+    relay_assets: HashMap<String, RelayRuntimeAssets>,
 }
 
 struct GenericProcess {
@@ -63,6 +65,11 @@ struct ParserConfig {
 #[derive(Clone, Copy)]
 enum StepParser {
     Iperf3Json,
+}
+
+#[derive(Debug, Clone)]
+struct RelayRuntimeAssets {
+    config_path: PathBuf,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -108,6 +115,7 @@ struct SimSummary {
     runtime_ms: u128,
     setup: SimSetupSummary,
     logs: Vec<SimLogEntry>,
+    error_line: Option<String>,
     error: Option<SimFailureInfo>,
 }
 
@@ -136,6 +144,7 @@ struct ManifestSimSummary {
     status: String,
     runtime_ms: Option<u128>,
     sim_json: Option<String>,
+    error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -157,6 +166,7 @@ struct ProgressSim {
     sim_dir: Option<String>,
     runtime_ms: Option<u128>,
     sim_json: Option<String>,
+    error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -231,6 +241,7 @@ pub async fn run_sims(
                 sim_dir: None,
                 runtime_ms: None,
                 sim_json: None,
+                error: None,
             })
             .collect(),
     };
@@ -257,6 +268,7 @@ pub async fn run_sims(
             item.runtime_ms = Some(outcome.summary.runtime_ms);
             item.sim_json = Some(format!("{}/sim.json", outcome.summary.sim_dir));
             item.sim = outcome.summary.sim.clone();
+            item.error = outcome.summary.error_line.clone();
         }
         progress.completed = outcomes.len() + 1;
         if outcome.success {
@@ -395,6 +407,7 @@ async fn run_single_sim(
                 runtime_ms: started_instant.elapsed().as_millis(),
                 setup: resolved_setup,
                 logs: collect_sim_logs(&run_work_dir)?,
+                error_line: None,
                 error: None,
             };
             write_sim_summary(&run_work_dir, &summary).await?;
@@ -405,7 +418,11 @@ async fn run_single_sim(
             })
         }
         Err(err) => {
-            let failure = extract_failure_info(&err);
+            let error_line = find_last_error_line_in_out_logs(&run_work_dir);
+            let mut failure = extract_failure_info(&err);
+            if let Some(line) = error_line.clone() {
+                failure.message = line;
+            }
             let resolved_setup = setup_topology_summary(&setup, None);
             let summary = SimSummary {
                 sim: sim_name,
@@ -420,6 +437,7 @@ async fn run_single_sim(
                 runtime_ms: started_instant.elapsed().as_millis(),
                 setup: resolved_setup,
                 logs: collect_sim_logs(&run_work_dir).unwrap_or_default(),
+                error_line,
                 error: Some(failure),
             };
             write_sim_summary(&run_work_dir, &summary).await?;
@@ -570,6 +588,7 @@ async fn execute_single_sim(
         binaries: binary_paths,
         work_dir: run_work_dir.to_path_buf(),
         sim_name: sim_name.to_string(),
+        relay_assets: HashMap::new(),
     };
 
     // ── Execute steps ────────────────────────────────────────────────────
@@ -650,13 +669,17 @@ async fn finalize_failed_sim(
     sim_name: &str,
     started_at_str: String,
     elapsed: Duration,
-    failure: SimFailureInfo,
+    mut failure: SimFailureInfo,
     setup: SimSetupSummary,
 ) -> Result<SimRunOutcome> {
     let run_work_dir = prepare_sim_dir(run_root, sim_name)?;
     tokio::fs::create_dir_all(&run_work_dir)
         .await
         .context("create failed sim work dir")?;
+    let error_line = find_last_error_line_in_out_logs(&run_work_dir);
+    if let Some(line) = error_line.clone() {
+        failure.message = line;
+    }
     let summary = SimSummary {
         sim: sim_name.to_string(),
         sim_dir: run_work_dir
@@ -673,6 +696,7 @@ async fn finalize_failed_sim(
             ..setup
         },
         logs: collect_sim_logs(&run_work_dir).unwrap_or_default(),
+        error_line,
         error: Some(failure),
     };
     write_sim_summary(&run_work_dir, &summary).await?;
@@ -726,6 +750,12 @@ fn build_run_manifest(
                 status: sim.status.clone(),
                 runtime_ms,
                 sim_json: sim.sim_json.clone(),
+                error: sim.error.clone().or_else(|| {
+                    sim.sim_dir
+                        .as_deref()
+                        .and_then(|dir| by_sim_dir.get(dir))
+                        .and_then(|outcome| outcome.summary.error_line.clone())
+                }),
             }
         })
         .collect();
@@ -852,6 +882,47 @@ fn extract_failure_info(err: &anyhow::Error) -> SimFailureInfo {
         message: format!("{err:#}"),
         step,
     }
+}
+
+fn find_last_error_line_in_out_logs(run_work_dir: &Path) -> Option<String> {
+    let mut out_logs = Vec::new();
+    collect_out_log_paths(run_work_dir, &mut out_logs);
+    out_logs.sort();
+    let mut last: Option<String> = None;
+    for path in out_logs {
+        if let Some(line) = last_error_line_in_file(&path) {
+            last = Some(line);
+        }
+    }
+    last
+}
+
+fn collect_out_log_paths(dir: &Path, out: &mut Vec<PathBuf>) {
+    let read = match std::fs::read_dir(dir) {
+        Ok(rd) => rd,
+        Err(_) => return,
+    };
+    for ent in read.flatten() {
+        let path = ent.path();
+        if path.is_dir() {
+            collect_out_log_paths(&path, out);
+            continue;
+        }
+        if path.file_name().and_then(|s| s.to_str()) == Some("out.log") {
+            out.push(path);
+        }
+    }
+}
+
+fn last_error_line_in_file(path: &Path) -> Option<String> {
+    let file = std::fs::File::open(path).ok()?;
+    let mut last = None;
+    for line in BufReader::new(file).lines().map_while(Result::ok) {
+        if line.to_ascii_lowercase().contains("error") {
+            last = Some(line);
+        }
+    }
+    last
 }
 
 fn now_stamp() -> Result<String> {
@@ -1066,9 +1137,10 @@ fn execute_step(state: &mut SimState, step: &Step) -> Result<()> {
 
             // Generic spawn.
             let device = step.device.as_deref().context("spawn: missing device")?;
-            let cmd_parts = state
+            let mut cmd_parts = state
                 .env
                 .interpolate(step.cmd.as_deref().context("spawn: missing cmd")?)?;
+            maybe_inject_relay_config_path(state, device, &mut cmd_parts)?;
             tracing::info!(
                 id,
                 device,
@@ -1246,12 +1318,111 @@ fn prepare_cmd(
     for (k, v) in state.env.process_env() {
         cmd.env(k, v);
     }
-    let rust_log = std::env::var("NETSIM_RUST_LOG").unwrap_or_else(|_| "info".to_string());
+    let rust_log = std::env::var("NETSIM_RUST_LOG")
+        .unwrap_or_else(|_| "iroh=info,iroh::_events=debug".to_string());
     cmd.env("RUST_LOG", rust_log);
     for (k, v) in extra_env {
         cmd.env(k, state.env.interpolate_str(v)?);
     }
     Ok(cmd)
+}
+
+fn maybe_inject_relay_config_path(
+    state: &mut SimState,
+    device: &str,
+    cmd_parts: &mut Vec<String>,
+) -> Result<()> {
+    if cmd_parts.is_empty() {
+        return Ok(());
+    }
+    let Some(relay_bin) = state.binaries.get("relay") else {
+        return Ok(());
+    };
+    if cmd_parts[0] != relay_bin.to_string_lossy() {
+        return Ok(());
+    }
+    if cmd_parts.iter().any(|arg| arg == "--config-path") {
+        return Ok(());
+    }
+    let assets = ensure_relay_runtime_assets(state, device)?;
+    cmd_parts.push("--config-path".to_string());
+    cmd_parts.push(assets.config_path.display().to_string());
+    Ok(())
+}
+
+fn ensure_relay_runtime_assets(state: &mut SimState, device: &str) -> Result<RelayRuntimeAssets> {
+    if let Some(existing) = state.relay_assets.get(device) {
+        return Ok(existing.clone());
+    }
+    let key_suffix = device
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_uppercase()
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    let relay_ip = state
+        .env
+        .interpolate_str(&format!("$NETSIM_IP_{key_suffix}"))
+        .with_context(|| format!("resolve relay IP for device '{device}'"))?;
+    let ip = relay_ip
+        .parse::<IpAddr>()
+        .with_context(|| format!("parse relay IP '{relay_ip}' for device '{device}'"))?;
+    let relay_dir = state
+        .work_dir
+        .join("relay")
+        .join(sanitize_for_filename(device));
+    std::fs::create_dir_all(&relay_dir)
+        .with_context(|| format!("create relay runtime dir {}", relay_dir.display()))?;
+    let cert_path = relay_dir.join("certificate.crt");
+    let key_path = relay_dir.join("certificate.key");
+    if !cert_path.exists() || !key_path.exists() {
+        let cert = generate_self_signed_relay_cert(ip)?;
+        std::fs::write(&cert_path, cert.cert_pem)
+            .with_context(|| format!("write {}", cert_path.display()))?;
+        std::fs::write(&key_path, cert.key_pem)
+            .with_context(|| format!("write {}", key_path.display()))?;
+    }
+    let config_path = relay_dir.join("relay.cfg");
+    if !config_path.exists() {
+        let cfg = format!(
+            "enable_relay = true\nenable_metrics = true\nenable_quic_addr_discovery = true\n\n[tls]\nmanual_cert_path=\"{}\"\nmanual_key_path=\"{}\"\ncert_mode = \"Manual\"\n",
+            cert_path.display(),
+            key_path.display()
+        );
+        std::fs::write(&config_path, cfg)
+            .with_context(|| format!("write {}", config_path.display()))?;
+    }
+    let assets = RelayRuntimeAssets { config_path };
+    state
+        .relay_assets
+        .insert(device.to_string(), assets.clone());
+    Ok(assets)
+}
+
+struct GeneratedRelayCert {
+    cert_pem: String,
+    key_pem: String,
+}
+
+fn generate_self_signed_relay_cert(ip: IpAddr) -> Result<GeneratedRelayCert> {
+    let mut params = rcgen::CertificateParams::new(vec![])?;
+    params
+        .distinguished_name
+        .push(rcgen::DnType::CommonName, "netsim-relay");
+    params.subject_alt_names.push(rcgen::SanType::IpAddress(ip));
+    params
+        .subject_alt_names
+        .push(rcgen::SanType::DnsName("localhost".try_into()?));
+    let key = rcgen::KeyPair::generate()?;
+    let cert = params.self_signed(&key)?;
+    Ok(GeneratedRelayCert {
+        cert_pem: cert.pem(),
+        key_pem: key.serialize_pem(),
+    })
 }
 
 fn build_parser_config(step: &Step, device: &str, log_path: &Path) -> Result<Option<ParserConfig>> {
