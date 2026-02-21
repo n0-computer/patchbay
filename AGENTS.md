@@ -14,25 +14,22 @@ This file captures key context, conventions, and workflows learned while working
 - **LabCore**: low-level topology and build logic (routers/switches/devices).
 - **Lab**: convenience wrapper with dc/home/isp shorthands; maps to `LabCore`.
 - **Lab root namespace**: IX and transit links are built in a dedicated lab namespace (`<prefix>-root`), not host root.
-- **Netns backend**: `src/netns.rs` selects backend (`fd` default, `named`, `auto`) and provides create/open/cleanup.
-- **Namespaces**: `fd` backend uses in-memory namespace FD registry; `named` backend uses `ip netns add`.
+- **Netns backend**: `src/netns.rs` is fd-only and provides create/open/cleanup via in-memory namespace FDs.
+- **Namespaces**: all namespace handling uses `unshare(CLONE_NEWNET)` + FD registry; no `/var/run/netns` named backend.
 - **Netlink**: `Netlink` struct in `src/core.rs` wraps `rtnetlink::Handle` and provides helper methods.
 - **Qdisc**: all `tc`/`qdisc` command invocation is in `src/qdisc.rs`.
 - **Resource cleanup**: `ResourceList` tracks bridges + netns and tries to clean on exit/panic.
 
 ## Permissions / Running Without Root
-Root is no longer strictly required. Use capabilities:
-- Required caps: `CAP_NET_ADMIN`, `CAP_SYS_ADMIN`, `CAP_NET_RAW`.
-- Use `./setcap.sh` to grant caps to:
-  - `ip`, `tc`, `nft` binaries (if present).
-  - built `netsim` binaries and test binaries.
-- Rebuilds drop caps; re-run `./setcap.sh` after rebuild.
-- New `check_caps()` in `src/lib.rs` is used instead of `require_root()` in tests and `main`.
+Root and file capabilities are not required.
+- netsim bootstraps into an unprivileged user namespace (`CLONE_NEWUSER`) before Tokio/test threads start.
+- Effective UID becomes 0 inside that user namespace, enabling netns/netlink/nft/tc operations scoped to the namespace.
+- Kernel prerequisite: unprivileged user namespaces must be enabled on the host.
 
 ## Local Tasks (cargo-make)
 `Makefile.toml` provides tasks:
-- `run-local`: runs `./setcap.sh` then `cargo run -- ${ARGS}`.
-- `test-local`: runs `./setcap.sh` then `cargo test -- ${ARGS}`.
+- `run-local`: runs `cargo run -- ${ARGS}`.
+- `test-local`: runs `cargo test -- ${ARGS}`.
 - `target-dir`: prints effective target dir.
   - Uses `RUST_TARGET` if set, otherwise `rustc -vV` host.
   - Base uses `${CARGO_MAKE_TARGET_DIR}` or `<workspace>/target`.
@@ -67,11 +64,8 @@ Bridges use `br-p####-N` (shorter names).
 Namespaces use `lab-p####-N`.
 
 ## Common Pitfalls
-- **Netns creation**: prefer `ip netns add` for stable `/var/run/netns/*` entries.
 - **Host root leakage**: never run lab dataplane operations in host root netns; keep all IX/transit operations inside the dedicated lab root namespace.
-- **Capabilities**: running tests without caps will fail; use `check_caps()`.
-- **`no_new_privs`**: if launcher/container sets `no_new_privs=1`, file capabilities from `setcap` will not be granted at exec time.
-- **`ip netns add` limits**: named netns creation depends on mount operations (`--make-shared` + bind mounts under `/var/run/netns`) and can fail on mount-restricted hosts; keep FD-backend fallback available.
+- **User namespace policy**: if host policy disables unprivileged user namespaces, rootless bootstrap fails early.
 - **TC warnings**: use `r2q 1000` in HTB root to avoid large quantum warnings.
 - **Makefile target dir**: do not assume `./target`, always use `cargo make target-dir`.
 
@@ -86,7 +80,6 @@ Namespaces use `lab-p####-N`.
 - `src/sim/transfer.rs`: iroh-transfer spawn/wait lifecycle.
 - `Makefile.toml`: local + VM tasks.
 - `lima.yaml`: VM definition.
-- `setcap.sh`: capability setup script.
 - `ui/`: Vite + React browser UI (see `plans/ui.md`).
 
 ## UI (`ui/`)
@@ -105,7 +98,6 @@ Many tests are serial (`serial_test`) because they manipulate global network sta
 ## Useful Commands
 Local:
 ```
-./setcap.sh
 cargo test
 ```
 
@@ -128,6 +120,16 @@ after confirmation commit with "feat: short description" etc and some details af
 - Relay/QAD runtime wiring improved for transfer sims:
   - Sim runner now auto-provisions per-sim relay runtime assets for relay spawn steps (self-signed cert/key + generated `relay.cfg` with `enable_quic_addr_discovery = true` and manual TLS paths) and auto-appends `--config-path` when spawning the configured `relay` binary (`src/sim/runner.rs`).
   - Transfer steps now pass `--env dev` unconditionally for provider/fetcher so local self-signed relay certs work in netsim runs without changing sim relay URLs (`src/sim/transfer.rs`).
+- Implemented rootless user-namespace bootstrap flow:
+  - Added libc-only ELF ctor bootstrap (`src/userns.rs`) so `cargo test` enters a mapped user namespace before harness threads start.
+  - Added public `bootstrap_userns()` and switched `netsim` to sync pre-Tokio `main()` calling it before runtime startup (`src/lib.rs`, `src/main.rs`).
+  - Added `nsenter -U -n` for `netsim run-in` so follow-up commands can enter inspect namespaces across process boundaries (`src/main.rs`).
+- Netns backend is now fd-only:
+  - Removed named/auto backend selection and `NETSIM_NETNS_BACKEND` handling; namespace open/create/cleanup now use only in-process FD registry (`src/netns.rs`).
+  - Removed `ip netns del` cleanup invocation from netns backend cleanup paths (`src/netns.rs`).
+- Removed capability setup command path:
+  - Removed `netsim setup-caps` command and deleted `src/caps.rs`.
+  - Removed `setcap.sh` and `cargo make` setcap dependencies; local/test tasks now run without capability setup.
 - Added interactive inspect/debug CLI workflow in `netsim`:
   - New `netsim inspect <sim-or-topology.toml> [--work-dir ...]` builds only topology (no run steps), writes inspect session metadata to `<work-dir>/inspect/<prefix>.json`, and prints shell exports (`NETSIM_INSPECT`, per-node `NETSIM_NS_*` and `NETSIM_IP_*`).
   - `netsim inspect` now stays running until Ctrl-C; it spawns per-node namespace keepers and writes their PIDs into the inspect session so follow-up commands can enter namespaces while inspect is active.

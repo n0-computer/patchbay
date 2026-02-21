@@ -1,6 +1,5 @@
 //! Runs the `netsim` CLI entrypoint.
 
-mod caps;
 mod sim;
 
 use std::collections::HashMap;
@@ -58,8 +57,6 @@ enum Command {
         #[arg(long, default_value_t = false)]
         open: bool,
     },
-    /// Apply capabilities to this binary and required system tools.
-    SetupCaps,
     /// Clean leaked labs by prefix.
     Cleanup {
         /// Resource name prefix to clean (repeatable).
@@ -92,8 +89,13 @@ enum Command {
     },
 }
 
+fn main() -> Result<()> {
+    netsim::bootstrap_userns()?;
+    tokio_main()
+}
+
 #[tokio::main(flavor = "current_thread")]
-async fn main() -> Result<()> {
+async fn tokio_main() -> Result<()> {
     netsim::Lab::init_tracing();
     let cli = Cli::parse();
     match cli.command {
@@ -137,7 +139,6 @@ async fn main() -> Result<()> {
                 std::thread::sleep(Duration::from_secs(60));
             }
         }
-        Command::SetupCaps => caps::setup_caps_for_self_and_tools(),
         Command::Cleanup { prefixes } => cleanup_command(prefixes),
         Command::Inspect { input, work_dir } => inspect_command(input, work_dir).await,
         Command::RunIn {
@@ -154,9 +155,7 @@ fn default_cleanup_prefixes() -> Vec<String> {
 }
 
 fn cleanup_command(prefixes: Vec<String>) -> Result<()> {
-    check_caps().context(
-        "cleanup requires CAP_NET_ADMIN, CAP_SYS_ADMIN, and CAP_NET_RAW; run `netsim setup-caps` first",
-    )?;
+    check_caps().context("cleanup requires rootless userns bootstrap and network privileges")?;
     let use_prefixes = if prefixes.is_empty() {
         default_cleanup_prefixes()
     } else {
@@ -387,7 +386,8 @@ fn run_in_command(
     })?;
 
     let mut proc = ProcessCommand::new("nsenter");
-    proc.arg("-t")
+    proc.arg("-U")
+        .arg("-t")
         .arg(pid.to_string())
         .arg("-n")
         .arg("--")

@@ -16,18 +16,7 @@ Rust network namespace simulator for NAT/routing/link-impairment labs, plus an i
 
 - Linux host (or Linux VM) with:
   - `ip`, `tc`, `nft`
-  - capabilities: `CAP_NET_ADMIN`, `CAP_SYS_ADMIN`, `CAP_NET_RAW`
-- Standalone binary setup:
-
-```bash
-netsim setup-caps
-```
-
-- Repo dev/test setup after every rebuild:
-
-```bash
-./setcap.sh
-```
+  - unprivileged user namespaces enabled (`kernel.unprivileged_userns_clone=1`)
 
 ## Local Dev Commands
 
@@ -47,7 +36,6 @@ netsim cleanup
 Run tests locally (if your host policy allows it):
 
 ```bash
-./setcap.sh
 cargo test
 ```
 

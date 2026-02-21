@@ -19,16 +19,11 @@ script = ['''
   echo "${base}/${target}"
   ''']
 
-[tasks.setcap]
-command = "./setcap.sh"
-
 [tasks.run-local]
-dependencies = ["setcap"]
 command = "cargo"
 args = ["run", "--", "run", "${@}"]
 
 [tasks.test-local]
-dependencies = ["setcap"]
 command = "cargo"
 args = ["test", "${@}"]
 

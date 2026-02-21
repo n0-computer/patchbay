@@ -1,9 +1,4 @@
-//! Network namespace backend selection and lifecycle helpers.
-//!
-//! Backends:
-//! - `fd` (default): creates netns via `unshare(CLONE_NEWNET)` and keeps FDs in-memory.
-//! - `named`: creates netns via `ip netns add` and opens `/var/run/netns/<name>`.
-//! - `auto`: probes named support and falls back to `fd`.
+//! Network namespace lifecycle helpers using an in-memory FD registry.
 
 use anyhow::{anyhow, bail, Context, Result};
 use futures::executor;
@@ -20,19 +15,6 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use tokio::sync::oneshot;
 use tracing::debug;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum RequestedMode {
-    Fd,
-    Named,
-    Auto,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Backend {
-    Fd,
-    Named,
-}
 
 #[derive(Default)]
 struct FdRegistry {
@@ -62,7 +44,6 @@ impl FdRegistry {
 }
 
 static FD_REGISTRY: OnceLock<FdRegistry> = OnceLock::new();
-static BACKEND: OnceLock<Backend> = OnceLock::new();
 static GLOBAL_NETNS_MANAGER: OnceLock<NetnsManager> = OnceLock::new();
 
 fn fd_registry() -> &'static FdRegistry {
@@ -71,50 +52,6 @@ fn fd_registry() -> &'static FdRegistry {
 
 fn global_netns_manager() -> &'static NetnsManager {
     GLOBAL_NETNS_MANAGER.get_or_init(NetnsManager::new)
-}
-
-fn parse_backend_mode(raw: Option<&str>) -> Result<RequestedMode> {
-    match raw.map(str::trim).map(str::to_ascii_lowercase).as_deref() {
-        None | Some("") => Ok(RequestedMode::Fd),
-        Some("fd") => Ok(RequestedMode::Fd),
-        Some("named") => Ok(RequestedMode::Named),
-        Some("auto") => Ok(RequestedMode::Auto),
-        Some(other) => bail!("invalid NETSIM_NETNS_BACKEND='{other}' (expected: fd, named, auto)"),
-    }
-}
-
-fn resolve_backend(mode: RequestedMode, named_supported: bool) -> Backend {
-    match mode {
-        RequestedMode::Fd => Backend::Fd,
-        RequestedMode::Named => Backend::Named,
-        RequestedMode::Auto => {
-            if named_supported {
-                Backend::Named
-            } else {
-                Backend::Fd
-            }
-        }
-    }
-}
-
-fn choose_backend() -> Result<Backend> {
-    let mode = parse_backend_mode(std::env::var("NETSIM_NETNS_BACKEND").ok().as_deref())?;
-    let named_supported = match mode {
-        RequestedMode::Auto | RequestedMode::Named => probe_named_backend_support(),
-        RequestedMode::Fd => false,
-    };
-    let backend = resolve_backend(mode, named_supported);
-    debug!(?mode, ?backend, named_supported, "netns: selected backend");
-    Ok(backend)
-}
-
-fn backend() -> Result<Backend> {
-    if let Some(mode) = BACKEND.get() {
-        return Ok(*mode);
-    }
-    let chosen = choose_backend()?;
-    let _ = BACKEND.set(chosen);
-    Ok(chosen)
 }
 
 fn open_current_thread_netns_fd() -> Result<File> {
@@ -132,23 +69,13 @@ fn open_current_thread_netns_fd() -> Result<File> {
 
 /// Ensure netns runtime prerequisites are initialized.
 pub fn ensure_netns_dir() -> Result<()> {
-    debug!("netns: ensure /var/run/netns exists");
-    let _ = std::fs::create_dir_all("/var/run/netns");
-    let _ = backend()?;
+    debug!("netns: using fd backend");
     Ok(())
 }
 
-/// Open a namespace FD for `name` from the active backend.
+/// Open a namespace FD for `name` from the in-memory registry.
 pub fn open_netns_fd(name: &str) -> Result<File> {
     debug!(ns = %name, "netns: open namespace fd");
-
-    if backend()? == Backend::Named {
-        let path = format!("/var/run/netns/{name}");
-        if let Ok(fd) = File::open(&path) {
-            return Ok(fd);
-        }
-    }
-
     let fd = fd_registry()
         .get(name)
         .ok_or_else(|| anyhow!("netns '{name}' not found"))?;
@@ -156,12 +83,8 @@ pub fn open_netns_fd(name: &str) -> Result<File> {
         .with_context(|| format!("clone netns fd for '{name}'"))
 }
 
-/// Delete a namespace by name from all known backends.
+/// Delete a namespace by name from the in-memory registry.
 pub fn cleanup_netns(name: &str) {
-    let _ = std::process::Command::new("ip")
-        .args(["netns", "del", name])
-        .stderr(std::process::Stdio::null())
-        .status();
     fd_registry().remove(name);
 }
 
@@ -170,41 +93,28 @@ pub fn cleanup_registry_prefix(prefix: &str) {
     fd_registry().remove_prefix(prefix);
 }
 
-/// Create a named namespace entry for `name` using the selected backend.
+/// Create a namespace entry for `name` using the fd backend.
 pub async fn create_named_netns(name: &str) -> Result<()> {
     debug!(ns = %name, "netns: create namespace");
     cleanup_netns(name);
 
-    match backend()? {
-        Backend::Fd => {
-            let fd = create_unshared_netns_fd().context("create unshared netns fd")?;
-            let created_ino = fd
-                .metadata()
-                .context("metadata for created netns fd")?
-                .ino();
-            let current_ino = open_current_thread_netns_fd()
-                .context("open current thread netns for sanity check")?
-                .metadata()
-                .context("metadata for current thread netns")?
-                .ino();
-            if created_ino == current_ino {
-                bail!(
-                    "fd backend namespace creation returned current namespace inode {}; not isolated",
-                    created_ino
-                );
-            }
-            fd_registry().insert(name, fd);
-        }
-        Backend::Named => {
-            let status = std::process::Command::new("ip")
-                .args(["netns", "add", name])
-                .status()
-                .context("spawn ip netns add")?;
-            if !status.success() {
-                bail!("ip netns add '{}' failed with status {}", name, status);
-            }
-        }
+    let fd = create_unshared_netns_fd().context("create unshared netns fd")?;
+    let created_ino = fd
+        .metadata()
+        .context("metadata for created netns fd")?
+        .ino();
+    let current_ino = open_current_thread_netns_fd()
+        .context("open current thread netns for sanity check")?
+        .metadata()
+        .context("metadata for current thread netns")?
+        .ino();
+    if created_ino == current_ino {
+        bail!(
+            "fd backend namespace creation returned current namespace inode {}; not isolated",
+            created_ino
+        );
     }
+    fd_registry().insert(name, fd);
 
     let _ = open_netns_fd(name).with_context(|| format!("open netns fd for '{name}'"))?;
     Ok(())
@@ -230,20 +140,6 @@ fn create_unshared_netns_fd() -> Result<File> {
     res_rx
         .recv()
         .context("receive netns fd from helper thread")?
-}
-
-fn probe_named_backend_support() -> bool {
-    let probe = format!("netsim-probe-{}", std::process::id());
-    let add = std::process::Command::new("ip")
-        .args(["netns", "add", &probe])
-        .status();
-    let ok = add.map(|st| st.success()).unwrap_or(false);
-    if ok {
-        let _ = std::process::Command::new("ip")
-            .args(["netns", "del", &probe])
-            .status();
-    }
-    ok
 }
 
 type BoxFutureUnit = Pin<Box<dyn Future<Output = Result<()>> + 'static>>;
@@ -415,38 +311,6 @@ pub fn spawn_command_in_netns(ns: &str, mut cmd: Command) -> Result<Child> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn parse_backend_default_fd() {
-        assert_eq!(parse_backend_mode(None).unwrap(), RequestedMode::Fd);
-        assert_eq!(parse_backend_mode(Some("")).unwrap(), RequestedMode::Fd);
-    }
-
-    #[test]
-    fn parse_backend_modes() {
-        assert_eq!(parse_backend_mode(Some("fd")).unwrap(), RequestedMode::Fd);
-        assert_eq!(
-            parse_backend_mode(Some("named")).unwrap(),
-            RequestedMode::Named
-        );
-        assert_eq!(
-            parse_backend_mode(Some("auto")).unwrap(),
-            RequestedMode::Auto
-        );
-    }
-
-    #[test]
-    fn parse_backend_rejects_invalid() {
-        assert!(parse_backend_mode(Some("wat")).is_err());
-    }
-
-    #[test]
-    fn resolve_backend_rules() {
-        assert_eq!(resolve_backend(RequestedMode::Fd, true), Backend::Fd);
-        assert_eq!(resolve_backend(RequestedMode::Named, false), Backend::Named);
-        assert_eq!(resolve_backend(RequestedMode::Auto, true), Backend::Named);
-        assert_eq!(resolve_backend(RequestedMode::Auto, false), Backend::Fd);
-    }
 
     #[test]
     fn registry_prefix_cleanup() {

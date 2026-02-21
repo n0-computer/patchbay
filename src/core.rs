@@ -12,7 +12,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::{Mutex, Once, OnceLock};
 use std::thread;
-use tracing::{debug, warn};
+use tracing::debug;
+use tracing::warn;
 
 use crate::netns;
 use crate::{qdisc, Impair, NatMode};
@@ -305,20 +306,6 @@ impl ResourceList {
     pub fn cleanup_everything_with_prefix(&self, prefix: &str) {
         debug!("netsim cleanup: scanning prefix '{prefix}'");
         cleanup_links_with_prefix_ip(prefix);
-
-        let output = std::process::Command::new("ip")
-            .args(["netns", "list"])
-            .output();
-        if let Ok(out) = output {
-            if let Ok(text) = String::from_utf8(out.stdout) {
-                for line in text.lines() {
-                    let name = line.split_whitespace().next().unwrap_or_default();
-                    if name.starts_with(prefix) {
-                        cleanup_netns_logged(name);
-                    }
-                }
-            }
-        }
         debug!("netsim cleanup: drop fd-registry entries with prefix '{prefix}'");
         netns::cleanup_registry_prefix(prefix);
     }
@@ -344,23 +331,7 @@ impl ResourceList {
 }
 
 fn cleanup_netns_logged(name: &str) {
-    debug!("netsim cleanup: ip netns del {name}");
-    let out = std::process::Command::new("ip")
-        .args(["netns", "del", name])
-        .output();
-    if let Ok(out) = out {
-        if !out.status.success() {
-            let msg = String::from_utf8_lossy(&out.stderr).trim().to_string();
-            if msg.contains("No such file or directory") {
-                debug!(
-                    "netsim cleanup: netns '{name}' not present in /var/run/netns (ok for fd backend)"
-                );
-            } else {
-                warn!("netsim cleanup: failed ip netns del {name}: {msg}");
-            }
-        }
-    }
-    // Ensure FD backend entries are removed even when named deletion fails.
+    debug!("netsim cleanup: drop fd netns handle {name}");
     netns::cleanup_netns(name);
 }
 

@@ -58,6 +58,7 @@ mod netns;
 mod qdisc;
 /// Embedded UI HTTP serving helpers.
 pub mod serve;
+mod userns;
 use crate::core::{
     apply_impair_in, cleanup_netns, resources, run_closure_in_namespace, run_command_in_namespace,
     spawn_closure_in_namespace_thread, spawn_command_in_namespace, CoreConfig, DownstreamPool,
@@ -98,6 +99,43 @@ pub fn check_caps() -> Result<()> {
     } else {
         bail!("missing capabilities: {}", missing.join(", "))
     }
+}
+
+/// Bootstraps an unprivileged user namespace and maps current UID/GID to root.
+///
+/// Call this once before spawning threads or starting Tokio when running as a
+/// non-root user. The function is a no-op when already running as UID 0.
+#[cfg(target_os = "linux")]
+pub fn bootstrap_userns() -> Result<()> {
+    use nix::sched::{unshare, CloneFlags};
+
+    if nix::unistd::Uid::effective().is_root() {
+        return Ok(());
+    }
+
+    let uid = nix::unistd::Uid::current().as_raw();
+    let gid = nix::unistd::Gid::current().as_raw();
+
+    unshare(CloneFlags::CLONE_NEWUSER)
+        .context("unshare(CLONE_NEWUSER) failed; ensure user namespaces are enabled and no threads are running yet")?;
+
+    std::fs::write("/proc/self/setgroups", "deny\n").context("write /proc/self/setgroups")?;
+    std::fs::write("/proc/self/uid_map", format!("0 {uid} 1\n"))
+        .context("write /proc/self/uid_map")?;
+    std::fs::write("/proc/self/gid_map", format!("0 {gid} 1\n"))
+        .context("write /proc/self/gid_map")?;
+
+    if nix::unistd::Uid::effective().is_root() {
+        Ok(())
+    } else {
+        bail!("userns bootstrap finished without UID 0 mapping")
+    }
+}
+
+/// Bootstraps user namespaces on Linux; no-op on other platforms.
+#[cfg(not(target_os = "linux"))]
+pub fn bootstrap_userns() -> Result<()> {
+    Ok(())
 }
 
 // ─────────────────────────────────────────────

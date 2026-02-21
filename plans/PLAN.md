@@ -10,11 +10,14 @@ Status key: ✅ implemented, ⚠️ partially implemented, ❌ not implemented.
 | `initial.md` | 4. Add `Gateway` enum + DC/ISP device build paths (§3, §5) | ❌ | Superseded by unified router model + multi-interface `DeviceBuilder`; no `Gateway` API (`src/lib.rs`, `src/core.rs`). |
 | `initial.md` | 5. Impair via `tc netem` incl. region latency (§5c, §5d) | ✅ | Implemented in `qdisc` and applied from build (`src/qdisc.rs`, `src/core.rs`). |
 | `no-sudo.md` | Phase 0: capability/policy diagnostics + `netsim doctor` | ⚠️ | `check_caps()` exists, but no `NoNewPrivs` check or `doctor` command (`src/lib.rs`, `src/main.rs`). |
-| `no-sudo.md` | Phase 1: namespace backend abstraction (`auto|named|fd`) | ⚠️ | Backend selection and modes implemented, but not as trait with full planned surface (`src/netns.rs`). |
+| `no-sudo.md` | Phase 1: namespace backend abstraction (`auto|named|fd`) | ⚠️ | Superseded by rootless simplification: backend is now fd-only (no auto/named runtime selection) (`src/netns.rs`). |
 | `no-sudo.md` | Phase 2: netns executor refactor | ✅ | `NetnsManager` worker-thread executor implemented (`src/netns.rs`, `src/core.rs`). |
 | `no-sudo.md` | Phase 3: lab-root isolation hardening + guard tests | ⚠️ | Lab-root namespace model is implemented, but guard tests for host-route leakage are not present (`src/core.rs`, tests). |
 | `no-sudo.md` | Phase 4: cleanup guarantees + leak regression tests | ⚠️ | Cleanup/resource tracking exists, but full planned leak-regression suite is incomplete (`src/core.rs`, `src/netns.rs`, `src/lib.rs` tests). |
 | `no-sudo.md` | Phase 5: test matrix + docs | ❌ | No explicit matrix/docs artifact matching this phase in `plans/` or repo docs. |
+| `rootless.md` | Userns bootstrap before Tokio/test harness | ✅ | Added libc-only ctor bootstrap (`src/userns.rs`) and public `bootstrap_userns()` called from sync `main()` (`src/lib.rs`, `src/main.rs`). |
+| `rootless.md` | Remove named/auto netns backend and env selection | ✅ | Netns backend is now fd-only; removed named probing/selection and `ip netns del` cleanup path (`src/netns.rs`). |
+| `rootless.md` | Remove setup-caps and fix `run-in` namespace entry | ✅ | Removed `setup-caps` command and `setcap.sh`; `run-in` uses `nsenter -U -n` (`src/main.rs`, `Makefile.toml`). |
 | `iroh-netsim.md` | 1. `core.rs` multi-iface `Device` types | ✅ | `DeviceIface`/multi-interface device model present (`src/core.rs`). |
 | `iroh-netsim.md` | 2. `lib.rs` `DeviceBuilder`, remove old router APIs | ✅ | `DeviceBuilder` + `add_router`; old `add_isp/add_dc/add_home` removed (`src/lib.rs`). |
 | `iroh-netsim.md` | 3. Build path `IfaceBuild` + `wire_iface` | ✅ | `IfaceBuild` and `wire_iface` implemented (`src/core.rs`). |
@@ -39,10 +42,10 @@ Status key: ✅ implemented, ⚠️ partially implemented, ❌ not implemented.
 | `iroh-netsim.md` | 22. `path` override copy-to-workdir semantics | ✅ | Path overrides are staged into `<work_dir>/bins` and chmodded executable (`src/sim/runner.rs`). |
 | `iroh-netsim.md` | 23. Override validation + resolved-source startup reporting | ⚠️ | Validation implemented; startup logs resolved binary path per name, but no dedicated summary table yet (`src/sim/runner.rs`). |
 | `iroh-netsim.md` | 24. Tests/examples for shared binaries + overrides | ⚠️ | Added override parser tests + shared defaults file + sims switched to shared binaries; merge-path tests are still limited (`src/sim/runner.rs`, `iroh-integration/iroh-defaults.toml`, `iroh-integration/sims/`). |
-| `selfcontained.md` | 1. Reshape CLI into explicit `run`/`run-vm`/`setup-caps` subcommands | ⚠️ | Implemented historically, but now partially superseded by `netsim-vm-split.md` (planned ownership move of VM commands out of `netsim`). |
+| `selfcontained.md` | 1. Reshape CLI into explicit `run`/`run-vm`/`setup-caps` subcommands | ⚠️ | Historical only; current CLI removed `setup-caps` as part of rootless migration. |
 | `selfcontained.md` | 2. Embed `qemu-vm.sh` behavior in Rust VM module | ⚠️ | Implemented historically in `src/vm.rs`, but planned to move into standalone `crates/netsim-vm` and retire `qemu-vm.sh` (`netsim-vm-split.md`). |
-| `selfcontained.md` | 3. Implement built-in self capability setup (`netsim setup-caps`) | ✅ | Implemented with `sudo setcap` + verification for self and required tools (`src/caps.rs`, `src/main.rs`). |
-| `selfcontained.md` | 4. Keep `setcap.sh` for test binaries and clarify role split | ✅ | `setcap.sh` now explicitly documents repo test/dev scope and points standalone users to `netsim setup-caps` (`setcap.sh`). |
+| `selfcontained.md` | 3. Implement built-in self capability setup (`netsim setup-caps`) | ❌ | Removed in rootless mode; capability setup path is no longer part of supported workflow. |
+| `selfcontained.md` | 4. Keep `setcap.sh` for test binaries and clarify role split | ❌ | Removed in rootless mode; `run-local`/`test-local` no longer depend on setcap scripts. |
 | `selfcontained.md` | 5. Wire `run-vm` to execute `netsim run` in guest | ⚠️ | Implemented in current `netsim` binary, but planned to be superseded by standalone `netsim-vm run` flow (`netsim-vm-split.md`). |
 | `selfcontained.md` | 6. Update automation/docs to binary-first workflows | ⚠️ | Implemented for old ownership model; docs/tasks will be revised for `netsim-vm` command ownership (`netsim-vm-split.md`). |
 | `selfcontained.md` | 7. Validate local + VM + external-checkout flow | ⚠️ | Local+VM run/test paths validated with `cargo make run-vm` and `cargo make test-vm`; external-checkout validation still pending. |

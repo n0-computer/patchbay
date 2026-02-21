@@ -32,6 +32,8 @@ ctrlc       = "3"
 webbrowser  = "1"
 sha2        = "0.10"
 rcgen       = "0.13"
+ctor        = "0.2"
+libc        = "0.2"
 
 [dev-dependencies]
 serial_test = "3"
