@@ -407,6 +407,21 @@ fn sanitize_for_file(name: &str) -> String {
 mod tests {
     use super::*;
 
+    fn log_has_qadv4_timeout(text: &str) -> bool {
+        text.lines()
+            .any(|line| line.contains("QADv4") && line.contains("probe timed out"))
+    }
+
+    fn log_generated_report_has_no_global_v4(text: &str) -> bool {
+        text.lines()
+            .filter(|line| line.contains("iroh::net_report") && line.contains("generated report"))
+            .any(|line| line.contains("global_v4: None"))
+    }
+
+    fn relay_log_shows_quic_disabled(text: &str) -> bool {
+        text.contains("ServerConfig {") && text.contains("quic: None")
+    }
+
     #[test]
     fn parse_endpoint_bound_with_direct_addr() {
         let line =
@@ -422,5 +437,26 @@ mod tests {
         let parsed = parse_endpoint_bound_line(line).expect("endpoint bound");
         assert_eq!(parsed.endpoint_id, "abc");
         assert!(parsed.direct_addr.is_none());
+    }
+
+    #[test]
+    fn net_report_qad_timeout_matches_relay_without_quic() {
+        let provider_net_report_log = r#"
+2026-02-20T13:24:06.151668Z DEBUG iroh::net_report: v4 QAD probe relay.url=RelayUrl("http://203.0.1.2:3340/")
+2026-02-20T13:24:09.152654Z DEBUG QADv4: iroh::net_report: probe timed out
+2026-02-20T13:24:09.152696Z DEBUG iroh::net_report: generated report in 3001ms report=Report { udp_v4: false, global_v4: None, global_v6: None }
+"#;
+        let relay_log = r#"
+2026-02-20T13:24:04.067558Z DEBUG iroh_relay: ServerConfig {
+    relay: Some(...),
+    quic: None,
+}
+"#;
+
+        assert!(log_has_qadv4_timeout(provider_net_report_log));
+        assert!(log_generated_report_has_no_global_v4(
+            provider_net_report_log
+        ));
+        assert!(relay_log_shows_quic_disabled(relay_log));
     }
 }
