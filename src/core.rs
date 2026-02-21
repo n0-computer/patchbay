@@ -8,10 +8,11 @@ use std::io::Write as IoWrite;
 use std::net::Ipv4Addr;
 use std::os::fd::AsRawFd;
 use std::process::ExitStatus;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::{Mutex, Once, OnceLock};
 use std::thread;
-use tracing::debug;
+use tracing::{debug, warn};
 
 use crate::netns;
 use crate::{qdisc, Impair, NatMode};
@@ -209,9 +210,18 @@ struct ResourceState {
 }
 
 /// Tracks resources for best-effort cleanup on panic/exit.
-#[derive(Default)]
 pub struct ResourceList {
     state: Mutex<ResourceState>,
+    cleanup_enabled: AtomicBool,
+}
+
+impl Default for ResourceList {
+    fn default() -> Self {
+        Self {
+            state: Mutex::new(ResourceState::default()),
+            cleanup_enabled: AtomicBool::new(true),
+        }
+    }
 }
 
 static RESOURCES: OnceLock<ResourceList> = OnceLock::new();
@@ -239,6 +249,11 @@ extern "C" fn cleanup_at_exit() {
 }
 
 impl ResourceList {
+    /// Enables or disables automatic cleanup in panic/atexit paths.
+    pub fn set_cleanup_enabled(&self, enabled: bool) {
+        self.cleanup_enabled.store(enabled, Ordering::Relaxed);
+    }
+
     /// Registers a link name for cleanup.
     pub fn register_link(&self, name: &str) {
         // Only track names we own by prefix; generic names like "ix" are moved
@@ -264,17 +279,21 @@ impl ResourceList {
 
     /// Removes all explicitly registered links and namespaces.
     pub fn cleanup_all(&self) {
+        if !self.cleanup_enabled.load(Ordering::Relaxed) {
+            debug!("netsim cleanup: skipped (disabled)");
+            return;
+        }
         let (links, netns) = {
             let mut st = self.state.lock().unwrap();
             (std::mem::take(&mut st.links), std::mem::take(&mut st.netns))
         };
-        println!(
+        debug!(
             "netsim cleanup: explicit resources: {} links, {} namespaces",
             links.len(),
             netns.len()
         );
         for ns in netns {
-            println!("netsim cleanup: cleanup netns {ns}");
+            debug!("netsim cleanup: cleanup netns {ns}");
             cleanup_netns_logged(&ns);
         }
         for link in links {
@@ -325,7 +344,7 @@ impl ResourceList {
 }
 
 fn cleanup_netns_logged(name: &str) {
-    println!("netsim cleanup: ip netns del {name}");
+    debug!("netsim cleanup: ip netns del {name}");
     let out = std::process::Command::new("ip")
         .args(["netns", "del", name])
         .output();
@@ -333,11 +352,11 @@ fn cleanup_netns_logged(name: &str) {
         if !out.status.success() {
             let msg = String::from_utf8_lossy(&out.stderr).trim().to_string();
             if msg.contains("No such file or directory") {
-                println!(
+                debug!(
                     "netsim cleanup: netns '{name}' not present in /var/run/netns (ok for fd backend)"
                 );
             } else {
-                eprintln!("netsim cleanup: failed ip netns del {name}: {msg}");
+                warn!("netsim cleanup: failed ip netns del {name}: {msg}");
             }
         }
     }

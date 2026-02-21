@@ -125,6 +125,10 @@ when a task is ready run the checks then ask to commit, don't commit without ask
 after confirmation commit with "feat: short description" etc and some details afterwards. elaborate open issues a little, explain decisions taken concisely
 
 ## Recent Changes
+- Added interactive inspect/debug CLI workflow in `netsim`:
+  - New `netsim inspect <sim-or-topology.toml> [--work-dir ...]` builds only topology (no run steps), writes inspect session metadata to `<work-dir>/inspect/<prefix>.json`, and prints shell exports (`NETSIM_INSPECT`, per-node `NETSIM_NS_*` and `NETSIM_IP_*`).
+  - New `netsim run-in <node> <cmd...>` runs a command inside a node namespace resolved from the active inspect session (via `--inspect` or `$NETSIM_INSPECT`).
+  - Inspect mode forces named netns backend and disables panic/atexit auto-cleanup for that process so labs remain available for interactive debugging until explicit `netsim cleanup --prefix <id>`.
 - VM invocation ergonomics tightened in `Makefile.toml`:
   - `cargo make run-vm -- <sims...>` now prebuilds musl release artifacts for `netsim` and `examples/transfer`, then runs VM with `--netsim-version path:<target>/x86_64-unknown-linux-musl/release/netsim`.
   - `cargo make test-vm -- ...` now forwards args directly to `netsim-vm test` so flags like `--package` / `--test` are usable without awkward separator handling.

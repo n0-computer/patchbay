@@ -3,11 +3,14 @@
 mod caps;
 mod sim;
 
+use std::collections::HashMap;
 use std::path::PathBuf;
+use std::process::Command as ProcessCommand;
 use std::time::Duration;
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use clap::{Parser, Subcommand};
+use serde::{Deserialize, Serialize};
 
 use netsim::check_caps;
 use netsim::serve::start_ui_server;
@@ -65,6 +68,28 @@ enum Command {
         #[arg(long = "prefix")]
         prefixes: Vec<String>,
     },
+    /// Build topology from sim/topology config for interactive namespace debugging.
+    Inspect {
+        /// Sim TOML or topology TOML file path.
+        input: PathBuf,
+        /// Work directory for inspect session metadata.
+        #[arg(long, default_value = ".netsim-work")]
+        work_dir: PathBuf,
+    },
+    /// Run a command inside a node namespace from an inspect session.
+    RunIn {
+        /// Device or router name from the inspected topology.
+        node: String,
+        /// Inspect session id (defaults to `$NETSIM_INSPECT`).
+        #[arg(long)]
+        inspect: Option<String>,
+        /// Work directory containing inspect session metadata.
+        #[arg(long, default_value = ".netsim-work")]
+        work_dir: PathBuf,
+        /// Command and args to execute in the node namespace.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, required = true)]
+        cmd: Vec<String>,
+    },
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -114,6 +139,13 @@ async fn main() -> Result<()> {
         }
         Command::SetupCaps => caps::setup_caps_for_self_and_tools(),
         Command::Cleanup { prefixes } => cleanup_command(prefixes),
+        Command::Inspect { input, work_dir } => inspect_command(input, work_dir).await,
+        Command::RunIn {
+            node,
+            inspect,
+            work_dir,
+            cmd,
+        } => run_in_command(node, inspect, work_dir, cmd),
     }
 }
 
@@ -165,4 +197,253 @@ fn install_signal_cleanup_handler(prefixes: Vec<String>) -> Result<()> {
         unsafe { nix::libc::_exit(130) };
     })
     .context("install Ctrl-C cleanup handler")
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct InspectSession {
+    prefix: String,
+    root_ns: String,
+    node_namespaces: HashMap<String, String>,
+    node_ips_v4: HashMap<String, String>,
+}
+
+fn inspect_dir(work_dir: &std::path::Path) -> PathBuf {
+    work_dir.join("inspect")
+}
+
+fn inspect_session_path(work_dir: &std::path::Path, prefix: &str) -> PathBuf {
+    inspect_dir(work_dir).join(format!("{prefix}.json"))
+}
+
+fn env_key_suffix(name: &str) -> String {
+    name.chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect()
+}
+
+fn load_topology_for_inspect(input: &std::path::Path) -> Result<(netsim::config::LabConfig, bool)> {
+    let text =
+        std::fs::read_to_string(input).with_context(|| format!("read {}", input.display()))?;
+    let value: toml::Value =
+        toml::from_str(&text).with_context(|| format!("parse TOML {}", input.display()))?;
+    let is_sim =
+        value.get("sim").is_some() || value.get("step").is_some() || value.get("binary").is_some();
+    if is_sim {
+        let sim: sim::SimFile =
+            toml::from_str(&text).with_context(|| format!("parse sim {}", input.display()))?;
+        let topo = sim::topology::load_topology(&sim, input)
+            .with_context(|| format!("load topology from sim {}", input.display()))?;
+        Ok((topo, true))
+    } else {
+        let topo: netsim::config::LabConfig =
+            toml::from_str(&text).with_context(|| format!("parse topology {}", input.display()))?;
+        Ok((topo, false))
+    }
+}
+
+async fn inspect_command(input: PathBuf, work_dir: PathBuf) -> Result<()> {
+    check_caps()?;
+    std::env::set_var("NETSIM_NETNS_BACKEND", "named");
+    let resources = netsim::core::resources();
+    resources.set_cleanup_enabled(false);
+
+    let (topo, is_sim) = load_topology_for_inspect(&input)?;
+    let mut lab = netsim::Lab::from_config(topo.clone())
+        .with_context(|| format!("build lab config from {}", input.display()))?;
+    lab.build().await.context("build inspected topology")?;
+
+    let mut node_namespaces = HashMap::new();
+    let mut node_ips_v4 = HashMap::new();
+
+    for router in &topo.router {
+        let name = router.name.clone();
+        let ns = lab
+            .router_ns_name(&name)
+            .with_context(|| format!("resolve router namespace for '{name}'"))?;
+        node_namespaces.insert(name.clone(), ns);
+        if let Some(id) = lab.router_id(&name) {
+            node_ips_v4.insert(name, lab.router_uplink_ip(id)?.to_string());
+        }
+    }
+    for name in topo.device.keys() {
+        let ns = lab
+            .device_ns_name(name)
+            .with_context(|| format!("resolve device namespace for '{name}'"))?;
+        node_namespaces.insert(name.clone(), ns);
+        if let Some(id) = lab.device_id(name) {
+            node_ips_v4.insert(name.clone(), lab.device_ip(id)?.to_string());
+        }
+    }
+
+    let prefix = lab.prefix().to_string();
+    let session = InspectSession {
+        prefix: prefix.clone(),
+        root_ns: lab.root_namespace_name().to_string(),
+        node_namespaces,
+        node_ips_v4,
+    };
+    let session_dir = inspect_dir(&work_dir);
+    std::fs::create_dir_all(&session_dir)
+        .with_context(|| format!("create {}", session_dir.display()))?;
+    let session_path = inspect_session_path(&work_dir, &prefix);
+    std::fs::write(&session_path, serde_json::to_vec_pretty(&session)?)
+        .with_context(|| format!("write {}", session_path.display()))?;
+
+    let mut ns_keys = session
+        .node_namespaces
+        .keys()
+        .map(|k| k.to_string())
+        .collect::<Vec<_>>();
+    ns_keys.sort();
+
+    println!(
+        "inspect ready: {} ({})",
+        session.prefix,
+        if is_sim { "sim" } else { "topology" }
+    );
+    println!("session file: {}", session_path.display());
+    println!("export NETSIM_INSPECT={}", session.prefix);
+    println!("export NETSIM_INSPECT_FILE={}", session_path.display());
+    for key in &ns_keys {
+        if let Some(ns) = session.node_namespaces.get(key) {
+            println!("export NETSIM_NS_{}={ns}", env_key_suffix(key));
+        }
+        if let Some(ip) = session.node_ips_v4.get(key) {
+            println!("export NETSIM_IP_{}={ip}", env_key_suffix(key));
+        }
+    }
+    println!("cleanup: netsim cleanup --prefix {}", session.prefix);
+    Ok(())
+}
+
+fn resolve_inspect_ref(inspect: Option<String>) -> Result<String> {
+    if let Some(value) = inspect {
+        let trimmed = value.trim().to_string();
+        if trimmed.is_empty() {
+            bail!("--inspect must not be empty");
+        }
+        return Ok(trimmed);
+    }
+    let from_env = std::env::var("NETSIM_INSPECT")
+        .context("missing inspect session; set --inspect or NETSIM_INSPECT")?;
+    let trimmed = from_env.trim().to_string();
+    if trimmed.is_empty() {
+        bail!("NETSIM_INSPECT is set but empty");
+    }
+    Ok(trimmed)
+}
+
+fn load_inspect_session(work_dir: &std::path::Path, inspect_ref: &str) -> Result<InspectSession> {
+    let as_path = PathBuf::from(inspect_ref);
+    let session_path = if as_path.extension().and_then(|v| v.to_str()) == Some("json")
+        || inspect_ref.contains('/')
+    {
+        as_path
+    } else {
+        inspect_session_path(work_dir, inspect_ref)
+    };
+    let bytes = std::fs::read(&session_path)
+        .with_context(|| format!("read inspect session {}", session_path.display()))?;
+    serde_json::from_slice(&bytes)
+        .with_context(|| format!("parse inspect session {}", session_path.display()))
+}
+
+fn run_in_command(
+    node: String,
+    inspect: Option<String>,
+    work_dir: PathBuf,
+    cmd: Vec<String>,
+) -> Result<()> {
+    check_caps()?;
+    if cmd.is_empty() {
+        bail!("run-in: missing command");
+    }
+    let inspect_ref = resolve_inspect_ref(inspect)?;
+    let session = load_inspect_session(&work_dir, &inspect_ref)?;
+    let ns = session
+        .node_namespaces
+        .get(&node)
+        .ok_or_else(|| {
+            anyhow!(
+                "node '{}' is not in inspect session '{}'",
+                node,
+                session.prefix
+            )
+        })?
+        .to_string();
+    let mut proc = ProcessCommand::new(&cmd[0]);
+    if cmd.len() > 1 {
+        proc.args(&cmd[1..]);
+    }
+    let status = netsim::core::run_command_in_namespace(&ns, proc)?;
+    if !status.success() {
+        bail!("run-in command exited with status {}", status);
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn env_key_suffix_normalizes_names() {
+        assert_eq!(env_key_suffix("relay"), "relay");
+        assert_eq!(env_key_suffix("fetcher-1"), "fetcher_1");
+    }
+
+    #[test]
+    fn inspect_session_path_uses_prefix_json() {
+        let base = PathBuf::from("/tmp/netsim-work");
+        let path = inspect_session_path(&base, "lab-p123");
+        assert!(path.ends_with("inspect/lab-p123.json"));
+    }
+
+    fn write_temp_file(dir: &Path, rel: &str, body: &str) -> PathBuf {
+        let path = dir.join(rel);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("create parent");
+        }
+        std::fs::write(&path, body).expect("write file");
+        path
+    }
+
+    #[test]
+    fn inspect_loader_detects_sim_input() {
+        let root = std::env::temp_dir().join(format!(
+            "netsim-inspect-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time")
+                .as_nanos()
+        ));
+        let sim_path = write_temp_file(
+            &root,
+            "sims/case.toml",
+            "[sim]\nname='x'\n\n[[router]]\nname='relay'\n\n[device.fetcher.eth0]\ngateway='relay'\n",
+        );
+        let (_topo, is_sim) = load_topology_for_inspect(&sim_path).expect("load sim topology");
+        assert!(is_sim);
+    }
+
+    #[test]
+    fn inspect_loader_detects_topology_input() {
+        let root = std::env::temp_dir().join(format!(
+            "netsim-inspect-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time")
+                .as_nanos()
+        ));
+        let topo_path = write_temp_file(
+            &root,
+            "topos/lab.toml",
+            "[[router]]\nname='relay'\n\n[device.fetcher.eth0]\ngateway='relay'\n",
+        );
+        let (_topo, is_sim) = load_topology_for_inspect(&topo_path).expect("load direct topology");
+        assert!(!is_sim);
+    }
 }

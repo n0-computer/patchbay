@@ -258,6 +258,16 @@ impl Lab {
         let _ = tracing_subscriber::fmt().with_env_filter(filter).try_init();
     }
 
+    /// Returns the unique resource prefix associated with this lab instance.
+    pub fn prefix(&self) -> &str {
+        &self.prefix
+    }
+
+    /// Returns the dedicated lab root namespace name.
+    pub fn root_namespace_name(&self) -> &str {
+        self.core.root_ns()
+    }
+
     /// Parses `lab.toml`, builds the network, and returns a ready-to-use lab.
     pub async fn load(path: impl AsRef<Path>) -> Result<Self> {
         let text = std::fs::read_to_string(path).context("read lab config")?;
