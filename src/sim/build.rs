@@ -146,7 +146,7 @@ fn build_local_binary_blocking(
 fn build_local_binaries_blocking(
     artifacts: &[BuildArtifact],
     source_dir: &Path,
-    work_dir: &Path,
+    _work_dir: &Path,
 ) -> Result<Vec<PathBuf>> {
     if artifacts.is_empty() {
         return Ok(Vec::new());
@@ -157,13 +157,11 @@ fn build_local_binaries_blocking(
             source_dir.display()
         );
     }
-    let target_base = work_dir.join("build-target");
-    std::fs::create_dir_all(&target_base).context("create local build target dir")?;
     let explicit = artifacts
         .iter()
         .all(|artifact| artifact.example.is_some() || artifact.bin.is_some());
     if explicit {
-        return build_in_workspace(source_dir, Some(&target_base), artifacts);
+        return build_in_workspace(source_dir, artifacts);
     }
 
     // Legacy fallback for specs without explicit bin/example.
@@ -184,7 +182,7 @@ fn build_local_binaries_blocking(
             ..fallback.clone()
         },
         source_dir,
-        work_dir,
+        _work_dir,
     ) {
         return Ok(vec![path]);
     }
@@ -194,7 +192,7 @@ fn build_local_binaries_blocking(
             ..fallback
         },
         source_dir,
-        work_dir,
+        _work_dir,
     )
     .map(|path| vec![path])
 }
@@ -222,7 +220,7 @@ async fn build_from_git(
 
     tokio::task::spawn_blocking(move || {
         git_clone_or_update(&repo, &commit, &src)?;
-        let mut paths = build_in_workspace(&src, None, std::slice::from_ref(&artifact))?;
+        let mut paths = build_in_workspace(&src, std::slice::from_ref(&artifact))?;
         paths
             .pop()
             .ok_or_else(|| anyhow!("no artifact path returned for '{}'", artifact.name))
@@ -231,40 +229,17 @@ async fn build_from_git(
     .context("join build task")?
 }
 
-fn build_in_workspace(
-    source_dir: &Path,
-    target_dir_override: Option<&Path>,
-    artifacts: &[BuildArtifact],
-) -> Result<Vec<PathBuf>> {
+fn build_in_workspace(source_dir: &Path, artifacts: &[BuildArtifact]) -> Result<Vec<PathBuf>> {
     let args = cargo_build_args(artifacts)?;
-    tracing::info!("Building: cargo {}", args.join(" "));
     let mut cmd = std::process::Command::new("cargo");
     cmd.args(&args).current_dir(source_dir);
-    let host_target_dir = std::env::var("CARGO_TARGET_DIR")
-        .ok()
-        .filter(|v| !v.trim().is_empty())
-        .map(PathBuf::from);
-    let use_override_target = host_target_dir.is_none();
-    if use_override_target {
-        if let Some(target_dir) = target_dir_override {
-            cmd.env("CARGO_TARGET_DIR", target_dir);
-        }
-    }
+    tracing::info!("Building: cargo {}", args.join(" "));
     let status = cmd.status().context("spawn cargo build")?;
     if !status.success() {
         bail!("cargo build failed in {}", source_dir.display());
     }
 
-    let target_dir = if let Some(dir) = host_target_dir {
-        dir
-    } else if use_override_target {
-        match target_dir_override {
-            Some(dir) => dir.to_path_buf(),
-            None => metadata_target_dir(source_dir)?,
-        }
-    } else {
-        metadata_target_dir(source_dir)?
-    };
+    let target_dir = metadata_target_dir(source_dir)?;
     let rust_target = std::env::var("RUST_TARGET").ok().filter(|s| !s.is_empty());
     Ok(artifacts
         .iter()
