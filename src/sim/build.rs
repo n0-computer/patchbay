@@ -240,17 +240,30 @@ fn build_in_workspace(
     tracing::info!("Building: cargo {}", args.join(" "));
     let mut cmd = std::process::Command::new("cargo");
     cmd.args(&args).current_dir(source_dir);
-    if let Some(target_dir) = target_dir_override {
-        cmd.env("CARGO_TARGET_DIR", target_dir);
+    let host_target_dir = std::env::var("CARGO_TARGET_DIR")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .map(PathBuf::from);
+    let use_override_target = host_target_dir.is_none();
+    if use_override_target {
+        if let Some(target_dir) = target_dir_override {
+            cmd.env("CARGO_TARGET_DIR", target_dir);
+        }
     }
     let status = cmd.status().context("spawn cargo build")?;
     if !status.success() {
         bail!("cargo build failed in {}", source_dir.display());
     }
 
-    let target_dir = match target_dir_override {
-        Some(dir) => dir.to_path_buf(),
-        None => metadata_target_dir(source_dir)?,
+    let target_dir = if let Some(dir) = host_target_dir {
+        dir
+    } else if use_override_target {
+        match target_dir_override {
+            Some(dir) => dir.to_path_buf(),
+            None => metadata_target_dir(source_dir)?,
+        }
+    } else {
+        metadata_target_dir(source_dir)?
     };
     let rust_target = std::env::var("RUST_TARGET").ok().filter(|s| !s.is_empty());
     Ok(artifacts

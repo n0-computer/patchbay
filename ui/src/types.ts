@@ -5,6 +5,8 @@ export interface TransferResult {
   size_bytes?: number
   elapsed_s?: number
   mbps?: number
+  up_mbps?: number
+  down_mbps?: number
   final_conn_direct?: boolean
   conn_upgrade?: boolean
   conn_events: number

@@ -14,15 +14,17 @@ type NodeRow = {
 function transferNodeRows(results: SimResults): NodeRow[] {
   const byNode = new Map<string, NodeRow>()
   for (const transfer of results.transfers) {
-    const mbps = transfer.mbps ?? 0
+    const upMbps = transfer.up_mbps ?? transfer.mbps ?? 0
+    const downMbps = transfer.down_mbps ?? transfer.mbps ?? 0
+    if (!transfer.provider || !transfer.fetcher) continue
     if (!byNode.has(transfer.provider)) {
       byNode.set(transfer.provider, { node: transfer.provider, up: 0, down: 0 })
     }
     if (!byNode.has(transfer.fetcher)) {
       byNode.set(transfer.fetcher, { node: transfer.fetcher, up: 0, down: 0 })
     }
-    byNode.get(transfer.provider)!.up += mbps
-    byNode.get(transfer.fetcher)!.down += mbps
+    byNode.get(transfer.provider)!.up += upMbps
+    byNode.get(transfer.fetcher)!.down += downMbps
   }
   return [...byNode.values()].sort((a, b) => a.node.localeCompare(b.node))
 }
@@ -33,7 +35,7 @@ export default function PerfTab({ results }: { results: SimResults | null }) {
 
   return (
     <div className="perf-layout">
-      {results.transfers.length > 0 && (
+      {nodeRows.length > 0 && (
         <div className="section">
           <div className="section-header">transfer per-node throughput</div>
           <div className="tbl-wrap">
@@ -67,26 +69,20 @@ export default function PerfTab({ results }: { results: SimResults | null }) {
               <thead>
                 <tr>
                   <th>id</th>
-                  <th>provider</th>
-                  <th>fetcher</th>
-                  <th>mbps</th>
+                  <th>up_mbps</th>
+                  <th>down_mbps</th>
                   <th>elapsed</th>
                   <th>size</th>
-                  <th>direct</th>
-                  <th>events</th>
                 </tr>
               </thead>
               <tbody>
                 {results.transfers.map((r, i) => (
                   <tr key={i}>
                     <td>{r.id}</td>
-                    <td>{r.provider}</td>
-                    <td>{r.fetcher}</td>
-                    <td>{fmt(r.mbps, 1)}</td>
+                    <td>{fmt(r.up_mbps ?? r.mbps, 1)}</td>
+                    <td>{fmt(r.down_mbps ?? r.mbps, 1)}</td>
                     <td>{fmt(r.elapsed_s, 2, 's')}</td>
                     <td>{fmt(r.size_bytes ? r.size_bytes / 1e6 : undefined, 1, ' MB')}</td>
-                    <td>{r.final_conn_direct == null ? '—' : (r.final_conn_direct ? 'yes' : 'no')}</td>
-                    <td>{r.conn_events}</td>
                   </tr>
                 ))}
               </tbody>

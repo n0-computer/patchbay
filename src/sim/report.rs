@@ -28,13 +28,29 @@ impl StepResultRecord {
     }
 
     /// Parse down_bytes as u64.
-    pub fn size_bytes(&self) -> Option<u64> {
+    pub fn down_bytes(&self) -> Option<u64> {
         self.down_bytes_raw.as_deref()?.parse().ok()
     }
 
-    /// Compute Mbit/s from bytes and duration.
-    pub fn mbps(&self) -> Option<f64> {
-        let bytes = self.size_bytes()? as f64;
+    /// Parse up_bytes as u64.
+    pub fn up_bytes(&self) -> Option<u64> {
+        self.up_bytes_raw.as_deref()?.parse().ok()
+    }
+
+    /// Compute downlink Mbit/s from bytes and duration.
+    pub fn down_mbps(&self) -> Option<f64> {
+        let bytes = self.down_bytes()? as f64;
+        let secs = self.elapsed_s()?;
+        if secs > 0.0 {
+            Some(bytes * 8.0 / (secs * 1_000_000.0))
+        } else {
+            None
+        }
+    }
+
+    /// Compute uplink Mbit/s from bytes and duration.
+    pub fn up_mbps(&self) -> Option<f64> {
+        let bytes = self.up_bytes()? as f64;
         let secs = self.elapsed_s()?;
         if secs > 0.0 {
             Some(bytes * 8.0 / (secs * 1_000_000.0))
@@ -54,8 +70,12 @@ pub struct TransferResult {
     pub size_bytes: Option<u64>,
     /// Transfer duration in seconds.
     pub elapsed_s: Option<f64>,
-    /// Throughput in Mbit/s.
+    /// Throughput in Mbit/s (downlink alias for backward compatibility).
     pub mbps: Option<f64>,
+    /// Uplink throughput in Mbit/s.
+    pub up_mbps: Option<f64>,
+    /// Downlink throughput in Mbit/s.
+    pub down_mbps: Option<f64>,
     /// Was the final connection direct (not relay)?
     pub final_conn_direct: Option<bool>,
     /// Did the connection ever upgrade to direct?
@@ -83,9 +103,11 @@ pub async fn write_results(
             id: r.id.clone(),
             provider: String::new(),
             fetcher: String::new(),
-            size_bytes: r.size_bytes(),
+            size_bytes: r.down_bytes(),
             elapsed_s: r.elapsed_s(),
-            mbps: r.mbps(),
+            mbps: r.down_mbps(),
+            up_mbps: r.up_mbps(),
+            down_mbps: r.down_mbps(),
             final_conn_direct: None,
             conn_upgrade: None,
             conn_events: 0,
@@ -103,23 +125,17 @@ pub async fn write_results(
         .context("write results.json")?;
 
     let mut md = String::new();
-    md.push_str("| sim | id | provider | fetcher | size_bytes | elapsed_s | mbps | final_conn_direct | conn_upgrade | conn_events |\n");
-    md.push_str("| --- | -- | -------- | ------- | ---------- | --------- | ---- | ----------------- | ------------ | ----------- |\n");
+    md.push_str("| sim | id | size_bytes | elapsed_s | up_mbps | down_mbps |\n");
+    md.push_str("| --- | -- | ---------- | --------- | ------- | --------- |\n");
     for r in &transfers {
         md.push_str(&format!(
-            "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
+            "| {} | {} | {} | {} | {} | {} |\n",
             sim_name,
             r.id,
-            r.provider,
-            r.fetcher,
             r.size_bytes.map(|v| v.to_string()).unwrap_or_default(),
             r.elapsed_s.map(|v| format!("{:.3}", v)).unwrap_or_default(),
-            r.mbps.map(|v| format!("{:.1}", v)).unwrap_or_default(),
-            r.final_conn_direct
-                .map(|v| v.to_string())
-                .unwrap_or_default(),
-            r.conn_upgrade.map(|v| v.to_string()).unwrap_or_default(),
-            r.conn_events,
+            r.up_mbps.map(|v| format!("{:.1}", v)).unwrap_or_default(),
+            r.down_mbps.map(|v| format!("{:.1}", v)).unwrap_or_default(),
         ));
     }
     tokio::fs::write(work_dir.join("results.md"), md)
@@ -350,9 +366,9 @@ mod tests {
             down_bytes_raw: Some("1000000".to_string()), // 1 MB
         };
         assert_eq!(r.elapsed_s(), Some(2.0));
-        assert_eq!(r.size_bytes(), Some(1_000_000));
+        assert_eq!(r.down_bytes(), Some(1_000_000));
         // 1MB in 2s = 4 Mbit/s
-        assert_eq!(r.mbps(), Some(4.0));
+        assert_eq!(r.down_mbps(), Some(4.0));
     }
 
     #[tokio::test(flavor = "current_thread")]

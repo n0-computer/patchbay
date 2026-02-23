@@ -52,15 +52,17 @@ function avg(nums: number[]): number | null {
 function transferNodeThroughput(transfers: TransferResult[]): NodeThroughput[] {
   const byNode = new Map<string, NodeThroughput>()
   for (const transfer of transfers) {
-    const mbps = transfer.mbps ?? 0
+    if (!transfer.provider || !transfer.fetcher) continue
+    const upMbps = transfer.up_mbps ?? transfer.mbps ?? 0
+    const downMbps = transfer.down_mbps ?? transfer.mbps ?? 0
     if (!byNode.has(transfer.provider)) {
       byNode.set(transfer.provider, { node: transfer.provider, up: 0, down: 0 })
     }
     if (!byNode.has(transfer.fetcher)) {
       byNode.set(transfer.fetcher, { node: transfer.fetcher, up: 0, down: 0 })
     }
-    byNode.get(transfer.provider)!.up += mbps
-    byNode.get(transfer.fetcher)!.down += mbps
+    byNode.get(transfer.provider)!.up += upMbps
+    byNode.get(transfer.fetcher)!.down += downMbps
   }
   return [...byNode.values()].sort((a, b) => a.node.localeCompare(b.node))
 }
@@ -72,6 +74,11 @@ function throughputFromTransfersOrIperf(transfers: TransferResult[], iperf: Iper
       up: sum(nodeRows.map((n) => n.up)),
       down: sum(nodeRows.map((n) => n.down)),
     }
+  }
+  const upRows = transfers.map((row) => row.up_mbps).filter((v): v is number => v != null)
+  const downRows = transfers.map((row) => row.down_mbps ?? row.mbps).filter((v): v is number => v != null)
+  if (upRows.length > 0 || downRows.length > 0) {
+    return { up: avg(upRows), down: avg(downRows) }
   }
   const iperfMbps = iperf.map((row) => row.mbps).filter((v): v is number => v != null)
   const mean = avg(iperfMbps)
@@ -91,8 +98,8 @@ function nodeCount(summary: SimSummary | null, transfers: TransferResult[], iper
   }
   const inferred = new Set<string>()
   for (const row of transfers) {
-    inferred.add(row.provider)
-    inferred.add(row.fetcher)
+    if (row.provider) inferred.add(row.provider)
+    if (row.fetcher) inferred.add(row.fetcher)
   }
   for (const row of iperf) {
     inferred.add(row.device)
