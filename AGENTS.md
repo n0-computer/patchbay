@@ -34,23 +34,6 @@ Root and file capabilities are not required.
   - Uses `RUST_TARGET` if set, otherwise `rustc -vV` host.
   - Base uses `${CARGO_MAKE_TARGET_DIR}` or `<workspace>/target`.
 
-## VM (Lima) Tasks
-Lima config: `lima.yaml` (Debian Trixie).
-Provisioning installs `iproute2`, `nftables`, etc.
-
-VM tasks in `Makefile.toml`:
-- `setup`: start or create `netsim-vm`.
-- `build-vm`: `cargo build --release --target x86_64-unknown-linux-musl`.
-- `build-test-vm`: `cargo test --no-run --target x86_64-unknown-linux-musl`.
-- `run-vm`: build, bind-mount target dir into VM as `/target`, then execute binary.
-- `test-vm`: build tests, bind-mount target dir, run test binaries in VM.
-- `shutdown`: stop VM.
-
-**Mounting:** The target dir is bind-mounted at runtime using:
-- `TARGET_DIR=$(RUST_TARGET=... cargo make --quiet target-dir)`
-- `realpath --relative-to="$PWD" "$TARGET_DIR"` ensures target is under `/app`.
-- Mounted in VM: `/app/<rel>` -> `/target`.
-
 ## Qdisc / Impairments
 All tc usage is in `src/qdisc.rs`.
 - `apply_impair(ns, ifname, limits)` builds netem + optional tbf.
@@ -109,12 +92,46 @@ cargo make test-vm
 
 ## General instructions
 
-all plans are in plans/. keep overview of plans in plans/PLAN.md. 
-document important findings and changes in AGENTS.md
-always document public items, strictly adhere to official rust doc conventions and naming conventions
-run cargo check, cargo clippy --tests --examples --fix, cargo test, cargo fmt, and ui e2e (cd ui && npm run test:e2e) before each commit (and require all to pass cleanly)
-when a task is ready run the checks then ask to commit, don't commit without asking, but stage files already.
-after confirmation commit with "feat: short description" etc and some details afterwards. elaborate open issues a little, explain decisions taken concisely
+### Plans
+
+Plans live in `plans/`. Keep the overview in `plans/PLAN.md` with up to four sections, in this order:
+
+- `# In progress` - plans currently being worked on
+- `# Open` — plans ready to start or with substantive work remaining; list with priority.
+- `# Partial` — plans with most steps done but at least one meaningful step still outstanding; include a one-line note on what remains.
+- `# Completed` — plans whose primary goals are fully achieved; list with priority.
+
+Omit sections that are empty.
+
+All plans have a **priority** (1–5). Default new plans to 2.
+
+Each plan file **must start with a `## TODO` checklist**:
+- First item: `- [x] Write plan` (always checked — the plan exists)
+- Middle items: key implementation sub-steps (check off as completed with `[x]`, leave `[ ]` for pending)
+- Last item: `- [ ] Final review`
+
+The final review is done post-implementation; it stays unchecked until explicitly reviewed.
+
+### Review commands
+
+- **`review`** — find all plans in `# Completed` (and `# Partial`) in `PLAN.md` that have an unchecked `Final review` item, then review the implementation against the plan and check it off.
+- **`review general`** — scan the codebase for general quality issues and high-level suggestions; update `REVIEW.md`.
+
+### REVIEW.md format
+
+`REVIEW.md` has two sections:
+- `# Open` — issues identified but not yet resolved, with full details.
+- `# Completed` — resolved issues listed briefly (details removed, just a one-liner per item) with ✅.
+
+When an open issue is resolved, remove its details from `# Open` and add a brief entry to `# Completed`.
+
+### Code quality
+
+- Always document public items; strictly adhere to official Rust doc conventions and naming conventions.
+- Document important findings and changes in `AGENTS.md`.
+- Before each commit run: `cargo check`, `cargo clippy --tests --examples --fix`, `cargo test`, `cargo fmt`, and `cd ui && npm run test:e2e`; require all to pass cleanly.
+- When a task is ready, run the checks then ask to commit; stage files already but do not commit without asking.
+- After confirmation commit with `"feat: short description"` etc. with details; elaborate open issues a little, explain decisions taken concisely.
 
 ## Recent Changes
 - Added config-driven sim project flow and iroh layout refactor:

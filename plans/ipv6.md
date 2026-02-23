@@ -1,5 +1,19 @@
 # IPv6 Support Plan
 
+## TODO
+
+- [x] Write plan
+- [ ] Data model: v6 fields in `CoreConfig`, `Router` (`upstream_ip_v6`, `nat_v6`), `Switch` (`cidr_v6`, `gw_v6`), `DeviceIface` (`ip_v6`)
+- [ ] Netlink v6 methods: `add_addr6`, `add_default_route_v6`, `replace_default_route_v6`, `add_route_v6`, `set_sysctl_ipv6_fwd`
+- [ ] Allocators: `alloc_ix_ip_v6_low/high`, `alloc_private_cidr_v6`, `alloc_from_switch_v6`
+- [ ] `wire_iface` dual-stack provisioning (conditional v6 address + default route)
+- [ ] Config/TOML schema: `ip_version`, `nat_v6` fields + `Lab::from_config` routing
+- [ ] `apply_nat_v6` (NPTv6 prefix translation + masquerade nftables rules)
+- [ ] `qdisc.rs` dual-protocol filter (`IpNet` branching on `add_filter`)
+- [ ] Test helpers: `probe_v6_in_ns`, `udp_rtt_v6_in_ns`, dual-stack reflector
+- [ ] Test matrix: topology combos 1–5 + NAT × IP-version combos A–I (~14 tests)
+- [ ] Final review
+
 **Status:** ❌ not implemented
 **Effort:** ~8–10 dev-days for full dual-stack + all NAT combos + test matrix
 

@@ -1,5 +1,16 @@
 # Maintainability Review — netsim-rs
 
+## TODO
+
+- [x] Write plan
+- [x] NAT mode cleanup: single `NatMode` in `RouterConfig`, unified `apply_nat` (1.2)
+- [x] Step enum + shared fields: tagged `Step` enum with `StepShared` flatten (1.3)
+- [x] Module splits: `src/netlink.rs`, `src/sim/steps.rs`, `src/sim/progress.rs` (2)
+- [x] DRY cleanup: typed CIDR, `create_unique_dir`, lookup helpers, cleanup naming, sanitizers (3)
+- [x] Minor idioms: remove `#![allow(dead_code)]` (4.1)
+- [x] Typed node IDs (1.1) — declined; keeping `NodeId` type aliases by request
+- [ ] Final review
+
 Expert-level audit of every Rust source file. Findings are ordered by value.
 Monoliths are fine; splitting is only proposed where concerns are genuinely
 orthogonal and the boundary is clean.

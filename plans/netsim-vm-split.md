@@ -1,5 +1,17 @@
 # netsim-vm Standalone VM Runner Plan
 
+## TODO
+
+- [x] Write plan
+- [x] Add standalone `crates/netsim-vm` bin crate and workspace wiring
+- [x] Migrate VM lifecycle/mount logic from `src/vm.rs` into `netsim-vm`
+- [x] Add `netsim-vm run` with `--netsim-version` (latest, release tag, `git:<ref>`, `path:`)
+- [x] Add `netsim-vm test` VM test execution (host build/discover, guest execute, summary)
+- [x] Replace Makefile VM tasks with `cargo run -p netsim-vm -- ...`
+- [ ] Remove `qemu-vm.sh` file from repository
+- [ ] Remove `netsim run-vm` path from `netsim` binary (deferred by request)
+- [ ] Final review
+
 ## Goal
 Replace shell-based VM orchestration (`qemu-vm.sh`) with a standalone workspace binary crate `netsim-vm` that supports both VM sim runs and VM test execution (`cargo make test-vm` parity), with no Rust crate dependency between `netsim` and `netsim-vm`.
 
@@ -208,18 +220,6 @@ Decision for now:
 3. `netsim-vm test` executes compiled tests in guest and returns correct aggregate status.
 4. No Rust dependency between `netsim` and `netsim-vm`.
 5. `qemu-vm.sh` is no longer required and removed after parity confirmation.
-
-## Execution Status
-
-- [x] Added standalone `crates/netsim-vm` binary crate and workspace wiring.
-- [x] Ported VM lifecycle/mount/guest flow into `crates/netsim-vm/src/vm.rs`.
-- [x] Added `netsim-vm` CLI commands: `up`, `down`, `status`, `cleanup`, `ssh`, `run`, `test`.
-- [x] Implemented `--netsim-version` resolver with `latest`, release tag, `git:<ref>`, `path:<local-binary>`.
-- [x] Implemented artifact strategy A staging for `--binary` overrides into `/work/binaries`.
-- [x] Implemented VM test flow (`netsim-vm test`) with host build/discovery, guest sudo execution, and summary.
-- [x] Rewired Makefile VM tasks to call `cargo run -p netsim-vm -- ...`.
-- [ ] Removed `qemu-vm.sh` file from repository.
-- [ ] Removed `run-vm` ownership from `netsim` binary (deferred by request).
 
 ## Open Issues And Future Work
 

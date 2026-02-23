@@ -1,5 +1,19 @@
 # netsim UI Plan
 
+## TODO
+
+- [x] Write plan
+- [x] Scaffold Vite + React + TS project at `ui/` with `vite-plugin-singlefile`
+- [x] Dev server: serve `.netsim-work` + `GET /__netsim/runs` run listing endpoint
+- [x] Perf tab: sortable transfer/iperf tables + two-run compare with Δmbps/Δ%
+- [x] Logs tab: ANSI tracing + iroh NDJSON rendering + filters + sidebar file tree
+- [x] Timeline tab: SVG swimlane (Y=time, X=node lanes), scroll/zoom, tooltips
+- [x] Qlog tab: JSON-seq event table, virtualised, filter, expand-on-click
+- [x] Rust: `manifest.json` per run dir (partial — written incrementally)
+- [x] Rust: embed `dist/index.html` + `serve` command in both CLIs (partial — served from binary)
+- [ ] Qlog auto-discovery (`qlog-index.json` per qlog dir written by Rust)
+- [ ] Final review
+
 Interactive browser UI for viewing simulation results, logs, timelines and
 qlogs. Served from the sim work root (or a run dir) via a future `netsim serve`
 command. Built with Vite + React; output is a single `index.html` via

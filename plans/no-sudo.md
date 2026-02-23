@@ -1,5 +1,16 @@
 # No-Sudo Netsim Plan
 
+## TODO
+
+- [x] Write plan
+- [x] Phase 0: capability/policy diagnostics (`check_caps()` implemented; `netsim doctor` deferred)
+- [x] Phase 1: namespace backend abstraction — superseded by fd-only rootless approach (`rootless.md`)
+- [x] Phase 2: netns executor refactor (`NetnsManager` worker-thread executor)
+- [x] Phase 3: lab-root isolation hardening — implemented; guard tests for host-route leakage deferred
+- [x] Phase 4: cleanup guarantees — cleanup/resource tracking exists; full leak-regression suite deferred
+- [x] Phase 5: test matrix + docs — deferred; superseded by rootless plan
+- [ ] Final review
+
 ## Goal
 Make `netsim-rs` run and test without `sudo`, with capability-based privilege only, and with strong guarantees against host-root namespace leakage.
 

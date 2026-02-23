@@ -1,5 +1,17 @@
 # Plan: Self-Contained `netsim` Binary
 
+## TODO
+
+- [x] Write plan
+- [x] Reshape CLI into explicit `run`/`run-vm`/`setup-caps` subcommands
+- [x] Embed VM orchestration in Rust — ported to `crates/netsim-vm` (see `netsim-vm-split.md`)
+- [x] Built-in self-capability setup (`netsim setup-caps`) — superseded/removed in rootless migration
+- [x] Keep `setcap.sh` for test binaries — superseded/removed in rootless migration
+- [x] Wire `run-vm` to execute `netsim` in guest
+- [x] Update automation and docs (`Makefile.toml`, `AGENTS.md`)
+- [ ] Validate external-checkout flow end-to-end
+- [ ] Final review
+
 ## Goal
 Ship a single `netsim` binary that can be dropped into another checkout (for example `iroh`) and used directly for:
 - local runs: `netsim run ./sims/1to1.toml`

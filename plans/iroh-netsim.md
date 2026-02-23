@@ -1,5 +1,17 @@
 # Plan: Iroh Netsims (v4)
 
+## TODO
+
+- [x] Write plan
+- [x] Phase 1: `core.rs` multi-iface `Device` types, `DeviceBuilder`, `IfaceBuild`/`wire_iface`, TOML parse for `[[router]]`/`[device.*.*]`
+- [x] Phase 2: dynamic ops (`set_impair`, `link_down/up`, `switch_route`, `remove_qdisc_r`) + tests
+- [x] Phase 3: `sim/topology.rs`, `env.rs`, `build.rs`, `transfer.rs`, `report.rs`, `runner.rs`, CLI wiring, integration files
+- [x] Phase 4: `count` expansion, `fetchers = [...]` in runner, 1→N sim files
+- [x] Phase 5: shared binary manifests (`[sim] binaries`), CLI `--binary` overrides, path-copy semantics
+- [ ] End-to-end `cargo make run-vm` proof recorded
+- [ ] Override validation startup summary table + full merge/precedence tests
+- [ ] Final review
+
 Goal: `cargo run -- iroh-integration/sims/iroh-1to1-public.toml` builds a network, runs an iroh transfer
 sim, applies scheduled network events, and reports results.
 

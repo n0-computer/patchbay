@@ -1,5 +1,15 @@
 # Plan: initial
 
+## TODO
+
+- [x] Write plan
+- [x] Fix compile errors (§1)
+- [x] Add serde/toml deps, config structs, `Lab::load` (§4)
+- [x] Add name maps, `run_on`, `spawn_on` (§2)
+- [x] `Gateway` enum + DC/ISP device build paths (§3, §5) — superseded by unified router model + `DeviceBuilder`
+- [x] Impair via `tc netem` incl. region latency (§5c, §5d)
+- [ ] Final review
+
 ## Goals
 1. Fix all compile errors
 2. Clean up API / improve type safety

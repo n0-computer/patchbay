@@ -1,5 +1,19 @@
 # Workspace Reorganisation Plan
 
+## TODO
+
+- [x] Write plan
+- [x] Step 1: Scaffold crate directories (`netsim-core/`, `netsim-utils/`, `netsim/`, `netsim-vm/`)
+- [x] Step 2: `cargo check -p netsim-core` clean; `RouterCfg`/`LabCore` renamed
+- [x] Step 3: `cargo check -p netsim-utils` clean; `build_ui` fn present
+- [x] Step 4: `cargo check -p netsim` clean; `RunOpts::from_env` + typed overrides
+- [x] Step 5: `cargo check -p netsim-vm` clean; no netsim-core dep
+- [x] Step 6: Root `Cargo.toml` replaced; old `src/` deleted
+- [x] Step 7: `cargo build --workspace && cargo test --workspace` green
+- [x] Step 8: `ctor`/`init_userns` refactor — `init_userns_for_ctor` in `netsim-core`, called from `netsim/src/init.rs`
+- [ ] Step 9: Report/`SimOutcome` refactor — `TransferResult` still present in `report.rs`; separate PR
+- [ ] Final review
+
 ## Goal
 
 Split the monolithic root crate into four focused crates with clean dependency boundaries,
@@ -786,23 +800,3 @@ The two existing tests in `report.rs` (`step_result_record_computes_mbps`,
 - JSON assertion keys updated (`"transfers"` → `"steps"`).
 - Markdown assertion: verify only non-empty columns appear.
 
----
-
-## Completion Checklist
-
-**Main reorg:**
-- [ ] Step 1 — scaffold dirs + stub Cargo.toml files
-- [ ] Step 2 — `cargo check -p netsim-core` clean; `RouterCfg`/`LabCore` renamed
-- [ ] Step 3 — `cargo check -p netsim-utils` clean; `build_ui` fn present
-- [ ] Step 4 — `cargo check -p netsim` clean; `RunOpts::from_env` + typed overrides
-- [ ] Step 5 — `cargo check -p netsim-vm` clean; no netsim-core dep
-- [ ] Step 6 — root `Cargo.toml` replaced; old `src/` deleted
-- [ ] Step 7 — `cargo build --workspace && cargo test --workspace` green
-- [ ] Step 8 — ctor/`init_userns` refactor; `cargo build --workspace` still green
-
-**Report refactor (separate PR / commit):**
-- [ ] Step 9a — `TransferResult` removed; `StepResultRecord` fields cleaned up
-- [ ] Step 9b — `write_md_table` data-driven; no empty columns
-- [ ] Step 9c — `results.json` uses `"steps"` key; `SimOutcome::step_results` populated
-- [ ] Step 9d — UI: `types.ts` updated; PerfTab / App.tsx updated; per-node table removed
-- [ ] Step 9e — existing `report.rs` tests updated and passing

@@ -1,5 +1,24 @@
 # Comprehensive Networking Test Suite
 
+## TODO
+
+- [x] Write plan
+- [ ] Add `strum` dev-dependency; derive `EnumIter`/`Display` on `NatMode`, `UplinkWiring`
+- [ ] New public APIs: `set_nat_mode`, `rebind_nats`, `set_hairpin`, `set_router_impair`, `router_downlink_bridge`
+- [ ] Supporting test helpers: `NatTestCtx`, `DualNatLab`, `probe_reflexive`, TCP reflector/sink, `udp_send_recv_count`
+- [ ] Tests 5a–5b: TCP reflector smoke + reflexive IP all combos (48 combinations)
+- [ ] Tests 5c: port mapping behavior (EIM stable, EDM changes)
+- [ ] Tests 5d: route switching + reflexive IP/TCP behavior (multiple switch scenarios)
+- [ ] Tests 5e: link down/up connectivity (UDP + TCP)
+- [ ] Tests 5f: NAT rebinding (mode change + conntrack flush)
+- [ ] Tests 5g: multi-device cross-NAT isolation
+- [ ] Tests 5h: hairpinning (off/on/toggle)
+- [ ] Tests 5i: rate limiting (TCP/UDP, upload/download, multi-hop, asymmetric)
+- [ ] Tests 5j: packet loss (UDP moderate/high, TCP integrity)
+- [ ] Tests 5k: latency multi-hop, accumulation, directionality, regions
+- [ ] Tests 5l: dynamic rate and latency changes
+- [ ] Final review
+
 ## Context
 
 The current test suite in `src/lib.rs` covers basic NAT reflexive-IP, port mapping, link/route switching,

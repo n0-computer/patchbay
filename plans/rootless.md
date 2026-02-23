@@ -1,5 +1,16 @@
 # Rootless netsim-rs via Unprivileged User Namespaces
 
+## TODO
+
+- [x] Write plan
+- [x] Add libc-only `#[ctor]` bootstrap (`src/userns.rs`) for `cargo test`
+- [x] Add public `bootstrap_userns()` in `src/lib.rs` with anyhow error handling
+- [x] Split `main()` — sync outer calling `bootstrap_userns()` before Tokio starts
+- [x] Remove named/auto netns backend and `NETSIM_NETNS_BACKEND` env var; fd-only remains
+- [x] Remove `setup-caps` command and `src/caps.rs`
+- [x] Add `-U` to `nsenter` in `run-in` command
+- [ ] Final review
+
 Goal: `cargo run -- run sim.toml` and `cargo test` work with zero capabilities, zero
 `setcap`, zero `sudo`, as long as the kernel allows unprivileged user namespaces.
 

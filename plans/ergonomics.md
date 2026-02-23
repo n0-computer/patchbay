@@ -1,5 +1,17 @@
 # Ergonomics Plan
 
+## TODO
+
+- [x] Write plan
+- [x] Remove obsolete VM code from `netsim` crate (`src/vm.rs`, `run-vm` command)
+- [x] Add shared asset handling (`src/assets.rs`) via `netsim` → `netsim-vm` dependency
+- [x] Add shared embedded UI server + `serve` command in both CLIs
+- [x] Add `--open` run-time serving with keep-open behavior
+- [x] Add `progress.json` + incremental `manifest.json` updates in runner
+- [x] Simplify CLI summary table to status + up/down numbers
+- [x] Migrate transfer binary path to `target:examples/transfer` shortcut
+- [ ] Final review
+
 ## Goals
 - Remove obsolete VM orchestration from `netsim` crate and keep VM ownership in `netsim-vm`.
 - Share asset/path handling logic via `netsim` library dependency from `netsim-vm`.

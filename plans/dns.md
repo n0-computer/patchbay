@@ -2,6 +2,12 @@
 
 **Status:** ❌ not implemented
 
+## TODO
+
+- [] Write plan
+  - [] refine plan, gather feedback
+- [] Add impl plan and TODOs
+
 ---
 
 ## Overview

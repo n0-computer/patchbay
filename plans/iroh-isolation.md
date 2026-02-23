@@ -1,5 +1,19 @@
 # Transfer Isolation — Option A: Concrete Implementation Plan
 
+## TODO
+
+- [x] Write plan
+- [x] Step 1: `CaptureStore` with `Mutex + Condvar` history accumulation (`sim/capture.rs`)
+- [x] Step 2: `SimFile` types — `StepEntry`, `UseStep`, `StepTemplateDef`, `StepGroupDef`, `ExtendsEntry`, new `Step` variants (`GenCerts`, `GenFile`, `SetDefaultRoute`), updated `CaptureSpec`/`Parser`
+- [x] Step 3: Persistent capture readers streaming into `CaptureStore` — `capture_reader` field in `SimState`, joined on cleanup
+- [x] Step 4: On-demand capture blocking in `execute_step` — `requires` pre-blocking and capture-based `${step.field}` interpolation present
+- [x] Step 5: `gen-certs` and `gen-file` step variant execution — implemented in `steps.rs`
+- [x] Step 6: `[step.results]` collection + `evaluate_assert` — `StepResults` field exists; assert uses `<step>.<field> matches/contains/==/!=` (simpler than planned `@selector/count`)
+- [x] Step 7 (Commit B): Port all iroh sim TOML files to `[[extends]]` + `use =` template/group format
+- [x] Step 8 (Commit C1): Remove iroh-specific runner code — 0 iroh references in `runner.rs`
+- [x] Step 9 (Commit C2): Strip old `Step` fields/variants; delete `sim/transfer.rs`
+- [ ] Final review
+
 The goal is to remove all iroh-specific knowledge from netsim's core so the
 iroh integration lives entirely in sim TOML files (shippable from the iroh
 repo) without losing the conciseness of today's `kind = "iroh-transfer"`.
