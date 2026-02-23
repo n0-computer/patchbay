@@ -1,32 +1,6 @@
 [config]
 default_to_workspace = false
 
-[tasks.setup-vm]
-script = ["""
-  set -euo pipefail
-  cargo run -p netsim-vm -- up
-  """]
-
-[tasks.target-dir]
-script = ['''
-  set -euo pipefail
-  if [ -n "${RUST_TARGET:-}" ]; then
-    target="${RUST_TARGET}"
-  else
-    target="$(rustc -vV | awk '/^host:/{print $2}')"
-  fi
-  base="$(cargo metadata --format-version 1 --no-deps | jq -r '.target_directory')"
-  echo "${base}/${target}"
-  ''']
-
-[tasks.run-local]
-command = "cargo"
-args = ["run", "--", "run", "${@}"]
-
-[tasks.test-local]
-command = "cargo"
-args = ["test", "${@}"]
-
 [tasks.run-vm]
 script = ['''
   set -euo pipefail
@@ -41,17 +15,3 @@ script = ['''
   set -euo pipefail
   cargo run -p netsim-vm -- test --target "x86_64-unknown-linux-musl" ${@}
   ''']
-
-[tasks.vm-status]
-script = ['''
-  cargo run -p netsim-vm -- status
-  ''']
-
-[tasks.vm-down]
-script = ['''
-  echo "Shutting down QEMU VM..."
-  cargo run -p netsim-vm -- down
-  ''']
-
-[tasks.start]
-dependencies = ["run-vm"]

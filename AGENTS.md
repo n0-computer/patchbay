@@ -26,14 +26,6 @@ Root and file capabilities are not required.
 - Effective UID becomes 0 inside that user namespace, enabling netns/netlink/nft/tc operations scoped to the namespace.
 - Kernel prerequisite: unprivileged user namespaces must be enabled on the host.
 
-## Local Tasks (cargo-make)
-`Makefile.toml` provides tasks:
-- `run-local`: runs `cargo run -- ${ARGS}`.
-- `test-local`: runs `cargo test -- ${ARGS}`.
-- `target-dir`: prints effective target dir.
-  - Uses `RUST_TARGET` if set, otherwise `rustc -vV` host.
-  - Base uses `${CARGO_MAKE_TARGET_DIR}` or `<workspace>/target`.
-
 ## Qdisc / Impairments
 All tc usage is in `src/qdisc.rs`.
 - `apply_impair(ns, ifname, limits)` builds netem + optional tbf.
@@ -53,6 +45,9 @@ Namespaces use `lab-p####-N`.
 - **Makefile target dir**: do not assume `./target`, always use `cargo make target-dir`.
 
 ## File Map
+
+* note: currently outdated, needs to be updated*
+
 - `src/lib.rs`: public API, tests, `check_caps`.
 - `src/core.rs`: core topology + build, netlink helpers.
 - `src/netns.rs`: namespace backend selection + lifecycle helpers.
@@ -77,18 +72,6 @@ Browser UI for viewing sim results, logs, timeline and qlogs.
 ## Notes on Tests
 Tests use `#[tokio::test(flavor = "current_thread")]` due to `setns` thread-local behavior.
 Many tests are serial (`serial_test`) because they manipulate global network state.
-
-## Useful Commands
-Local:
-```
-cargo test
-```
-
-VM:
-```
-cargo make run-vm
-cargo make test-vm
-```
 
 ## General instructions
 
