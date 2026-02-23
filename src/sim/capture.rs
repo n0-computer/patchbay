@@ -71,11 +71,6 @@ impl CaptureStore {
         }
     }
 
-    /// Non-blocking snapshot of all slots (for reporting).
-    pub fn snapshot(&self) -> HashMap<String, CaptureSlot> {
-        self.inner.0.lock().unwrap().slots.clone()
-    }
-
     /// Non-blocking latest value for interpolation (returns `None` if unset).
     pub fn get(&self, key: &str) -> Option<String> {
         self.inner

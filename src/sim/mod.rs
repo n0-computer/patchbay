@@ -6,7 +6,6 @@ pub mod report;
 pub mod runner;
 pub mod steps;
 pub mod topology;
-pub mod transfer;
 
 pub use runner::run_sims;
 
@@ -185,16 +184,6 @@ pub enum Step {
         #[serde(default)]
         requires: Vec<String>,
         results: Option<StepResults>,
-        // Legacy iroh-transfer fields (removed in Step 9).
-        #[serde(rename = "kind")]
-        iroh_transfer_kind: Option<String>,
-        provider: Option<String>,
-        fetcher: Option<String>,
-        fetchers: Option<Vec<String>>,
-        relay_url: Option<String>,
-        fetch_args: Option<Vec<String>>,
-        strategy: Option<String>,
-        baseline: Option<String>,
     },
     Wait {
         duration: String,

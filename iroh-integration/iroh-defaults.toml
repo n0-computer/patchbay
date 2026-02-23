@@ -25,8 +25,8 @@ content = """
 enable_relay               = true
 enable_metrics             = true
 enable_quic_addr_discovery = true
-relay_port                 = 3340
 [tls]
+https_bind_addr  = "0.0.0.0:3340"
 cert_mode        = "Manual"
 manual_cert_path = "${${group.device}-cert.cert_pem_path}"
 manual_key_path  = "${${group.device}-cert.key_pem_path}"

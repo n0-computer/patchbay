@@ -11,26 +11,11 @@ use std::time::Duration;
 
 use crate::sim::capture::CaptureStore;
 use crate::sim::env::SimEnv;
-use crate::sim::report::{parse_iperf3_json_log, IperfResult, StepResultRecord, TransferResult};
-use crate::sim::transfer::start_transfer;
+use crate::sim::report::StepResultRecord;
 use crate::sim::{CaptureSpec, Parser, Step, StepResults};
 use netsim::Impair;
 
 use crate::sim::runner::SimState;
-
-#[derive(Clone)]
-pub(crate) struct ParserConfig {
-    pub(crate) parser: Parser,
-    pub(crate) result_id: String,
-    pub(crate) device: String,
-    pub(crate) log_path: PathBuf,
-    pub(crate) baseline: Option<String>,
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct RelayRuntimeAssets {
-    config_path: PathBuf,
-}
 
 pub(crate) fn step_action(step: &Step) -> &'static str {
     match step {
@@ -62,9 +47,7 @@ pub(crate) fn step_id(step: &Step) -> Option<&str> {
 pub(crate) fn step_device(step: &Step) -> Option<&str> {
     match step {
         Step::Run { device, .. } => Some(device),
-        Step::Spawn {
-            device, provider, ..
-        } => device.as_deref().or(provider.as_deref()),
+        Step::Spawn { device, .. } => device.as_deref(),
         Step::SetImpair { device, .. } => Some(device),
         Step::SetDefaultRoute { device, .. } | Step::SwitchRoute { device, .. } => Some(device),
         Step::LinkDown { device, .. } => Some(device),
@@ -175,26 +158,6 @@ pub(crate) fn execute_step(state: &mut SimState, step: &Step) -> Result<()> {
                 bail!("'run' on '{}' failed: {:?}", device, status);
             }
 
-            // Legacy iperf3 parser path.
-            if matches!(parser, Parser::Iperf3Json) {
-                if let Some(result_id) = id.as_deref() {
-                    let metrics = parse_iperf3_json_log(&logs.stdout)?;
-                    let mbps = metrics.bits_per_second.map(|bps| bps / 1_000_000.0);
-                    state.iperf_results.push(IperfResult {
-                        id: result_id.to_string(),
-                        device: device.clone(),
-                        bytes: metrics.bytes,
-                        seconds: metrics.seconds,
-                        bits_per_second: metrics.bits_per_second,
-                        mbps,
-                        retransmits: metrics.retransmits,
-                        baseline: None,
-                        delta_mbps: None,
-                        delta_pct: None,
-                    });
-                }
-            }
-
             // Collect results from captures.
             if let Some(step_results) = results {
                 if let Some(record) = collect_step_results(&sid, step_results, &state.captures) {
@@ -213,34 +176,14 @@ pub(crate) fn execute_step(state: &mut SimState, step: &Step) -> Result<()> {
             ready_after,
             captures,
             results,
-            iroh_transfer_kind,
             ..
         } => {
-            if iroh_transfer_kind.as_deref() == Some("iroh-transfer") {
-                // Legacy managed transfer path.
-                let binary = state
-                    .binaries
-                    .get("transfer")
-                    .cloned()
-                    .ok_or_else(|| anyhow!("iroh-transfer: no binary named 'transfer'"))?;
-                let handle = start_transfer(state, step, &binary)?;
-                state.transfers.insert(id.to_string(), handle);
-                return Ok(());
-            }
-
-            // Generic spawn.
             let device = device.as_deref().context("spawn: missing device")?;
-            let cmd_parts = interpolate_with_captures(
+            let cmd_parts_final = interpolate_with_captures(
                 cmd.as_deref().context("spawn: missing cmd")?,
                 &state.env,
                 &state.captures,
             )?;
-            maybe_inject_relay_config_path(state, device, &mut cmd_parts.clone())?;
-            let cmd_parts_final = {
-                let mut cp = cmd_parts;
-                maybe_inject_relay_config_path(state, device, &mut cp)?;
-                cp
-            };
             tracing::info!(
                 id,
                 device,
@@ -334,35 +277,18 @@ pub(crate) fn execute_step(state: &mut SimState, step: &Step) -> Result<()> {
                 std::thread::sleep(parse_duration(after)?);
             }
 
-            // Legacy iperf parser config.
-            let parser_cfg = if matches!(parser, Parser::Iperf3Json) {
-                Some(ParserConfig {
-                    parser: parser.clone(),
-                    result_id: id.clone(),
-                    device: device.to_string(),
-                    log_path: logs.stdout.clone(),
-                    baseline: None,
-                })
-            } else {
-                None
-            };
-
             state.spawned.insert(
                 id.to_string(),
                 crate::sim::runner::GenericProcess {
                     child,
-                    parser: parser_cfg,
                     stdout_pump: out_pump,
                     stderr_pump: err_pump,
                     capture_reader: cap_reader,
                 },
             );
 
-            // Store results spec for post-wait collection.
+            // Stash results spec for post-wait-for collection.
             if let Some(step_results) = results {
-                state.spawned.get_mut(id).expect("just inserted").parser =
-                    state.spawned[id].parser.clone();
-                // Stash results spec in a side-table we'll process in wait-for.
                 state
                     .spawn_results
                     .insert(id.clone(), (step_results.clone(), device.to_string()));
@@ -383,11 +309,8 @@ pub(crate) fn execute_step(state: &mut SimState, step: &Step) -> Result<()> {
                 .transpose()?
                 .unwrap_or(Duration::from_secs(300));
 
-            if let Some(handle) = state.transfers.remove(id) {
-                let results = crate::sim::transfer::finish_transfer(handle, timeout)?;
-                state.results.extend(results);
-            } else if state.spawned.contains_key(id) {
-                let parser = {
+            if state.spawned.contains_key(id) {
+                {
                     let sp = state
                         .spawned
                         .get_mut(id)
@@ -409,8 +332,7 @@ pub(crate) fn execute_step(state: &mut SimState, step: &Step) -> Result<()> {
                             }
                         }
                     }
-                    sp.parser.clone()
-                };
+                }
                 if let Some(sp) = state.spawned.get_mut(id) {
                     if let Some(h) = sp.stdout_pump.take() {
                         join_pump(h, "spawn stdout pump")?;
@@ -421,9 +343,6 @@ pub(crate) fn execute_step(state: &mut SimState, step: &Step) -> Result<()> {
                     if let Some(h) = sp.capture_reader.take() {
                         join_pump(h, "spawn capture reader")?;
                     }
-                }
-                if let Some(parser_cfg) = parser {
-                    apply_parser_result(state, parser_cfg)?;
                 }
                 // Collect step results from captures.
                 if let Some((step_results, _device)) = state.spawn_results.remove(id) {
@@ -776,136 +695,6 @@ fn prepare_cmd(
     Ok(cmd)
 }
 
-fn maybe_inject_relay_config_path(
-    state: &mut SimState,
-    device: &str,
-    cmd_parts: &mut Vec<String>,
-) -> Result<()> {
-    if cmd_parts.is_empty() {
-        return Ok(());
-    }
-    let Some(relay_bin) = state.binaries.get("relay") else {
-        return Ok(());
-    };
-    if cmd_parts[0] != relay_bin.to_string_lossy() {
-        return Ok(());
-    }
-    if cmd_parts.iter().any(|arg| arg == "--config-path") {
-        return Ok(());
-    }
-    let assets = ensure_relay_runtime_assets(state, device)?;
-    cmd_parts.push("--config-path".to_string());
-    cmd_parts.push(assets.config_path.display().to_string());
-    Ok(())
-}
-
-fn ensure_relay_runtime_assets(state: &mut SimState, device: &str) -> Result<RelayRuntimeAssets> {
-    if let Some(existing) = state.relay_assets.get(device) {
-        return Ok(existing.clone());
-    }
-    let key_suffix = netsim::util::sanitize_for_env_key(device);
-    let relay_ip = state
-        .env
-        .interpolate_str(&format!("$NETSIM_IP_{key_suffix}"))
-        .with_context(|| format!("resolve relay IP for device '{device}'"))?;
-    let ip = relay_ip
-        .parse::<IpAddr>()
-        .with_context(|| format!("parse relay IP '{relay_ip}' for device '{device}'"))?;
-    let relay_dir = state
-        .work_dir
-        .join("relay")
-        .join(netsim::util::sanitize_for_path_component(device));
-    std::fs::create_dir_all(&relay_dir)
-        .with_context(|| format!("create relay runtime dir {}", relay_dir.display()))?;
-    let cert_path = relay_dir.join("certificate.crt");
-    let key_path = relay_dir.join("certificate.key");
-    if !cert_path.exists() || !key_path.exists() {
-        let cert = generate_self_signed_relay_cert(ip)?;
-        std::fs::write(&cert_path, cert.cert_pem)
-            .with_context(|| format!("write {}", cert_path.display()))?;
-        std::fs::write(&key_path, cert.key_pem)
-            .with_context(|| format!("write {}", key_path.display()))?;
-    }
-    let config_path = relay_dir.join("relay.cfg");
-    if !config_path.exists() {
-        let cfg = format!(
-            "enable_relay = true\nenable_metrics = true\nenable_quic_addr_discovery = true\n\n[tls]\nmanual_cert_path=\"{}\"\nmanual_key_path=\"{}\"\ncert_mode = \"Manual\"\n",
-            cert_path.display(),
-            key_path.display()
-        );
-        std::fs::write(&config_path, cfg)
-            .with_context(|| format!("write {}", config_path.display()))?;
-    }
-    let assets = RelayRuntimeAssets { config_path };
-    state
-        .relay_assets
-        .insert(device.to_string(), assets.clone());
-    Ok(assets)
-}
-
-struct GeneratedRelayCert {
-    cert_pem: String,
-    key_pem: String,
-}
-
-fn generate_self_signed_relay_cert(ip: IpAddr) -> Result<GeneratedRelayCert> {
-    let mut params = rcgen::CertificateParams::new(vec![])?;
-    params
-        .distinguished_name
-        .push(rcgen::DnType::CommonName, "netsim-relay");
-    params.subject_alt_names.push(rcgen::SanType::IpAddress(ip));
-    params
-        .subject_alt_names
-        .push(rcgen::SanType::DnsName("localhost".try_into()?));
-    let key = rcgen::KeyPair::generate()?;
-    let cert = params.self_signed(&key)?;
-    Ok(GeneratedRelayCert {
-        cert_pem: cert.pem(),
-        key_pem: key.serialize_pem(),
-    })
-}
-
-fn apply_parser_result(state: &mut SimState, parser: ParserConfig) -> Result<()> {
-    match parser.parser {
-        Parser::Iperf3Json => {
-            let metrics = parse_iperf3_json_log(&parser.log_path)?;
-            let mbps = metrics.bits_per_second.map(|bps| bps / 1_000_000.0);
-            let baseline_id = parser.baseline.clone();
-            let (delta_mbps, delta_pct) = if let Some(ref baseline_id) = baseline_id {
-                let base = state
-                    .iperf_results
-                    .iter()
-                    .find(|r| r.id == *baseline_id)
-                    .ok_or_else(|| anyhow!("baseline result '{}' not found", baseline_id))?;
-                match (mbps, base.mbps) {
-                    (Some(cur), Some(base_mbps)) if base_mbps > 0.0 => {
-                        let delta = cur - base_mbps;
-                        (Some(delta), Some(delta * 100.0 / base_mbps))
-                    }
-                    (Some(cur), Some(base_mbps)) => (Some(cur - base_mbps), None),
-                    _ => (None, None),
-                }
-            } else {
-                (None, None)
-            };
-            state.iperf_results.push(IperfResult {
-                id: parser.result_id,
-                device: parser.device,
-                bytes: metrics.bytes,
-                seconds: metrics.seconds,
-                bits_per_second: metrics.bits_per_second,
-                mbps,
-                retransmits: metrics.retransmits,
-                baseline: baseline_id,
-                delta_mbps,
-                delta_pct,
-            });
-        }
-        _ => {}
-    }
-    Ok(())
-}
-
 pub(crate) fn spawn_pipe_pump<R: Read + Send + 'static>(
     reader: R,
     path: PathBuf,
@@ -1014,7 +803,7 @@ fn evaluate_assert(state: &SimState, check: &str) -> Result<()> {
 }
 
 fn resolve_assert_lhs(state: &SimState, lhs: &str) -> Result<String> {
-    // Try CaptureStore first (new path).
+    // Try CaptureStore first.
     if let Some(v) = state.captures.get(lhs) {
         return Ok(v);
     }
@@ -1022,49 +811,10 @@ fn resolve_assert_lhs(state: &SimState, lhs: &str) -> Result<String> {
     if let Some(v) = state.env.get_capture(lhs) {
         return Ok(v.to_string());
     }
-    // Try transfer/result fields: "step_id.field".
-    if let Some((id, field)) = lhs.split_once('.') {
-        if let Some(result) = state.results.iter().find(|r| r.id == id) {
-            return result_field(result, field);
-        }
-        if let Some(result) = state.iperf_results.iter().find(|r| r.id == id) {
-            return iperf_result_field(result, field);
-        }
-    }
     bail!(
         "assert: cannot resolve '{}' — not a capture or known result field",
         lhs
     );
-}
-
-fn result_field(r: &TransferResult, field: &str) -> Result<String> {
-    match field {
-        "mbps" => Ok(r.mbps.map(|v| format!("{:.1}", v)).unwrap_or_default()),
-        "elapsed_s" => Ok(r.elapsed_s.map(|v| format!("{:.3}", v)).unwrap_or_default()),
-        "size_bytes" => Ok(r.size_bytes.map(|v| v.to_string()).unwrap_or_default()),
-        "final_conn_direct" => Ok(r
-            .final_conn_direct
-            .map(|v| v.to_string())
-            .unwrap_or_default()),
-        "conn_upgrade" => Ok(r.conn_upgrade.map(|v| v.to_string()).unwrap_or_default()),
-        "conn_events" => Ok(r.conn_events.to_string()),
-        other => bail!("unknown result field '{}.{}'", r.id, other),
-    }
-}
-
-fn iperf_result_field(r: &IperfResult, field: &str) -> Result<String> {
-    match field {
-        "mbps" => Ok(r.mbps.map(|v| format!("{:.3}", v)).unwrap_or_default()),
-        "seconds" => Ok(r.seconds.map(|v| format!("{:.3}", v)).unwrap_or_default()),
-        "bytes" => Ok(r.bytes.map(|v| v.to_string()).unwrap_or_default()),
-        "retransmits" => Ok(r.retransmits.map(|v| v.to_string()).unwrap_or_default()),
-        "delta_mbps" => Ok(r
-            .delta_mbps
-            .map(|v| format!("{:.3}", v))
-            .unwrap_or_default()),
-        "delta_pct" => Ok(r.delta_pct.map(|v| format!("{:.1}", v)).unwrap_or_default()),
-        other => bail!("unknown iperf result field '{}.{}'", r.id, other),
-    }
 }
 
 fn verbose_prefix(device: &str, stream: &str) -> String {

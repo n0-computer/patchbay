@@ -21,14 +21,11 @@ use crate::sim::progress::{
     ManifestSimSummary, ProgressSim, RunManifest, RunProgress,
 };
 use crate::sim::report::{
-    print_run_summary_table_for_runs, write_combined_results_for_runs, write_results, IperfResult,
-    StepResultRecord, TransferResult,
+    print_run_summary_table_for_runs, write_combined_results_for_runs, write_results,
+    StepResultRecord,
 };
-use crate::sim::steps::{
-    execute_step, join_pump, step_action, step_device, step_id, ParserConfig, RelayRuntimeAssets,
-};
+use crate::sim::steps::{execute_step, join_pump, step_action, step_device, step_id};
 use crate::sim::topology::load_topology;
-use crate::sim::transfer::TransferHandle;
 use crate::sim::{
     BinarySpec, SimFile, Step, StepEntry, StepGroupDef, StepResults, StepTemplateDef, UseStep,
 };
@@ -43,29 +40,19 @@ pub struct SimState {
     pub(crate) env: SimEnv,
     /// Processes spawned by generic `spawn` steps, keyed by step `id`.
     pub(crate) spawned: HashMap<String, GenericProcess>,
-    /// In-progress iroh-transfer handles, keyed by step `id`.
-    pub(crate) transfers: HashMap<String, TransferHandle>,
-    /// Completed transfer results (legacy iroh-transfer path).
-    pub(crate) results: Vec<TransferResult>,
-    /// Parsed iperf results collected from `step.parser = "iperf3-json"`.
-    pub(crate) iperf_results: Vec<IperfResult>,
     /// Step result records collected from `[step.results]` mappings.
     pub(crate) step_results: Vec<StepResultRecord>,
     /// Persistent capture store shared with pump threads.
     pub(crate) captures: CaptureStore,
     /// Pending results specs for spawned processes (id → (StepResults, device)).
     pub(crate) spawn_results: HashMap<String, (StepResults, String)>,
-    /// Paths to resolved binaries, keyed by `[[binary]] name`.
-    pub(crate) binaries: HashMap<String, PathBuf>,
     pub(crate) work_dir: PathBuf,
     pub(crate) sim_name: String,
     pub(crate) verbose: bool,
-    pub(crate) relay_assets: HashMap<String, RelayRuntimeAssets>,
 }
 
 pub(crate) struct GenericProcess {
     pub(crate) child: std::process::Child,
-    pub(crate) parser: Option<ParserConfig>,
     pub(crate) stdout_pump: Option<thread::JoinHandle<Result<()>>>,
     pub(crate) stderr_pump: Option<thread::JoinHandle<Result<()>>>,
     pub(crate) capture_reader: Option<thread::JoinHandle<Result<()>>>,
@@ -542,17 +529,12 @@ async fn execute_single_sim(
         lab,
         env,
         spawned: HashMap::new(),
-        transfers: HashMap::new(),
-        results: vec![],
-        iperf_results: vec![],
         step_results: vec![],
         captures,
         spawn_results: HashMap::new(),
-        binaries: binary_paths,
         work_dir: run_work_dir.to_path_buf(),
         sim_name: sim_name.to_string(),
         verbose,
-        relay_assets: HashMap::new(),
     };
 
     // ── Expand step templates and groups ─────────────────────────────────
@@ -584,16 +566,9 @@ async fn execute_single_sim(
     }
 
     // ── Write results ────────────────────────────────────────────────────
-    write_results(
-        &state.work_dir,
-        &state.sim_name,
-        &state.results,
-        &state.iperf_results,
-        &state.step_results,
-        &state.captures,
-    )
-    .await
-    .context("step=write-results")?;
+    write_results(&state.work_dir, &state.sim_name, &state.step_results)
+        .await
+        .context("step=write-results")?;
 
     Ok(setup)
 }

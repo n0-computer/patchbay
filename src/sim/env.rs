@@ -21,11 +21,6 @@ impl SimEnv {
         }
     }
 
-    /// Store a captured value so it can be referenced as `${step_id.name}`.
-    pub fn set_capture(&mut self, step_id: &str, name: &str, value: String) {
-        self.captures.insert(format!("{}.{}", step_id, name), value);
-    }
-
     /// Retrieve a captured value by `"step_id.name"` key.
     pub fn get_capture(&self, key: &str) -> Option<&str> {
         self.captures.get(key).map(String::as_str)
@@ -34,11 +29,6 @@ impl SimEnv {
     /// Return an iterator over `NETSIM_*` environment variables.
     pub fn process_env(&self) -> impl Iterator<Item = (&str, &str)> {
         self.lab_vars.iter().map(|(k, v)| (k.as_str(), v.as_str()))
-    }
-
-    /// Interpolate all args, returning new owned strings.
-    pub fn interpolate(&self, args: &[String]) -> Result<Vec<String>> {
-        args.iter().map(|s| self.interpolate_str(s)).collect()
     }
 
     /// Interpolate a single string.
@@ -113,6 +103,12 @@ impl SimEnv {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    impl SimEnv {
+        fn set_capture(&mut self, step_id: &str, name: &str, value: String) {
+            self.captures.insert(format!("{}.{}", step_id, name), value);
+        }
+    }
 
     #[test]
     fn interpolate_binary_and_capture_and_lab_var() {
