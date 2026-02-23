@@ -492,10 +492,20 @@ async fn execute_single_sim(
     binary_overrides: Vec<String>,
     verbose: bool,
 ) -> Result<SimSetupSummary> {
+    // ── Load extends (templates, groups, binaries) ───────────────────────
+    let (templates, groups, extends_binaries) =
+        load_extends(&sim, sim_path).with_context(|| "step=load-extends".to_string())?;
+
     // ── Resolve binaries ─────────────────────────────────────────────────
+    // Order of precedence (highest last wins): extends < legacy-shared < inline-sim.
     let shared_binaries = load_shared_binaries(&sim, sim_path)
         .with_context(|| "step=resolve-binaries".to_string())?;
-    let merged_specs = merge_binary_specs(shared_binaries, sim.binaries.clone());
+    let all_binaries: Vec<BinarySpec> = extends_binaries
+        .into_iter()
+        .chain(shared_binaries)
+        .chain(sim.binaries.clone())
+        .collect();
+    let merged_specs = merge_binary_specs(all_binaries, vec![]);
     let overrides = parse_binary_overrides(&binary_overrides)
         .with_context(|| "step=parse-binary-overrides".to_string())?;
     let binary_names = merged_binary_names(&merged_specs, &overrides);
@@ -538,8 +548,6 @@ async fn execute_single_sim(
     };
 
     // ── Expand step templates and groups ─────────────────────────────────
-    let (templates, groups) =
-        load_extends(&sim, sim_path).with_context(|| "step=load-extends".to_string())?;
     let steps = expand_steps(sim.raw_steps, &templates, &groups, sim_path)
         .with_context(|| "step=expand-steps".to_string())?;
 
@@ -1033,9 +1041,11 @@ fn load_extends(
 ) -> Result<(
     HashMap<String, StepTemplateDef>,
     HashMap<String, StepGroupDef>,
+    Vec<BinarySpec>,
 )> {
     let mut templates: HashMap<String, StepTemplateDef> = HashMap::new();
     let mut groups: HashMap<String, StepGroupDef> = HashMap::new();
+    let mut binaries: Vec<BinarySpec> = Vec::new();
 
     let sim_dir = sim_path.parent().unwrap_or(Path::new("."));
     for entry in &sim.extends {
@@ -1069,6 +1079,10 @@ fn load_extends(
         for g in parsed.step_groups {
             groups.entry(g.name.clone()).or_insert(g);
         }
+        // Collect binary specs from extends file (inline sim binaries will override below).
+        for b in parsed.binaries {
+            binaries.push(b);
+        }
     }
 
     // Inline definitions override extends.
@@ -1079,7 +1093,7 @@ fn load_extends(
         groups.insert(g.name.clone(), g.clone());
     }
 
-    Ok((templates, groups))
+    Ok((templates, groups, binaries))
 }
 
 /// Normalize a raw TOML table so it uses `action` as the tag key.

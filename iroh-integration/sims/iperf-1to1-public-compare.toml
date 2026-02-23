@@ -65,5 +65,5 @@ id     = "iperf-server-b"
 [[step]]
 action = "assert"
 checks = [
-  "iperf-impaired.bps count >= 1",
+  "iperf-impaired.bps matches [0-9.]+",
 ]

@@ -32,5 +32,5 @@ id     = "iperf-server"
 [[step]]
 action = "assert"
 checks = [
-  "iperf-baseline.bps count >= 1",
+  "iperf-baseline.bps matches [0-9.]+",
 ]

@@ -32,5 +32,5 @@ timeout = "45s"
 [[step]]
 action = "assert"
 checks = [
-  "fetcher.size count >= 1",
+  "fetcher.size matches [0-9]+",
 ]

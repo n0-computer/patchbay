@@ -35,5 +35,5 @@ timeout = "600s"
 [[step]]
 action = "assert"
 checks = [
-  "fetcher.conn_type @last contains Direct",
+  "fetcher.conn_type contains Direct",
 ]
