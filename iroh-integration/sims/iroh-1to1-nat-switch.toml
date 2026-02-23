@@ -1,49 +1,54 @@
+[[extends]]
+file = "iroh-defaults.toml"
+
 [sim]
 name     = "iroh-1to1-nat-switch"
 topology = "1to1-nat-switch"
-binaries = "iroh-defaults.toml"
 
 [[step]]
-action      = "spawn"
-id          = "relay"
-device      = "relay"
-cmd         = ["${binary.relay}", "--dev"]
-env         = { RUST_LOG = "iroh_relay=trace,iroh=trace,iroh_quinn=trace" }
-ready_after = "2s"
+use  = "relay-setup"
+vars = { device = "relay" }
 
 [[step]]
-action = "link-down"
-device = "fetcher"
+action    = "link-down"
+device    = "fetcher"
 interface = "eth1"
 
 [[step]]
-action    = "spawn"
-kind      = "iroh-transfer"
-id        = "xfer"
-provider  = "provider"
-fetcher   = "fetcher"
-relay_url = "http://$NETSIM_IP_relay:3340"
+use      = "transfer-provider"
+id       = "provider"
+device   = "provider"
+requires = ["relay.ready"]
+args     = ["--relay-url", "https://$NETSIM_IP_relay:3340"]
+
+[[step]]
+use    = "transfer-fetcher"
+id     = "fetcher"
+device = "fetcher"
+args   = ["${provider.endpoint_id}",
+          "--relay-url",        "https://$NETSIM_IP_relay:3340",
+          "--remote-relay-url", "https://$NETSIM_IP_relay:3340"]
 
 [[step]]
 action   = "wait"
 duration = "5s"
 
 [[step]]
-action = "link-up"
-device = "fetcher"
+action    = "link-up"
+device    = "fetcher"
 interface = "eth1"
 
 [[step]]
-action = "switch-route"
+action = "set-default-route"
 device = "fetcher"
 to     = "eth1"
 
 [[step]]
-action = "link-down"
-device = "fetcher"
+action    = "link-down"
+device    = "fetcher"
 interface = "eth0"
 
 [[step]]
-action = "wait-for"
-id     = "xfer"
+action  = "wait-for"
+id      = "fetcher"
 timeout = "45s"

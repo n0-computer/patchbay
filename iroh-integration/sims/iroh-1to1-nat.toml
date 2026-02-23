@@ -1,25 +1,36 @@
+[[extends]]
+file = "iroh-defaults.toml"
+
 [sim]
 name     = "iroh-1to1-nat"
 topology = "1to1-nat"
-binaries = "iroh-defaults.toml"
 
 [[step]]
-action      = "spawn"
-id          = "relay"
-device      = "relay"
-cmd         = ["${binary.relay}", "--dev"]
-env         = { RUST_LOG = "iroh_relay=debug" }
-ready_after = "2s"
+use  = "relay-setup"
+vars = { device = "relay" }
 
 [[step]]
-action    = "spawn"
-kind      = "iroh-transfer"
-id        = "xfer"
-provider  = "provider"
-fetcher   = "fetcher"
-relay_url = "http://$NETSIM_IP_relay:3340"
+use      = "transfer-provider"
+id       = "provider"
+device   = "provider"
+requires = ["relay.ready"]
+args     = ["--relay-url", "https://$NETSIM_IP_relay:3340"]
 
 [[step]]
-action = "wait-for"
-id     = "xfer"
+use    = "transfer-fetcher"
+id     = "fetcher"
+device = "fetcher"
+args   = ["${provider.endpoint_id}",
+          "--relay-url",        "https://$NETSIM_IP_relay:3340",
+          "--remote-relay-url", "https://$NETSIM_IP_relay:3340"]
+
+[[step]]
+action  = "wait-for"
+id      = "fetcher"
 timeout = "45s"
+
+[[step]]
+action = "assert"
+checks = [
+  "fetcher.size count >= 1",
+]

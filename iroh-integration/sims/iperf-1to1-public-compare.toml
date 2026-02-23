@@ -6,15 +6,24 @@ topology = "1to1-public"
 action      = "spawn"
 id          = "iperf-server-a"
 device      = "provider"
-cmd         = ["iperf3", "-s", "-1", "-J"]
+cmd         = ["iperf3", "-s", "-1"]
 ready_after = "1s"
 
 [[step]]
 action = "run"
 id     = "iperf-baseline"
 device = "fetcher"
+parser = "json"
 cmd    = ["iperf3", "-c", "$NETSIM_IP_provider", "-t", "10", "-J"]
-parser = "iperf3-json"
+[step.captures.bps]
+pick = ".end.sum_received.bits_per_second"
+[step.captures.bytes]
+pick = ".end.sum_received.bytes"
+[step.captures.seconds]
+pick = ".end.sum_received.seconds"
+[step.results]
+duration   = "iperf-baseline.seconds"
+down_bytes = "iperf-baseline.bytes"
 
 [[step]]
 action = "wait-for"
@@ -30,16 +39,24 @@ impair    = { rate = 10000, loss = 0.0, latency = 40 }
 action      = "spawn"
 id          = "iperf-server-b"
 device      = "provider"
-cmd         = ["iperf3", "-s", "-1", "-J"]
+cmd         = ["iperf3", "-s", "-1"]
 ready_after = "1s"
 
 [[step]]
-action   = "run"
-id       = "iperf-impaired"
-device   = "fetcher"
-cmd      = ["iperf3", "-c", "$NETSIM_IP_provider", "-t", "10", "-J"]
-parser   = "iperf3-json"
-baseline = "iperf-baseline"
+action = "run"
+id     = "iperf-impaired"
+device = "fetcher"
+parser = "json"
+cmd    = ["iperf3", "-c", "$NETSIM_IP_provider", "-t", "10", "-J"]
+[step.captures.bps]
+pick = ".end.sum_received.bits_per_second"
+[step.captures.bytes]
+pick = ".end.sum_received.bytes"
+[step.captures.seconds]
+pick = ".end.sum_received.seconds"
+[step.results]
+duration   = "iperf-impaired.seconds"
+down_bytes = "iperf-impaired.bytes"
 
 [[step]]
 action = "wait-for"
@@ -47,4 +64,6 @@ id     = "iperf-server-b"
 
 [[step]]
 action = "assert"
-check  = "iperf-impaired.delta_mbps != "
+checks = [
+  "iperf-impaired.bps count >= 1",
+]

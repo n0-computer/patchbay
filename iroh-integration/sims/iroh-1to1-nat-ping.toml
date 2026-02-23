@@ -1,22 +1,20 @@
+[[extends]]
+file = "iroh-defaults.toml"
+
 [sim]
 name     = "iroh-1to1-nat-ping"
 topology = "1to1-nat"
-binaries = "iroh-defaults.toml"
 
 [[step]]
-action      = "spawn"
-id          = "relay"
-device      = "relay"
-cmd         = ["${binary.relay}", "--dev"]
-env         = { RUST_LOG = "iroh_relay=trace" }
-ready_after = "2s"
+use  = "relay-setup"
+vars = { device = "relay" }
 
 [[step]]
 action = "run"
 device = "provider"
-cmd = ["ping", "-c", "3", "-W", "2", "$NETSIM_IP_relay"]
+cmd    = ["ping", "-c", "3", "-W", "2", "$NETSIM_IP_relay"]
 
 [[step]]
 action = "run"
 device = "fetcher"
-cmd = ["ping", "-c", "3", "-W", "2", "$NETSIM_IP_relay"]
+cmd    = ["ping", "-c", "3", "-W", "2", "$NETSIM_IP_relay"]
