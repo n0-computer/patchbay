@@ -53,22 +53,6 @@ pub(crate) fn remove_qdisc(ns: &str, ifname: &str) {
     qdisc.clear_root(ns);
 }
 
-/// Remove the root qdisc, returning an error if the command fails.
-///
-/// Exit code 2 from `tc` (ENOENT — no qdisc to remove) is treated as success.
-pub(crate) fn remove_qdisc_r(ns: &str, ifname: &str) -> Result<()> {
-    let status = run_command_in_namespace(ns, {
-        let mut cmd = Command::new("tc");
-        cmd.args(["qdisc", "del", "dev", ifname, "root"]);
-        cmd.stderr(std::process::Stdio::null());
-        cmd
-    })?;
-    if !status.success() && status.code() != Some(2) {
-        bail!("tc qdisc del failed on {} in {}", ifname, ns);
-    }
-    Ok(())
-}
-
 struct Qdisc<'a> {
     ifname: &'a str,
 }

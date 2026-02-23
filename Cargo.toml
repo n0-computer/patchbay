@@ -9,7 +9,7 @@ resolver = "2"
 
 [dependencies]
 anyhow  = "1"
-tokio   = { version = "1", features = ["full"] }
+tokio   = { version = "1", features = ["rt", "macros", "sync", "time", "fs"] }
 rtnetlink             = "0.20"
 netlink-packet-route  = "0.28"
 futures = "0.3"
@@ -18,7 +18,7 @@ serde   = { version = "1", features = ["derive"] }
 toml    = "0.8"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-n0-tracing-test = "0.3.0"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 ipnet = "2.11.0"
 clap        = { version = "4", features = ["derive"] }
 serde_json  = "1"
@@ -27,7 +27,6 @@ reqwest     = { version = "0.12", default-features = false, features = ["blockin
 flate2      = "1"
 tar         = "0.4"
 comfy-table = "7"
-dirs        = "5"
 ctrlc       = "3"
 webbrowser  = "1"
 sha2        = "0.10"
@@ -37,3 +36,4 @@ libc        = "0.2"
 
 [dev-dependencies]
 serial_test = "3"
+n0-tracing-test = "0.3.0"

@@ -3,29 +3,32 @@ use netsim::assets::{
     parse_binary_overrides, resolve_binary_source_path, BinaryOverride, PathResolveMode,
 };
 use std::collections::{BTreeSet, HashMap};
-use std::fs::OpenOptions;
-use std::io::{BufRead, BufReader, Read, Write};
-use std::net::IpAddr;
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
-use std::sync::mpsc;
 use std::thread;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime};
 
 use netsim::config::LabConfig;
-use netsim::{Impair, Lab};
+use netsim::Lab;
 use serde::Serialize;
 
 use crate::sim::build::build_local_binary;
 use crate::sim::build::build_or_fetch_binary;
 use crate::sim::env::SimEnv;
+use crate::sim::progress::{
+    collect_run_environment, format_timestamp, now_stamp, write_progress, write_run_manifest,
+    ManifestSimSummary, ProgressSim, RunManifest, RunProgress,
+};
 use crate::sim::report::{
-    parse_iperf3_json_log, print_run_summary_table_for_runs, write_combined_results_for_runs,
-    write_results, IperfResult, TransferResult,
+    print_run_summary_table_for_runs, write_combined_results_for_runs, write_results, IperfResult,
+    TransferResult,
+};
+use crate::sim::steps::{
+    execute_step, join_pump, step_action, step_device, step_id, ParserConfig, RelayRuntimeAssets,
 };
 use crate::sim::topology::load_topology;
-use crate::sim::transfer::{finish_transfer, start_transfer, TransferHandle};
-use crate::sim::{BinarySpec, SimFile, Step};
+use crate::sim::transfer::TransferHandle;
+use crate::sim::{BinarySpec, SimFile};
 
 // ─────────────────────────────────────────────
 // State
@@ -33,48 +36,29 @@ use crate::sim::{BinarySpec, SimFile, Step};
 
 /// Mutable state threaded through the step executor.
 pub struct SimState {
-    pub lab: Lab,
-    pub env: SimEnv,
+    pub(crate) lab: Lab,
+    pub(crate) env: SimEnv,
     /// Processes spawned by generic `spawn` steps, keyed by step `id`.
-    spawned: HashMap<String, GenericProcess>,
+    pub(crate) spawned: HashMap<String, GenericProcess>,
     /// In-progress iroh-transfer handles, keyed by step `id`.
-    transfers: HashMap<String, TransferHandle>,
+    pub(crate) transfers: HashMap<String, TransferHandle>,
     /// Completed transfer results.
-    pub results: Vec<TransferResult>,
+    pub(crate) results: Vec<TransferResult>,
     /// Parsed iperf results collected from `step.parser = "iperf3-json"`.
-    pub iperf_results: Vec<IperfResult>,
+    pub(crate) iperf_results: Vec<IperfResult>,
     /// Paths to resolved binaries, keyed by `[[binary]] name`.
-    pub binaries: HashMap<String, PathBuf>,
-    pub work_dir: PathBuf,
-    pub sim_name: String,
-    pub verbose: bool,
-    relay_assets: HashMap<String, RelayRuntimeAssets>,
+    pub(crate) binaries: HashMap<String, PathBuf>,
+    pub(crate) work_dir: PathBuf,
+    pub(crate) sim_name: String,
+    pub(crate) verbose: bool,
+    pub(crate) relay_assets: HashMap<String, RelayRuntimeAssets>,
 }
 
-struct GenericProcess {
-    child: std::process::Child,
-    parser: Option<ParserConfig>,
-    stdout_pump: Option<thread::JoinHandle<Result<()>>>,
-    stderr_pump: Option<thread::JoinHandle<Result<()>>>,
-}
-
-#[derive(Clone)]
-struct ParserConfig {
-    parser: StepParser,
-    result_id: String,
-    device: String,
-    log_path: PathBuf,
-    baseline: Option<String>,
-}
-
-#[derive(Clone, Copy)]
-enum StepParser {
-    Iperf3Json,
-}
-
-#[derive(Debug, Clone)]
-struct RelayRuntimeAssets {
-    config_path: PathBuf,
+pub(crate) struct GenericProcess {
+    pub(crate) child: std::process::Child,
+    pub(crate) parser: Option<ParserConfig>,
+    pub(crate) stdout_pump: Option<thread::JoinHandle<Result<()>>>,
+    pub(crate) stderr_pump: Option<thread::JoinHandle<Result<()>>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -129,63 +113,6 @@ struct SimRunOutcome {
     sim_dir_name: String,
     summary: SimSummary,
     success: bool,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct RunEnvironment {
-    os: String,
-    arch: String,
-    family: String,
-    current_dir: String,
-    executable: String,
-    rust_log: Option<String>,
-    netsim_version: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct ManifestSimSummary {
-    sim: String,
-    sim_dir: String,
-    status: String,
-    runtime_ms: Option<u128>,
-    sim_json: Option<String>,
-    error: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct RunManifest {
-    run: String,
-    started_at: String,
-    status: String,
-    ended_at: Option<String>,
-    runtime_ms: Option<u128>,
-    success: Option<bool>,
-    environment: RunEnvironment,
-    simulations: Vec<ManifestSimSummary>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct ProgressSim {
-    sim: String,
-    status: String,
-    sim_dir: Option<String>,
-    runtime_ms: Option<u128>,
-    sim_json: Option<String>,
-    error: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct RunProgress {
-    run: String,
-    status: String,
-    started_at: String,
-    updated_at: String,
-    total: usize,
-    completed: usize,
-    ok: usize,
-    error: usize,
-    current_sim: Option<String>,
-    simulations: Vec<ProgressSim>,
 }
 
 impl Drop for SimState {
@@ -508,24 +435,14 @@ fn expand_sim_inputs(inputs: &[PathBuf]) -> Result<Vec<PathBuf>> {
 fn prepare_run_root(work_root: &Path) -> Result<PathBuf> {
     std::fs::create_dir_all(work_root)
         .with_context(|| format!("create work root {}", work_root.display()))?;
-    let stamp = now_stamp()?;
+    let stamp = now_stamp();
     let run_base = format!("sim-{}", stamp);
-    let mut run_name = run_base.clone();
-    let mut run_dir = work_root.join(&run_name);
-    let mut n = 1u32;
-    loop {
-        match std::fs::create_dir(&run_dir) {
-            Ok(()) => break,
-            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
-                run_name = format!("{run_base}-{n}");
-                run_dir = work_root.join(&run_name);
-                n += 1;
-            }
-            Err(err) => {
-                return Err(err).with_context(|| format!("create run dir {}", run_dir.display()))
-            }
-        }
-    }
+    let run_dir = create_unique_dir(work_root, &run_base)?;
+    let run_name = run_dir
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or(&run_base)
+        .to_string();
 
     let latest = work_root.join("latest");
     if latest.exists() || std::fs::symlink_metadata(&latest).is_ok() {
@@ -545,21 +462,23 @@ fn prepare_run_root(work_root: &Path) -> Result<PathBuf> {
 }
 
 fn prepare_sim_dir(run_root: &Path, sim_name: &str) -> Result<PathBuf> {
-    let sim_base = sanitize_for_filename(sim_name);
-    let mut sim_name = sim_base.clone();
-    let mut sim_dir = run_root.join(&sim_name);
+    let sim_base = netsim::util::sanitize_for_path_component(sim_name);
+    create_unique_dir(run_root, &sim_base)
+}
+
+fn create_unique_dir(parent: &Path, base: &str) -> Result<PathBuf> {
+    let mut name = base.to_string();
+    let mut path = parent.join(&name);
     let mut n = 1u32;
     loop {
-        match std::fs::create_dir(&sim_dir) {
-            Ok(()) => return Ok(sim_dir),
+        match std::fs::create_dir(&path) {
+            Ok(()) => return Ok(path),
             Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
-                sim_name = format!("{sim_base}-{n}");
-                sim_dir = run_root.join(&sim_name);
+                name = format!("{base}-{n}");
+                path = parent.join(&name);
                 n += 1;
             }
-            Err(err) => {
-                return Err(err).with_context(|| format!("create sim dir {}", sim_dir.display()))
-            }
+            Err(err) => return Err(err).with_context(|| format!("create dir {}", path.display())),
         }
     }
 }
@@ -624,9 +543,9 @@ async fn execute_single_sim(
         if let Err(err) = execute_step(&mut state, step) {
             let step_info = StepFailureInfo {
                 index: idx,
-                action: step.action.clone(),
-                id: step.id.clone(),
-                device: step.device.clone(),
+                action: step_action(step).to_string(),
+                id: step_id(step).map(|s| s.to_string()),
+                device: step_device(step).map(|s| s.to_string()),
             };
             return Err(err).context(format!(
                 "step-failed:{}",
@@ -799,56 +718,6 @@ fn build_run_manifest(
     })
 }
 
-async fn write_run_manifest(run_root: &Path, manifest: &RunManifest) -> Result<()> {
-    let text = serde_json::to_string_pretty(manifest).context("serialize run manifest")?;
-    tokio::fs::write(run_root.join("manifest.json"), text)
-        .await
-        .with_context(|| format!("write {}", run_root.join("manifest.json").display()))?;
-    Ok(())
-}
-
-async fn write_progress(run_root: &Path, progress: &RunProgress) -> Result<()> {
-    let text = serde_json::to_string_pretty(progress).context("serialize run progress")?;
-    tokio::fs::write(run_root.join("progress.json"), text)
-        .await
-        .with_context(|| format!("write {}", run_root.join("progress.json").display()))?;
-    Ok(())
-}
-
-fn collect_run_environment() -> Result<RunEnvironment> {
-    Ok(RunEnvironment {
-        os: std::env::consts::OS.to_string(),
-        arch: std::env::consts::ARCH.to_string(),
-        family: std::env::consts::FAMILY.to_string(),
-        current_dir: std::env::current_dir()
-            .context("get current dir")?
-            .display()
-            .to_string(),
-        executable: std::env::current_exe()
-            .ok()
-            .map(|p| p.display().to_string())
-            .unwrap_or_default(),
-        rust_log: std::env::var("RUST_LOG").ok(),
-        netsim_version: env!("CARGO_PKG_VERSION").to_string(),
-    })
-}
-
-fn format_timestamp(ts: SystemTime) -> String {
-    let secs = ts
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_else(|_| Duration::from_secs(0))
-        .as_secs();
-    match std::process::Command::new("date")
-        .args(["-u", &format!("-d@{secs}"), "+%Y-%m-%dT%H:%M:%SZ"])
-        .output()
-    {
-        Ok(out) if out.status.success() => String::from_utf8(out.stdout)
-            .map(|s| s.trim().to_string())
-            .unwrap_or_else(|_| secs.to_string()),
-        _ => secs.to_string(),
-    }
-}
-
 fn serialize_step_failure(step: &StepFailureInfo) -> String {
     format!(
         "index={};action={};id={};device={}",
@@ -960,23 +829,6 @@ fn last_error_line_in_file(path: &Path) -> Option<String> {
         }
     }
     last
-}
-
-fn now_stamp() -> Result<String> {
-    let out = std::process::Command::new("date")
-        .arg("+%y%m%d-%H%M%S")
-        .output()
-        .context("run date for workdir timestamp")?;
-    if out.status.success() {
-        let s = String::from_utf8(out.stdout).context("parse date output")?;
-        Ok(s.trim().to_string())
-    } else {
-        let secs = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .context("system time before epoch")?
-            .as_secs();
-        Ok(secs.to_string())
-    }
 }
 
 fn load_shared_binaries(sim: &SimFile, sim_path: &Path) -> Result<Vec<BinarySpec>> {
@@ -1111,626 +963,6 @@ async fn stage_override_binary(name: &str, source: &Path, work_dir: &Path) -> Re
     Ok(staged)
 }
 
-// ─────────────────────────────────────────────
-// Step executor
-// ─────────────────────────────────────────────
-
-fn execute_step(state: &mut SimState, step: &Step) -> Result<()> {
-    tracing::info!(
-        action = %step.action,
-        id = ?step.id,
-        device = ?step.device,
-        "sim: step"
-    );
-    if let Some(parser) = step.parser.as_deref() {
-        tracing::debug!(parser, id = ?step.id, "sim: parser configured");
-    }
-
-    match step.action.as_str() {
-        // ── run ──────────────────────────────────────────────────────────
-        "run" => {
-            let device = step.device.as_deref().context("run: missing device")?;
-            let cmd_parts = state
-                .env
-                .interpolate(step.cmd.as_deref().context("run: missing cmd")?)?;
-            tracing::info!(
-                device,
-                cmd = %shell_join(&cmd_parts),
-                "sim: run command"
-            );
-            let mut cmd = prepare_cmd(&cmd_parts, &step.env, state)?;
-            let logs = node_stdio_log_paths(&state.work_dir, device)?;
-            cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
-            let mut child = state
-                .lab
-                .spawn_unmanaged_on(device, cmd)
-                .with_context(|| format!("spawn run on '{}'", device))?;
-            let stdout = child.stdout.take().context("take run stdout")?;
-            let stderr = child.stderr.take().context("take run stderr")?;
-            let out_pump = spawn_pipe_pump(
-                stdout,
-                logs.stdout.clone(),
-                verbose_prefix(device, "out"),
-                state.verbose,
-                None,
-            );
-            let err_pump = spawn_pipe_pump(
-                stderr,
-                logs.stderr.clone(),
-                verbose_prefix(device, "err"),
-                state.verbose,
-                None,
-            );
-            let status = child.wait().context("wait run child")?;
-            join_pump(out_pump, "run stdout pump")?;
-            join_pump(err_pump, "run stderr pump")?;
-            if !status.success() {
-                bail!("'run' on '{}' failed: {:?}", device, status);
-            }
-            if let Some(parser_cfg) = build_parser_config(step, device, &logs.stdout)? {
-                apply_parser_result(state, parser_cfg)?;
-            }
-        }
-
-        // ── spawn ─────────────────────────────────────────────────────────
-        "spawn" => {
-            let id = step.id.as_deref().context("spawn: missing id")?;
-
-            if step.kind.as_deref() == Some("iroh-transfer") {
-                // Resolve transfer binary (named "transfer" by convention).
-                let binary = state
-                    .binaries
-                    .get("transfer")
-                    .cloned()
-                    .ok_or_else(|| anyhow!("iroh-transfer: no binary named 'transfer'"))?;
-                let handle = start_transfer(state, step, &binary)?;
-                state.transfers.insert(id.to_string(), handle);
-                return Ok(());
-            }
-
-            // Generic spawn.
-            let device = step.device.as_deref().context("spawn: missing device")?;
-            let mut cmd_parts = state
-                .env
-                .interpolate(step.cmd.as_deref().context("spawn: missing cmd")?)?;
-            maybe_inject_relay_config_path(state, device, &mut cmd_parts)?;
-            tracing::info!(
-                id,
-                device,
-                cmd = %shell_join(&cmd_parts),
-                "sim: spawn command"
-            );
-            let mut cmd = prepare_cmd(&cmd_parts, &step.env, state)?;
-            let logs = node_stdio_log_paths(&state.work_dir, device)?;
-            let mut stdout_pump = None;
-            let mut stderr_pump = None;
-            if step.captures.is_empty() {
-                if state.verbose {
-                    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
-                } else {
-                    let out_log = OpenOptions::new()
-                        .create(true)
-                        .append(true)
-                        .open(&logs.stdout)
-                        .with_context(|| {
-                            format!("open step stdout log {}", logs.stdout.display())
-                        })?;
-                    let err_log = OpenOptions::new()
-                        .create(true)
-                        .append(true)
-                        .open(&logs.stderr)
-                        .with_context(|| {
-                            format!("open step stderr log {}", logs.stderr.display())
-                        })?;
-                    cmd.stdout(Stdio::from(out_log))
-                        .stderr(Stdio::from(err_log));
-                }
-            } else {
-                cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
-            }
-
-            let mut child = state
-                .lab
-                .spawn_unmanaged_on(device, cmd)
-                .with_context(|| format!("spawn '{}'", id))?;
-
-            if let Some(after) = &step.ready_after {
-                std::thread::sleep(parse_duration(after)?);
-            }
-
-            if !step.captures.is_empty() {
-                let stdout = child.stdout.take().context("take child stdout")?;
-                let stderr = child.stderr.take().context("take child stderr")?;
-                let (tx, rx) = mpsc::channel();
-                stdout_pump = Some(spawn_pipe_pump(
-                    stdout,
-                    logs.stdout.clone(),
-                    verbose_prefix(device, "out"),
-                    state.verbose,
-                    Some(tx),
-                ));
-                stderr_pump = Some(spawn_pipe_pump(
-                    stderr,
-                    logs.stderr.clone(),
-                    verbose_prefix(device, "err"),
-                    state.verbose,
-                    None,
-                ));
-                read_captures(rx, step, id, &mut state.env)?;
-            } else if state.verbose {
-                let stdout = child.stdout.take().context("take child stdout")?;
-                let stderr = child.stderr.take().context("take child stderr")?;
-                stdout_pump = Some(spawn_pipe_pump(
-                    stdout,
-                    logs.stdout.clone(),
-                    verbose_prefix(device, "out"),
-                    state.verbose,
-                    None,
-                ));
-                stderr_pump = Some(spawn_pipe_pump(
-                    stderr,
-                    logs.stderr.clone(),
-                    verbose_prefix(device, "err"),
-                    state.verbose,
-                    None,
-                ));
-            }
-
-            let parser = build_parser_config(step, device, &logs.stdout)?;
-            state.spawned.insert(
-                id.to_string(),
-                GenericProcess {
-                    child,
-                    parser,
-                    stdout_pump,
-                    stderr_pump,
-                },
-            );
-        }
-
-        // ── wait ─────────────────────────────────────────────────────────
-        "wait" => {
-            let dur = parse_duration(step.duration.as_deref().context("wait: missing duration")?)?;
-            std::thread::sleep(dur);
-        }
-
-        // ── wait-for ──────────────────────────────────────────────────────
-        "wait-for" => {
-            let id = step.id.as_deref().context("wait-for: missing id")?;
-            let timeout = step
-                .timeout
-                .as_deref()
-                .map(parse_duration)
-                .transpose()?
-                .unwrap_or(Duration::from_secs(300));
-
-            if let Some(handle) = state.transfers.remove(id) {
-                let results = finish_transfer(handle, timeout)?;
-                state.results.extend(results);
-            } else if state.spawned.contains_key(id) {
-                let parser = {
-                    let sp = state
-                        .spawned
-                        .get_mut(id)
-                        .ok_or_else(|| anyhow!("wait-for '{}' missing spawned process", id))?;
-                    let deadline = std::time::Instant::now() + timeout;
-                    loop {
-                        match sp.child.try_wait().context("try_wait")? {
-                            Some(status) => {
-                                if !status.success() {
-                                    tracing::warn!(id, ?status, "spawned process exited non-zero");
-                                }
-                                break;
-                            }
-                            None => {
-                                if std::time::Instant::now() >= deadline {
-                                    bail!("wait-for '{}' timed out", id);
-                                }
-                                std::thread::sleep(Duration::from_millis(200));
-                            }
-                        }
-                    }
-                    sp.parser.clone()
-                };
-                if let Some(sp) = state.spawned.get_mut(id) {
-                    if let Some(h) = sp.stdout_pump.take() {
-                        join_pump(h, "spawn stdout pump")?;
-                    }
-                    if let Some(h) = sp.stderr_pump.take() {
-                        join_pump(h, "spawn stderr pump")?;
-                    }
-                }
-                if let Some(parser_cfg) = parser {
-                    apply_parser_result(state, parser_cfg)?;
-                }
-            }
-            // If id is not found, assume it completed inline — no-op.
-        }
-
-        // ── set-impair ────────────────────────────────────────────────────
-        "set-impair" => {
-            let device = step
-                .device
-                .as_deref()
-                .context("set-impair: missing device")?;
-            let ifname = step.interface.as_deref();
-            let impair = parse_impair(step)?;
-            state.lab.set_impair(device, ifname, impair)?;
-        }
-
-        // ── switch-route ──────────────────────────────────────────────────
-        "switch-route" => {
-            let device = step
-                .device
-                .as_deref()
-                .context("switch-route: missing device")?;
-            let to = step.to.as_deref().context("switch-route: missing to")?;
-            state.lab.switch_route(device, to)?;
-        }
-
-        // ── link-down / link-up ───────────────────────────────────────────
-        "link-down" => {
-            let device = step
-                .device
-                .as_deref()
-                .context("link-down: missing device")?;
-            let iface = step
-                .interface
-                .as_deref()
-                .context("link-down: missing interface")?;
-            state.lab.link_down(device, iface)?;
-        }
-        "link-up" => {
-            let device = step.device.as_deref().context("link-up: missing device")?;
-            let iface = step
-                .interface
-                .as_deref()
-                .context("link-up: missing interface")?;
-            state.lab.link_up(device, iface)?;
-        }
-
-        // ── assert ────────────────────────────────────────────────────────
-        "assert" => {
-            let check = step.check.as_deref().context("assert: missing check")?;
-            evaluate_assert(state, check)?;
-        }
-
-        other => bail!("unknown step action: '{}'", other),
-    }
-    Ok(())
-}
-
-// ─────────────────────────────────────────────
-// Helpers
-// ─────────────────────────────────────────────
-
-fn prepare_cmd(
-    parts: &[String],
-    extra_env: &HashMap<String, String>,
-    state: &SimState,
-) -> Result<std::process::Command> {
-    if parts.is_empty() {
-        bail!("empty cmd");
-    }
-    let mut cmd = std::process::Command::new(&parts[0]);
-    cmd.args(&parts[1..]);
-    for (k, v) in state.env.process_env() {
-        cmd.env(k, v);
-    }
-    let rust_log = std::env::var("NETSIM_RUST_LOG")
-        .unwrap_or_else(|_| "iroh=info,iroh::_events=debug".to_string());
-    cmd.env("RUST_LOG", rust_log);
-    for (k, v) in extra_env {
-        cmd.env(k, state.env.interpolate_str(v)?);
-    }
-    Ok(cmd)
-}
-
-fn maybe_inject_relay_config_path(
-    state: &mut SimState,
-    device: &str,
-    cmd_parts: &mut Vec<String>,
-) -> Result<()> {
-    if cmd_parts.is_empty() {
-        return Ok(());
-    }
-    let Some(relay_bin) = state.binaries.get("relay") else {
-        return Ok(());
-    };
-    if cmd_parts[0] != relay_bin.to_string_lossy() {
-        return Ok(());
-    }
-    if cmd_parts.iter().any(|arg| arg == "--config-path") {
-        return Ok(());
-    }
-    let assets = ensure_relay_runtime_assets(state, device)?;
-    cmd_parts.push("--config-path".to_string());
-    cmd_parts.push(assets.config_path.display().to_string());
-    Ok(())
-}
-
-fn ensure_relay_runtime_assets(state: &mut SimState, device: &str) -> Result<RelayRuntimeAssets> {
-    if let Some(existing) = state.relay_assets.get(device) {
-        return Ok(existing.clone());
-    }
-    let key_suffix = device
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() {
-                c.to_ascii_uppercase()
-            } else {
-                '_'
-            }
-        })
-        .collect::<String>();
-    let relay_ip = state
-        .env
-        .interpolate_str(&format!("$NETSIM_IP_{key_suffix}"))
-        .with_context(|| format!("resolve relay IP for device '{device}'"))?;
-    let ip = relay_ip
-        .parse::<IpAddr>()
-        .with_context(|| format!("parse relay IP '{relay_ip}' for device '{device}'"))?;
-    let relay_dir = state
-        .work_dir
-        .join("relay")
-        .join(sanitize_for_filename(device));
-    std::fs::create_dir_all(&relay_dir)
-        .with_context(|| format!("create relay runtime dir {}", relay_dir.display()))?;
-    let cert_path = relay_dir.join("certificate.crt");
-    let key_path = relay_dir.join("certificate.key");
-    if !cert_path.exists() || !key_path.exists() {
-        let cert = generate_self_signed_relay_cert(ip)?;
-        std::fs::write(&cert_path, cert.cert_pem)
-            .with_context(|| format!("write {}", cert_path.display()))?;
-        std::fs::write(&key_path, cert.key_pem)
-            .with_context(|| format!("write {}", key_path.display()))?;
-    }
-    let config_path = relay_dir.join("relay.cfg");
-    if !config_path.exists() {
-        let cfg = format!(
-            "enable_relay = true\nenable_metrics = true\nenable_quic_addr_discovery = true\n\n[tls]\nmanual_cert_path=\"{}\"\nmanual_key_path=\"{}\"\ncert_mode = \"Manual\"\n",
-            cert_path.display(),
-            key_path.display()
-        );
-        std::fs::write(&config_path, cfg)
-            .with_context(|| format!("write {}", config_path.display()))?;
-    }
-    let assets = RelayRuntimeAssets { config_path };
-    state
-        .relay_assets
-        .insert(device.to_string(), assets.clone());
-    Ok(assets)
-}
-
-struct GeneratedRelayCert {
-    cert_pem: String,
-    key_pem: String,
-}
-
-fn generate_self_signed_relay_cert(ip: IpAddr) -> Result<GeneratedRelayCert> {
-    let mut params = rcgen::CertificateParams::new(vec![])?;
-    params
-        .distinguished_name
-        .push(rcgen::DnType::CommonName, "netsim-relay");
-    params.subject_alt_names.push(rcgen::SanType::IpAddress(ip));
-    params
-        .subject_alt_names
-        .push(rcgen::SanType::DnsName("localhost".try_into()?));
-    let key = rcgen::KeyPair::generate()?;
-    let cert = params.self_signed(&key)?;
-    Ok(GeneratedRelayCert {
-        cert_pem: cert.pem(),
-        key_pem: key.serialize_pem(),
-    })
-}
-
-fn build_parser_config(step: &Step, device: &str, log_path: &Path) -> Result<Option<ParserConfig>> {
-    let Some(parser_raw) = step.parser.as_deref() else {
-        return Ok(None);
-    };
-    let parser = match parser_raw {
-        "iperf3-json" | "iperf-json" => StepParser::Iperf3Json,
-        other => bail!("unknown parser '{}' (expected iperf3-json)", other),
-    };
-    let result_id = step
-        .id
-        .as_deref()
-        .ok_or_else(|| anyhow!("parser '{}' requires step id", parser_raw))?;
-    Ok(Some(ParserConfig {
-        parser,
-        result_id: result_id.to_string(),
-        device: device.to_string(),
-        log_path: log_path.to_path_buf(),
-        baseline: step.baseline.clone(),
-    }))
-}
-
-fn apply_parser_result(state: &mut SimState, parser: ParserConfig) -> Result<()> {
-    match parser.parser {
-        StepParser::Iperf3Json => {
-            let metrics = parse_iperf3_json_log(&parser.log_path)?;
-            let mbps = metrics.bits_per_second.map(|bps| bps / 1_000_000.0);
-            let baseline_id = parser.baseline.clone();
-            let (delta_mbps, delta_pct) = if let Some(ref baseline_id) = baseline_id {
-                let base = state
-                    .iperf_results
-                    .iter()
-                    .find(|r| r.id == *baseline_id)
-                    .ok_or_else(|| anyhow!("baseline result '{}' not found", baseline_id))?;
-                match (mbps, base.mbps) {
-                    (Some(cur), Some(base_mbps)) if base_mbps > 0.0 => {
-                        let delta = cur - base_mbps;
-                        (Some(delta), Some(delta * 100.0 / base_mbps))
-                    }
-                    (Some(cur), Some(base_mbps)) => (Some(cur - base_mbps), None),
-                    _ => (None, None),
-                }
-            } else {
-                (None, None)
-            };
-            state.iperf_results.push(IperfResult {
-                id: parser.result_id,
-                device: parser.device,
-                bytes: metrics.bytes,
-                seconds: metrics.seconds,
-                bits_per_second: metrics.bits_per_second,
-                mbps,
-                retransmits: metrics.retransmits,
-                baseline: baseline_id,
-                delta_mbps,
-                delta_pct,
-            });
-        }
-    }
-    Ok(())
-}
-
-fn read_captures(
-    rx: mpsc::Receiver<String>,
-    step: &Step,
-    step_id: &str,
-    env: &mut SimEnv,
-) -> Result<()> {
-    let mut pending: HashMap<String, regex::Regex> = step
-        .captures
-        .iter()
-        .filter_map(|(name, spec)| {
-            let re_str = spec.stdout_regex.as_ref()?;
-            let re = regex::Regex::new(re_str)
-                .with_context(|| format!("compile regex for capture '{}'", name))
-                .ok()?;
-            Some((name.clone(), re))
-        })
-        .collect();
-
-    if pending.is_empty() {
-        return Ok(());
-    }
-
-    for line in rx {
-        let mut matched = vec![];
-        for (name, re) in &pending {
-            if let Some(caps) = re.captures(&line) {
-                let val = caps
-                    .get(1)
-                    .map(|m| m.as_str())
-                    .unwrap_or_else(|| caps.get(0).unwrap().as_str());
-                env.set_capture(step_id, name, val.to_string());
-                matched.push(name.clone());
-                tracing::debug!(step_id, name, val, "capture resolved");
-            }
-        }
-        for name in matched {
-            pending.remove(&name);
-        }
-        if pending.is_empty() {
-            break;
-        }
-    }
-
-    if !pending.is_empty() {
-        bail!(
-            "spawn '{}': EOF before captures resolved: {:?}",
-            step_id,
-            pending.keys().collect::<Vec<_>>()
-        );
-    }
-    Ok(())
-}
-
-fn spawn_pipe_pump<R: Read + Send + 'static>(
-    reader: R,
-    path: PathBuf,
-    prefix: String,
-    verbose: bool,
-    line_tx: Option<mpsc::Sender<String>>,
-) -> thread::JoinHandle<Result<()>> {
-    thread::spawn(move || -> Result<()> {
-        let mut out = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)
-            .with_context(|| format!("open append log {}", path.display()))?;
-        let mut reader = BufReader::new(reader);
-        let mut buf = Vec::new();
-        loop {
-            buf.clear();
-            let n = reader
-                .read_until(b'\n', &mut buf)
-                .with_context(|| format!("read pipe for {}", path.display()))?;
-            if n == 0 {
-                break;
-            }
-            out.write_all(&buf)
-                .with_context(|| format!("append log {}", path.display()))?;
-            let line = String::from_utf8_lossy(&buf)
-                .trim_end_matches('\n')
-                .to_string();
-            if verbose {
-                println!("{prefix} {line}");
-            }
-            if let Some(tx) = &line_tx {
-                let _ = tx.send(line);
-            }
-        }
-        Ok(())
-    })
-}
-
-fn join_pump(handle: thread::JoinHandle<Result<()>>, label: &str) -> Result<()> {
-    handle
-        .join()
-        .map_err(|_| anyhow!("{label} panicked"))?
-        .with_context(|| label.to_string())
-}
-
-fn verbose_prefix(device: &str, stream: &str) -> String {
-    let mut dev: String = device.chars().take(10).collect();
-    let cur = dev.chars().count();
-    if cur < 10 {
-        dev.push_str(&" ".repeat(10 - cur));
-    }
-    format!("{dev}{stream}")
-}
-
-fn shell_join(parts: &[String]) -> String {
-    parts
-        .iter()
-        .map(|p| shell_escape(p))
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-fn shell_escape(s: &str) -> String {
-    if s.is_empty() {
-        return "''".to_string();
-    }
-    if s.bytes().all(|b| {
-        matches!(
-            b,
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'/' | b':'
-        )
-    }) {
-        return s.to_string();
-    }
-    format!("'{}'", s.replace('\'', "'\"'\"'"))
-}
-
-struct NodeStdioLogs {
-    stdout: PathBuf,
-    stderr: PathBuf,
-}
-
-fn node_stdio_log_paths(work_dir: &Path, node: &str) -> Result<NodeStdioLogs> {
-    let node_dir = work_dir.join("nodes").join(sanitize_for_filename(node));
-    std::fs::create_dir_all(&node_dir)
-        .with_context(|| format!("create node log dir {}", node_dir.display()))?;
-    Ok(NodeStdioLogs {
-        stdout: node_dir.join("stdout.log"),
-        stderr: node_dir.join("stderr.log"),
-    })
-}
-
 fn collect_sim_logs(sim_dir: &Path) -> Result<Vec<SimLogEntry>> {
     let nodes_dir = sim_dir.join("nodes");
     if !nodes_dir.is_dir() {
@@ -1789,131 +1021,6 @@ fn collect_node_logs(
     Ok(())
 }
 
-fn sanitize_for_filename(s: &str) -> String {
-    s.chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect()
-}
-
-/// Parse a duration string like `"5s"`, `"300ms"`, `"1m"`.
-pub fn parse_duration(s: &str) -> Result<Duration> {
-    let s = s.trim();
-    if let Some(n) = s.strip_suffix("ms") {
-        return Ok(Duration::from_millis(
-            n.trim().parse().context("parse milliseconds")?,
-        ));
-    }
-    if let Some(n) = s.strip_suffix('s') {
-        return Ok(Duration::from_secs(
-            n.trim().parse().context("parse seconds")?,
-        ));
-    }
-    if let Some(n) = s.strip_suffix('m') {
-        return Ok(Duration::from_secs(
-            n.trim().parse::<u64>().context("parse minutes")? * 60,
-        ));
-    }
-    bail!("unknown duration format: {:?}", s);
-}
-
-fn parse_impair(step: &Step) -> Result<Option<Impair>> {
-    match &step.impair {
-        None => Ok(None),
-        Some(v) => {
-            let impair: Impair = v
-                .clone()
-                .try_into()
-                .map_err(|e: toml::de::Error| anyhow!("{}", e))?;
-            Ok(Some(impair))
-        }
-    }
-}
-
-fn evaluate_assert(state: &SimState, check: &str) -> Result<()> {
-    let (lhs, op, rhs) = if let Some(idx) = check.find(" == ") {
-        (check[..idx].trim(), "==", check[idx + 4..].trim())
-    } else if let Some(idx) = check.find(" != ") {
-        (check[..idx].trim(), "!=", check[idx + 4..].trim())
-    } else {
-        bail!("assert: unrecognised check expression: {:?}", check);
-    };
-
-    let lhs_val = resolve_assert_lhs(state, lhs)?;
-    let pass = match op {
-        "==" => lhs_val == rhs,
-        "!=" => lhs_val != rhs,
-        _ => unreachable!(),
-    };
-    if pass {
-        tracing::info!(check, "assert: PASS");
-        Ok(())
-    } else {
-        bail!(
-            "assert FAILED: '{}' (got '{}') {} '{}'",
-            lhs,
-            lhs_val,
-            op,
-            rhs
-        );
-    }
-}
-
-fn resolve_assert_lhs(state: &SimState, lhs: &str) -> Result<String> {
-    // Try captures first.
-    if let Some(v) = state.env.get_capture(lhs) {
-        return Ok(v.to_string());
-    }
-    // Try transfer result fields: "step_id.field".
-    if let Some((id, field)) = lhs.split_once('.') {
-        if let Some(result) = state.results.iter().find(|r| r.id == id) {
-            return result_field(result, field);
-        }
-        if let Some(result) = state.iperf_results.iter().find(|r| r.id == id) {
-            return iperf_result_field(result, field);
-        }
-    }
-    bail!(
-        "assert: cannot resolve '{}' — not a capture or known result field",
-        lhs
-    );
-}
-
-fn result_field(r: &TransferResult, field: &str) -> Result<String> {
-    match field {
-        "mbps" => Ok(r.mbps.map(|v| format!("{:.1}", v)).unwrap_or_default()),
-        "elapsed_s" => Ok(r.elapsed_s.map(|v| format!("{:.3}", v)).unwrap_or_default()),
-        "size_bytes" => Ok(r.size_bytes.map(|v| v.to_string()).unwrap_or_default()),
-        "final_conn_direct" => Ok(r
-            .final_conn_direct
-            .map(|v| v.to_string())
-            .unwrap_or_default()),
-        "conn_upgrade" => Ok(r.conn_upgrade.map(|v| v.to_string()).unwrap_or_default()),
-        "conn_events" => Ok(r.conn_events.to_string()),
-        other => bail!("unknown result field '{}.{}'", r.id, other),
-    }
-}
-
-fn iperf_result_field(r: &IperfResult, field: &str) -> Result<String> {
-    match field {
-        "mbps" => Ok(r.mbps.map(|v| format!("{:.3}", v)).unwrap_or_default()),
-        "seconds" => Ok(r.seconds.map(|v| format!("{:.3}", v)).unwrap_or_default()),
-        "bytes" => Ok(r.bytes.map(|v| v.to_string()).unwrap_or_default()),
-        "retransmits" => Ok(r.retransmits.map(|v| v.to_string()).unwrap_or_default()),
-        "delta_mbps" => Ok(r
-            .delta_mbps
-            .map(|v| format!("{:.3}", v))
-            .unwrap_or_default()),
-        "delta_pct" => Ok(r.delta_pct.map(|v| format!("{:.1}", v)).unwrap_or_default()),
-        other => bail!("unknown iperf result field '{}.{}'", r.id, other),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1928,14 +1035,6 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("netsim-{prefix}-{ts}-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("create temp dir");
         dir
-    }
-
-    #[test]
-    fn parse_duration_formats() {
-        assert_eq!(parse_duration("200ms").unwrap(), Duration::from_millis(200));
-        assert_eq!(parse_duration("2s").unwrap(), Duration::from_secs(2));
-        assert_eq!(parse_duration("3m").unwrap(), Duration::from_secs(180));
-        assert!(parse_duration("3h").is_err());
     }
 
     #[test]

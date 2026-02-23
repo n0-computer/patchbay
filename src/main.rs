@@ -180,13 +180,13 @@ fn perform_cleanup(prefixes: &[String]) -> Result<()> {
     let resources = netsim::core::resources();
     if !prefixes.is_empty() {
         for prefix in prefixes {
-            resources.cleanup_everything_with_prefix(prefix);
+            resources.cleanup_by_prefix(prefix);
         }
     } else {
-        resources.cleanup_all();
+        resources.cleanup_registered();
     }
     if !prefixes.is_empty() {
-        resources.cleanup_everything();
+        resources.cleanup_registered_prefixes();
     }
     tracing::info!("netsim cleanup: complete");
     Ok(())
@@ -220,9 +220,7 @@ fn inspect_session_path(work_dir: &std::path::Path, prefix: &str) -> PathBuf {
 }
 
 fn env_key_suffix(name: &str) -> String {
-    name.chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
-        .collect()
+    netsim::util::sanitize_for_env_key(name)
 }
 
 fn load_topology_for_inspect(input: &std::path::Path) -> Result<(netsim::config::LabConfig, bool)> {

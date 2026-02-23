@@ -64,6 +64,12 @@ Status key: ✅ implemented, ⚠️ partially implemented, ❌ not implemented.
 | `ui.md` | 7. Rust: write `manifest.json` per run dir | ⚠️ | Run-level `manifest.json` is now written and updated incrementally, but per-sim log manifest is still inferred in UI (`src/sim/runner.rs`, `ui/src/App.tsx`). |
 | `ui.md` | 8. Rust: embed `dist/index.html` + write to work root | ⚠️ | Embedded serving is implemented via `netsim::serve` and `serve` commands, but UI file is served from binary (not written into work root) (`src/serve.rs`, `src/main.rs`, `crates/netsim-vm/src/main.rs`). |
 | `ui.md` | 9. Qlog auto-discovery (index.json per qlog dir) | ❌ | Pending Rust support; qlog tab requires manual paste of path for now. |
+| `review-maintainability.md` | 1.1 Typed node IDs | ❌ | Declined per request; keep `NodeId` aliases (`src/core.rs`). |
+| `review-maintainability.md` | 1.2 NAT mode cleanup | ✅ | `RouterConfig.nat` is `NatMode`; `apply_nat` handles all variants (`src/core.rs`, `src/lib.rs`). |
+| `review-maintainability.md` | 1.3 Step enum + shared fields | ✅ | Tagged `Step` enum with `StepShared` flatten (`src/sim/mod.rs`). |
+| `review-maintainability.md` | 2. Module splits | ✅ | `src/netlink.rs`, `src/sim/steps.rs`, `src/sim/progress.rs`. |
+| `review-maintainability.md` | 3. DRY cleanup | ✅ | CIDR typing, unique dir helper, lookup helpers, cleanup naming, sanitizers (`src/core.rs`, `src/sim/runner.rs`, `src/util.rs`). |
+| `review-maintainability.md` | 4. Minor idioms | ✅ | Removed `#![allow(dead_code)]` (`src/lib.rs`). |
 | `ergonomics.md` | 1. Remove obsolete VM code from `netsim` crate | ✅ | Removed `run-vm` command and deleted `src/vm.rs`; `netsim` now owns local run/serve/cleanup only (`src/main.rs`, `src/vm.rs`). |
 | `ergonomics.md` | 2. Add shared asset handling via `netsim` -> `netsim-vm` dependency | ✅ | Added `netsim` dependency in `netsim-vm` and shared override/target shortcut logic via `netsim::assets` (`crates/netsim-vm/Cargo.toml`, `src/assets.rs`, `crates/netsim-vm/src/util.rs`, `src/sim/runner.rs`). |
 | `ergonomics.md` | 3. Add shared embedded UI server + `serve` command in both CLIs | ✅ | Added shared embedded server in `netsim::serve` and `serve` subcommands in both binaries (`src/serve.rs`, `src/main.rs`, `crates/netsim-vm/src/main.rs`). |

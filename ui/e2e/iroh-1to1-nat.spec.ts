@@ -3,8 +3,11 @@ import { execFileSync, spawn, type ChildProcess } from 'node:child_process'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 
-const REPO_ROOT = path.resolve(__dirname, '../..')
+const THIS_FILE = fileURLToPath(import.meta.url)
+const THIS_DIR = path.dirname(THIS_FILE)
+const REPO_ROOT = path.resolve(THIS_DIR, '../..')
 const UI_BIND = '127.0.0.1:7429'
 const UI_URL = `http://${UI_BIND}/`
 
@@ -42,7 +45,7 @@ test('ui shows iroh-1to1-nat run results', async ({ page }) => {
 
     await page.goto(UI_URL)
     await expect(page.getByRole('heading', { name: 'netsim' })).toBeVisible()
-    await expect(page.locator('text=iroh-1to1-nat')).toBeVisible()
+    await expect(page.getByRole('cell', { name: 'iroh-1to1-nat', exact: true })).toBeVisible()
   } finally {
     if (serveProc && !serveProc.killed) {
       serveProc.kill('SIGTERM')

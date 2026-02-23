@@ -31,8 +31,6 @@
 //! **Important**: namespace transitions are executed inside dedicated worker
 //! threads in the netns manager; callers can use any Tokio runtime flavor.
 
-#![allow(dead_code)]
-
 use anyhow::{anyhow, bail, Context, Result};
 use nix::unistd::Pid;
 use serde::Deserialize;
@@ -54,11 +52,14 @@ pub mod assets;
 pub mod binary_cache;
 /// Exposes low-level topology and namespace construction primitives.
 pub mod core;
+mod netlink;
 mod netns;
 mod qdisc;
 /// Embedded UI HTTP serving helpers.
 pub mod serve;
 mod userns;
+/// Shared string sanitizers.
+pub mod util;
 use crate::core::{
     apply_impair_in, cleanup_netns, resources, run_closure_in_namespace, run_command_in_namespace,
     spawn_closure_in_namespace_thread, spawn_command_in_namespace, CoreConfig, DownstreamPool,
@@ -486,20 +487,15 @@ impl Lab {
         let ns = self.ns_name();
         let downlink_bridge = self.next_bridge_name();
 
-        let (cgnat, downstream_pool) = match nat {
-            NatMode::None => (false, DownstreamPool::Public),
-            NatMode::Cgnat => (true, DownstreamPool::Private),
+        let downstream_pool = match nat {
+            NatMode::None => DownstreamPool::Public,
+            NatMode::Cgnat => DownstreamPool::Private,
             NatMode::DestinationIndependent | NatMode::DestinationDependent => {
-                (false, DownstreamPool::Private)
+                DownstreamPool::Private
             }
         };
-        let nat_cfg = match nat {
-            NatMode::DestinationIndependent | NatMode::DestinationDependent => Some(nat),
-            _ => None,
-        };
         let cfg = RouterConfig {
-            nat: nat_cfg,
-            cgnat,
+            nat,
             downlink_bridge,
             downstream_pool,
         };
@@ -508,13 +504,12 @@ impl Lab {
             .core
             .add_router(name, ns, cfg, region.map(|s| s.to_string()));
         let sub_switch = self.core.add_switch(&format!("{name}-sub"), None, None);
-        let _ = self.core.connect_router_downlink(id, sub_switch)?;
+        self.core.connect_router_downlink(id, sub_switch)?;
 
         match upstream {
             None => {
                 let ix_ip = self.core.alloc_ix_ip_low();
-                let _ = self
-                    .core
+                self.core
                     .connect_router_uplink(id, self.core.ix_sw(), Some(ix_ip))?;
             }
             Some(parent_id) => {
@@ -523,7 +518,7 @@ impl Lab {
                     .router(parent_id)
                     .and_then(|r| r.downlink)
                     .ok_or_else(|| anyhow!("parent router missing downlink switch"))?;
-                let _ = self.core.connect_router_uplink(id, parent_downlink, None)?;
+                self.core.connect_router_uplink(id, parent_downlink, None)?;
             }
         }
 
@@ -582,11 +577,7 @@ impl Lab {
     /// # }
     /// ```
     pub fn run_on(&self, name: &str, cmd: Command) -> Result<ExitStatus> {
-        let id = self
-            .device_by_name
-            .get(name)
-            .copied()
-            .ok_or_else(|| anyhow!("unknown device '{}'", name))?;
+        let id = self.resolve_device(name)?;
         let ns = self.core.device_ns(id)?;
         run_command_in_namespace(ns, cmd)
     }
@@ -611,11 +602,7 @@ impl Lab {
 
     /// Spawns a long-running process inside a device namespace and returns its PID.
     pub fn spawn_on(&mut self, name: &str, cmd: Command) -> Result<Pid> {
-        let id = self
-            .device_by_name
-            .get(name)
-            .copied()
-            .ok_or_else(|| anyhow!("unknown device '{}'", name))?;
+        let id = self.resolve_device(name)?;
         let ns = self.core.device_ns(id)?.to_string();
         let child = spawn_command_in_namespace(&ns, cmd)?;
         let pid = Pid::from_raw(child.id() as i32);
@@ -625,32 +612,20 @@ impl Lab {
 
     /// Spawns an unmanaged command in a device namespace and returns the raw `Child`.
     pub fn spawn_unmanaged_on(&self, device: &str, cmd: Command) -> Result<std::process::Child> {
-        let id = self
-            .device_by_name
-            .get(device)
-            .copied()
-            .ok_or_else(|| anyhow!("unknown device '{}'", device))?;
+        let id = self.resolve_device(device)?;
         let ns = self.core.device_ns(id)?.to_string();
         spawn_command_in_namespace(&ns, cmd)
     }
 
     /// Returns the network namespace name for a device by name.
     pub fn device_ns_name(&self, device: &str) -> Result<String> {
-        let id = self
-            .device_by_name
-            .get(device)
-            .copied()
-            .ok_or_else(|| anyhow!("unknown device '{}'", device))?;
+        let id = self.resolve_device(device)?;
         Ok(self.core.device_ns(id)?.to_string())
     }
 
     /// Returns the network namespace name for a router by name.
     pub fn router_ns_name(&self, router: &str) -> Result<String> {
-        let id = self
-            .router_by_name
-            .get(router)
-            .copied()
-            .ok_or_else(|| anyhow!("unknown router '{}'", router))?;
+        let id = self.resolve_router(router)?;
         Ok(self.core.router_ns(id)?.to_string())
     }
 
@@ -704,11 +679,7 @@ impl Lab {
 
     /// Probes the NAT mapping seen by a reflector from a named device.
     pub fn probe_udp_mapping(&self, device: &str, reflector: SocketAddr) -> Result<ObservedAddr> {
-        let id = self
-            .device_by_name
-            .get(device)
-            .copied()
-            .ok_or_else(|| anyhow!("unknown device '{}'", device))?;
+        let id = self.resolve_device(device)?;
         let ns = self.core.device_ns(id)?;
         let base = 40000u16;
         let port = base + ((id.0 % 20000) as u16);
@@ -770,14 +741,14 @@ impl Lab {
 
     /// Removes any known lab resources created by this process.
     pub fn cleanup(&self) {
-        resources().cleanup_all();
+        resources().cleanup_registered();
     }
 
     /// Removes any resources whose names match the lab prefix.
     ///
     /// This is useful if a previous run crashed before it could clean up.
     pub fn cleanup_everything() {
-        resources().cleanup_everything();
+        resources().cleanup_registered_prefixes();
     }
 
     // ── Private helpers ──────────────────────────────────────────────────
@@ -789,12 +760,22 @@ impl Lab {
     }
 
     fn dev_ns(&self, device: &str) -> Result<String> {
-        let id = self
-            .device_by_name
-            .get(device)
-            .copied()
-            .ok_or_else(|| anyhow!("unknown device '{}'", device))?;
+        let id = self.resolve_device(device)?;
         Ok(self.core.device_ns(id)?.to_string())
+    }
+
+    fn resolve_device(&self, name: &str) -> Result<NodeId> {
+        self.device_by_name
+            .get(name)
+            .copied()
+            .ok_or_else(|| anyhow!("unknown device '{}'", name))
+    }
+
+    fn resolve_router(&self, name: &str) -> Result<NodeId> {
+        self.router_by_name
+            .get(name)
+            .copied()
+            .ok_or_else(|| anyhow!("unknown router '{}'", name))
     }
 
     // ── Dynamic operations ────────────────────────────────────────────────
@@ -809,11 +790,7 @@ impl Lab {
         ifname: Option<&str>,
         impair: Option<Impair>,
     ) -> Result<()> {
-        let id = self
-            .device_by_name
-            .get(device)
-            .copied()
-            .ok_or_else(|| anyhow!("unknown device '{}'", device))?;
+        let id = self.resolve_device(device)?;
         let (ns, resolved_ifname) = {
             let dev = self
                 .core
@@ -857,11 +834,7 @@ impl Lab {
     /// `to` is the interface name (e.g. `"eth1"`).  The impairment configured
     /// for the new interface is re-applied after the route change.
     pub fn switch_route(&mut self, device: &str, to: &str) -> Result<()> {
-        let id = self
-            .device_by_name
-            .get(device)
-            .copied()
-            .ok_or_else(|| anyhow!("unknown device '{}'", device))?;
+        let id = self.resolve_device(device)?;
         let (ns, uplink, impair) = {
             let dev = self
                 .core
@@ -892,7 +865,7 @@ impl Default for Lab {
 
 impl Drop for Lab {
     fn drop(&mut self) {
-        resources().cleanup_all();
+        resources().cleanup_registered();
         for child in self.children.drain(..) {
             match child {
                 ChildTask::Process(mut proc) => {

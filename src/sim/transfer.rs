@@ -38,12 +38,28 @@ pub struct TransferHandle {
 
 /// Start a transfer and return a handle that is finalized in `wait-for`.
 pub fn start_transfer(state: &mut SimState, step: &Step, binary: &Path) -> Result<TransferHandle> {
-    let step_id = step.id.as_deref().context("iroh-transfer: missing id")?;
-    let provider_dev = step
-        .provider
+    let Step::Spawn {
+        id,
+        kind,
+        provider,
+        fetcher,
+        fetchers,
+        relay_url,
+        fetch_args,
+        strategy,
+        ..
+    } = step
+    else {
+        bail!("iroh-transfer: expected spawn step");
+    };
+    if kind.as_deref() != Some("iroh-transfer") {
+        bail!("iroh-transfer: expected spawn kind");
+    }
+    let step_id = id.as_str();
+    let provider_dev = provider
         .as_deref()
         .context("iroh-transfer: missing provider")?;
-    let fetcher_devs = resolve_fetchers(step)?;
+    let fetcher_devs = resolve_fetchers(fetcher, fetchers)?;
 
     let provider_logs_dir = node_transfer_dir(&state.work_dir, provider_dev, step_id, "provider");
     std::fs::create_dir_all(&provider_logs_dir)
@@ -52,24 +68,19 @@ pub fn start_transfer(state: &mut SimState, step: &Step, binary: &Path) -> Resul
     let provider_stderr_log = provider_logs_dir.join("stderr.log");
 
     let mut provider_cmd = std::process::Command::new(binary);
-    let mut provider_args = vec![
-        "--output".to_string(),
-        "json".to_string(),
-        "provide".to_string(),
-    ];
     provider_cmd.args(["--output", "json", "provide"]);
     provider_cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
 
     add_env_to_cmd(&mut provider_cmd, state, &format!("{}_provider", step_id));
     provider_cmd.args(["--env", "dev"]);
-    provider_args.push("--env".to_string());
-    provider_args.push("dev".to_string());
-    if let Some(relay_url) = &step.relay_url {
+    if let Some(relay_url) = relay_url {
         let url = state.env.interpolate_str(relay_url)?;
         provider_cmd.args(["--relay-url", &url]);
-        provider_args.push("--relay-url".to_string());
-        provider_args.push(url);
     }
+    let provider_args: Vec<String> = provider_cmd
+        .get_args()
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect();
     tracing::info!(
         step_id,
         device = provider_dev,
@@ -130,7 +141,7 @@ pub fn start_transfer(state: &mut SimState, step: &Step, binary: &Path) -> Resul
             "fetch".to_string(),
         ];
         fetcher_cmd.args(["--output", "json", "fetch"]);
-        if step.strategy.as_deref() == Some("endpoint_id_with_direct_addrs") {
+        if strategy.as_deref() == Some("endpoint_id_with_direct_addrs") {
             if let Some(addr) = &bound.direct_addr {
                 fetcher_cmd.args(["--remote-direct-address", addr]);
                 fetcher_args.push("--remote-direct-address".to_string());
@@ -142,7 +153,7 @@ pub fn start_transfer(state: &mut SimState, step: &Step, binary: &Path) -> Resul
         fetcher_cmd.args(["--env", "dev"]);
         fetcher_args.push("--env".to_string());
         fetcher_args.push("dev".to_string());
-        if let Some(relay_url) = &step.relay_url {
+        if let Some(relay_url) = relay_url {
             let url = state.env.interpolate_str(relay_url)?;
             fetcher_cmd.args(["--remote-relay-url", &url]);
             fetcher_cmd.args(["--relay-url", &url]);
@@ -151,7 +162,7 @@ pub fn start_transfer(state: &mut SimState, step: &Step, binary: &Path) -> Resul
             fetcher_args.push("--relay-url".to_string());
             fetcher_args.push(url);
         }
-        if let Some(extra) = &step.fetch_args {
+        if let Some(extra) = fetch_args {
             let extra = state.env.interpolate(extra)?;
             fetcher_cmd.args(extra.clone());
             fetcher_args.extend(extra);
@@ -315,14 +326,17 @@ fn verbose_prefix(device: &str, stream: &str) -> String {
     format!("{dev}{stream}")
 }
 
-fn resolve_fetchers(step: &Step) -> Result<Vec<String>> {
-    if let Some(fetchers) = &step.fetchers {
+fn resolve_fetchers(
+    fetcher: &Option<String>,
+    fetchers: &Option<Vec<String>>,
+) -> Result<Vec<String>> {
+    if let Some(fetchers) = fetchers {
         if fetchers.is_empty() {
             bail!("iroh-transfer: fetchers must not be empty");
         }
         return Ok(fetchers.clone());
     }
-    if let Some(fetcher) = &step.fetcher {
+    if let Some(fetcher) = fetcher {
         return Ok(vec![fetcher.clone()]);
     }
     bail!("iroh-transfer: missing fetcher/fetchers");
@@ -336,9 +350,10 @@ fn add_env_to_cmd(cmd: &mut std::process::Command, state: &SimState, keylog_suff
     let rust_log = std::env::var("NETSIM_RUST_LOG")
         .unwrap_or_else(|_| "iroh=info,iroh::_events=debug".to_string());
     cmd.env("RUST_LOG", rust_log);
-    let keylog = state
-        .work_dir
-        .join(format!("keylog_{}.txt", sanitize_for_file(keylog_suffix)));
+    let keylog = state.work_dir.join(format!(
+        "keylog_{}.txt",
+        netsim::util::sanitize_for_path_component(keylog_suffix)
+    ));
     cmd.env("SSLKEYLOGFILE", keylog);
 }
 
@@ -474,18 +489,12 @@ fn parse_endpoint_bound_line(line: &str) -> Option<EndpointBoundInfo> {
 fn node_transfer_dir(work_dir: &Path, node: &str, step_id: &str, role: &str) -> PathBuf {
     work_dir
         .join("nodes")
-        .join(sanitize_for_file(node))
+        .join(netsim::util::sanitize_for_path_component(node))
         .join(format!(
             "transfer-{}-{}",
-            sanitize_for_file(step_id),
-            sanitize_for_file(role)
+            netsim::util::sanitize_for_path_component(step_id),
+            netsim::util::sanitize_for_path_component(role)
         ))
-}
-
-fn sanitize_for_file(name: &str) -> String {
-    name.chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
-        .collect()
 }
 
 #[cfg(test)]

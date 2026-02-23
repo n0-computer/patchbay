@@ -6,6 +6,22 @@ orthogonal and the boundary is clean.
 
 ---
 
+## Status
+
+- 1.1 Typed node IDs: ❌ (explicitly declined; keep `NodeId` aliases).
+- 1.2 NAT mode cleanup: ✅ (single `NatMode` in `RouterConfig`, unified `apply_nat`).
+- 1.3 Step enum: ✅ (tagged enum + shared fields via `StepShared`).
+- 2.1 Netlink module split: ✅ (`src/netlink.rs`).
+- 2.2 Runner split: ✅ (`src/sim/steps.rs`, `src/sim/progress.rs`).
+- 3.1 Typed CIDR threading: ✅ (no string round-trips).
+- 3.2 Remove `date` subprocess: ✅ (chrono UTC formatting).
+- 3.3 Unique dir helper: ✅ (`create_unique_dir`).
+- 3.4 Lookup helpers: ✅ (`resolve_device` / `resolve_router`).
+- 3.5 Cleanup naming: ✅ (`cleanup_registered`, `cleanup_by_prefix`).
+- 3.6 Filename/env sanitizers: ✅ (`src/util.rs`).
+- 3.7 Dead `provider_args`: ✅ (removed).
+- 4.1 `#![allow(dead_code)]`: ✅ (removed).
+
 ## 1. Type Safety
 
 ### 1.1 `NodeId` type aliases provide no safety

@@ -1,7 +1,9 @@
 pub mod build;
 pub mod env;
+pub mod progress;
 pub mod report;
 pub mod runner;
+pub mod steps;
 pub mod topology;
 pub mod transfer;
 
@@ -74,78 +76,111 @@ pub struct BinarySpec {
     pub bin: Option<String>,
 }
 
-/// One step in the sim sequence.
-///
-/// Fields that do not apply to a given `action` are silently ignored.
+/// Shared step fields.
 #[derive(Deserialize, Clone, Default)]
-pub struct Step {
-    /// Action type: `"run"`, `"spawn"`, `"wait"`, `"wait-for"`,
-    /// `"set-impair"`, `"switch-route"`, `"link-down"`, `"link-up"`,
-    /// `"assert"`.
-    pub action: String,
-
-    /// Step identifier — required for `spawn` steps; referenced by `wait-for`.
-    pub id: Option<String>,
-    /// Target device name.
-    pub device: Option<String>,
-    /// Command to execute (supports `$NETSIM_*` and `${binary.<name>}` interpolation).
-    pub cmd: Option<Vec<String>>,
-    /// Duration for `wait` steps (e.g. `"5s"`, `"300ms"`).
-    pub duration: Option<String>,
-    /// Timeout override for `wait-for` (default: `"300s"`).
-    pub timeout: Option<String>,
-    /// Static delay after spawn before the step is considered ready.
-    pub ready_after: Option<String>,
-    /// Named regex captures from stdout; all captures must resolve before the
-    /// step is marked ready.
-    #[serde(default)]
-    pub captures: HashMap<String, CaptureSpec>,
+pub struct StepShared {
     /// Extra environment variables injected into the spawned process.
     #[serde(default)]
     pub env: HashMap<String, String>,
+}
 
-    // ── iroh-transfer fields ──────────────────────────────────────────────
-    /// `"iroh-transfer"` for the managed transfer spawn.
-    pub kind: Option<String>,
-    /// Provider device name (for `kind = "iroh-transfer"`).
-    pub provider: Option<String>,
-    /// Single fetcher device name.
-    pub fetcher: Option<String>,
-    /// Multiple fetcher device names (Phase 4 `count` expansion).
-    pub fetchers: Option<Vec<String>>,
-    /// Optional relay URL passed to both sides.
-    pub relay_url: Option<String>,
-    /// Extra CLI arguments passed to the fetcher binary.
-    ///
-    /// Use this for transfer-runtime knobs (for example, `--duration=20`).
-    pub fetch_args: Option<Vec<String>>,
-    /// Connection strategy: `"endpoint_id"` (default) or
-    /// `"iroh_transfer_with_addrs"`.
-    pub strategy: Option<String>,
+/// One step in the sim sequence.
+#[derive(Deserialize, Clone)]
+#[allow(clippy::large_enum_variant)]
+#[serde(tag = "action", rename_all = "kebab-case")]
+pub enum Step {
+    Run {
+        #[serde(flatten)]
+        shared: StepShared,
+        /// Optional step id, required when a parser is configured.
+        id: Option<String>,
+        /// Target device name.
+        device: String,
+        /// Command to execute (supports `$NETSIM_*` and `${binary.<name>}` interpolation).
+        cmd: Vec<String>,
+        /// Optional parser applied to the step log after completion.
+        parser: Option<Parser>,
+        /// Optional baseline result id used by parsers that support comparisons.
+        baseline: Option<String>,
+    },
+    Spawn {
+        #[serde(flatten)]
+        shared: StepShared,
+        /// Step identifier — required for `spawn` steps; referenced by `wait-for`.
+        id: String,
+        /// Target device name.
+        device: Option<String>,
+        /// Command to execute for generic spawns.
+        cmd: Option<Vec<String>>,
+        /// Static delay after spawn before the step is considered ready.
+        ready_after: Option<String>,
+        /// Named regex captures from stdout; all captures must resolve before the
+        /// step is marked ready.
+        #[serde(default)]
+        captures: HashMap<String, CaptureSpec>,
+        /// `"iroh-transfer"` for the managed transfer spawn.
+        kind: Option<String>,
+        /// Provider device name (for `kind = "iroh-transfer"`).
+        provider: Option<String>,
+        /// Single fetcher device name.
+        fetcher: Option<String>,
+        /// Multiple fetcher device names (Phase 4 `count` expansion).
+        fetchers: Option<Vec<String>>,
+        /// Optional relay URL passed to both sides.
+        relay_url: Option<String>,
+        /// Extra CLI arguments passed to the fetcher binary.
+        ///
+        /// Use this for transfer-runtime knobs (for example, `--duration=20`).
+        fetch_args: Option<Vec<String>>,
+        /// Connection strategy: `"endpoint_id"` (default) or
+        /// `"iroh_transfer_with_addrs"`.
+        strategy: Option<String>,
+        /// Optional parser applied to the step log after completion.
+        parser: Option<Parser>,
+        /// Optional baseline result id used by parsers that support comparisons.
+        baseline: Option<String>,
+    },
+    Wait {
+        duration: String,
+    },
+    WaitFor {
+        id: String,
+        /// Timeout override for `wait-for` (default: `"300s"`).
+        timeout: Option<String>,
+    },
+    SetImpair {
+        device: String,
+        /// Interface name for `link-down`, `link-up`, or `set-impair`.
+        interface: Option<String>,
+        /// Impairment spec for `set-impair` (TOML string preset or inline table).
+        impair: Option<toml::Value>,
+    },
+    SwitchRoute {
+        device: String,
+        /// Target interface for `switch-route`.
+        to: String,
+    },
+    LinkDown {
+        device: String,
+        /// Interface name for `link-down`.
+        interface: String,
+    },
+    LinkUp {
+        device: String,
+        /// Interface name for `link-up`.
+        interface: String,
+    },
+    Assert {
+        /// Simple boolean expression, e.g. `"xfer.final_conn_direct == true"`.
+        check: String,
+    },
+}
 
-    // ── network-op fields ─────────────────────────────────────────────────
-    /// Impairment spec for `set-impair` (TOML string preset or inline table).
-    pub impair: Option<toml::Value>,
-    /// Interface name for `link-down`, `link-up`, or `set-impair`.
-    pub interface: Option<String>,
-    /// Target interface for `switch-route`.
-    pub to: Option<String>,
-
-    // ── assert ────────────────────────────────────────────────────────────
-    /// Simple boolean expression, e.g. `"xfer.final_conn_direct == true"`.
-    pub check: Option<String>,
-
-    // ── post-process parser for command output ────────────────────────────
-    /// Optional parser applied to the step log after completion.
-    ///
-    /// Supported values:
-    /// - `iperf3-json`: parse `iperf3 -J` output into report rows.
-    pub parser: Option<String>,
-    /// Optional baseline result id used by parsers that support comparisons.
-    ///
-    /// For `parser = "iperf3-json"`, this computes `delta_mbps` and `delta_pct`
-    /// relative to a previous iperf result id in the same sim run.
-    pub baseline: Option<String>,
+/// Supported post-run parsers.
+#[derive(Clone, Copy, Debug, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Parser {
+    Iperf3Json,
 }
 
 /// Spec for a named capture read from process stdout.

@@ -279,3 +279,7 @@ after confirmation commit with "feat: short description" etc and some details af
   - Linux host: copies current executable.
   - macOS host: downloads latest `netsim-x86_64-unknown-linux-musl.tar.gz` release asset and extracts `netsim`.
 - Added release workflow at `.github/workflows/release.yml` to build/package `netsim` for `x86_64-unknown-linux-musl` and `aarch64-apple-darwin`, then publish assets on tag pushes.
+- Maintainability refactor batch:
+  - Added `src/netlink.rs` for rtnetlink helpers and `src/sim/steps.rs` + `src/sim/progress.rs` to split runner logic.
+  - Converted sim steps to tagged enum with `StepShared` flatten and moved UTC timestamp formatting to chrono.
+  - Added `src/util.rs` sanitizers used by runner/transfer/main; unified cleanup naming and NAT handling.
