@@ -14,6 +14,7 @@ use serde::Serialize;
 
 use crate::sim::build::build_local_binary;
 use crate::sim::build::build_or_fetch_binary;
+use crate::sim::capture::CaptureStore;
 use crate::sim::env::SimEnv;
 use crate::sim::progress::{
     collect_run_environment, format_timestamp, now_stamp, write_progress, write_run_manifest,
@@ -21,14 +22,16 @@ use crate::sim::progress::{
 };
 use crate::sim::report::{
     print_run_summary_table_for_runs, write_combined_results_for_runs, write_results, IperfResult,
-    TransferResult,
+    StepResultRecord, TransferResult,
 };
 use crate::sim::steps::{
     execute_step, join_pump, step_action, step_device, step_id, ParserConfig, RelayRuntimeAssets,
 };
 use crate::sim::topology::load_topology;
 use crate::sim::transfer::TransferHandle;
-use crate::sim::{BinarySpec, SimFile};
+use crate::sim::{
+    BinarySpec, SimFile, Step, StepEntry, StepGroupDef, StepResults, StepTemplateDef, UseStep,
+};
 
 // ─────────────────────────────────────────────
 // State
@@ -42,10 +45,16 @@ pub struct SimState {
     pub(crate) spawned: HashMap<String, GenericProcess>,
     /// In-progress iroh-transfer handles, keyed by step `id`.
     pub(crate) transfers: HashMap<String, TransferHandle>,
-    /// Completed transfer results.
+    /// Completed transfer results (legacy iroh-transfer path).
     pub(crate) results: Vec<TransferResult>,
     /// Parsed iperf results collected from `step.parser = "iperf3-json"`.
     pub(crate) iperf_results: Vec<IperfResult>,
+    /// Step result records collected from `[step.results]` mappings.
+    pub(crate) step_results: Vec<StepResultRecord>,
+    /// Persistent capture store shared with pump threads.
+    pub(crate) captures: CaptureStore,
+    /// Pending results specs for spawned processes (id → (StepResults, device)).
+    pub(crate) spawn_results: HashMap<String, (StepResults, String)>,
     /// Paths to resolved binaries, keyed by `[[binary]] name`.
     pub(crate) binaries: HashMap<String, PathBuf>,
     pub(crate) work_dir: PathBuf,
@@ -59,6 +68,7 @@ pub(crate) struct GenericProcess {
     pub(crate) parser: Option<ParserConfig>,
     pub(crate) stdout_pump: Option<thread::JoinHandle<Result<()>>>,
     pub(crate) stderr_pump: Option<thread::JoinHandle<Result<()>>>,
+    pub(crate) capture_reader: Option<thread::JoinHandle<Result<()>>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -125,6 +135,9 @@ impl Drop for SimState {
             }
             if let Some(h) = sp.stderr_pump.take() {
                 let _ = join_pump(h, "drop stderr pump");
+            }
+            if let Some(h) = sp.capture_reader.take() {
+                let _ = join_pump(h, "drop capture reader");
             }
         }
     }
@@ -524,6 +537,7 @@ async fn execute_single_sim(
         .collect();
     let env = SimEnv::new(lab.env_vars(), bin_strs);
 
+    let captures = CaptureStore::new();
     let mut state = SimState {
         lab,
         env,
@@ -531,6 +545,9 @@ async fn execute_single_sim(
         transfers: HashMap::new(),
         results: vec![],
         iperf_results: vec![],
+        step_results: vec![],
+        captures,
+        spawn_results: HashMap::new(),
         binaries: binary_paths,
         work_dir: run_work_dir.to_path_buf(),
         sim_name: sim_name.to_string(),
@@ -538,8 +555,14 @@ async fn execute_single_sim(
         relay_assets: HashMap::new(),
     };
 
+    // ── Expand step templates and groups ─────────────────────────────────
+    let (templates, groups) =
+        load_extends(&sim, sim_path).with_context(|| "step=load-extends".to_string())?;
+    let steps = expand_steps(sim.raw_steps, &templates, &groups, sim_path)
+        .with_context(|| "step=expand-steps".to_string())?;
+
     // ── Execute steps ────────────────────────────────────────────────────
-    for (idx, step) in sim.steps.iter().enumerate() {
+    for (idx, step) in steps.iter().enumerate() {
         if let Err(err) = execute_step(&mut state, step) {
             let step_info = StepFailureInfo {
                 index: idx,
@@ -566,6 +589,8 @@ async fn execute_single_sim(
         &state.sim_name,
         &state.results,
         &state.iperf_results,
+        &state.step_results,
+        &state.captures,
     )
     .await
     .context("step=write-results")?;
@@ -596,7 +621,7 @@ fn setup_summary_from_sim(sim_path: &Path, sim: &SimFile) -> SimSetupSummary {
     setup.routers = sim.router.len();
     setup.devices = sim.device.len();
     setup.regions = sim.region.as_ref().map(|r| r.len()).unwrap_or(0);
-    setup.steps = sim.steps.len();
+    setup.steps = sim.raw_steps.len();
     setup
 }
 
@@ -1019,6 +1044,337 @@ fn collect_node_logs(
         });
     }
     Ok(())
+}
+
+// ─────────────────────────────────────────────
+// Step expansion: extends, groups, templates
+// ─────────────────────────────────────────────
+
+/// Load template and group definitions from `[[extends]]` files, merging with inline definitions.
+/// Inline definitions override extends.
+fn load_extends(
+    sim: &SimFile,
+    sim_path: &Path,
+) -> Result<(
+    HashMap<String, StepTemplateDef>,
+    HashMap<String, StepGroupDef>,
+)> {
+    let mut templates: HashMap<String, StepTemplateDef> = HashMap::new();
+    let mut groups: HashMap<String, StepGroupDef> = HashMap::new();
+
+    let sim_dir = sim_path.parent().unwrap_or(Path::new("."));
+    for entry in &sim.extends {
+        let candidates = [
+            sim_dir.join(&entry.file),
+            sim_dir.join("..").join(&entry.file),
+            std::env::current_dir()
+                .unwrap_or_else(|_| PathBuf::from("."))
+                .join(&entry.file),
+        ];
+        let chosen = candidates
+            .iter()
+            .find(|p| p.exists())
+            .cloned()
+            .ok_or_else(|| {
+                anyhow!(
+                    "extends file '{}' not found (checked: {}, {}, {})",
+                    entry.file,
+                    candidates[0].display(),
+                    candidates[1].display(),
+                    candidates[2].display()
+                )
+            })?;
+        let text = std::fs::read_to_string(&chosen)
+            .with_context(|| format!("read extends file {}", chosen.display()))?;
+        let parsed: SimFile = toml::from_str(&text)
+            .with_context(|| format!("parse extends file {}", chosen.display()))?;
+        for t in parsed.step_templates {
+            templates.entry(t.name.clone()).or_insert(t);
+        }
+        for g in parsed.step_groups {
+            groups.entry(g.name.clone()).or_insert(g);
+        }
+    }
+
+    // Inline definitions override extends.
+    for t in &sim.step_templates {
+        templates.insert(t.name.clone(), t.clone());
+    }
+    for g in &sim.step_groups {
+        groups.insert(g.name.clone(), g.clone());
+    }
+
+    Ok((templates, groups))
+}
+
+/// Normalize a raw TOML table so it uses `action` as the tag key.
+/// If the table has `kind` but no `action`, copy `kind` → `action`.
+fn normalize_step_table(table: &mut toml::value::Table) {
+    if !table.contains_key("action") {
+        if let Some(kind) = table.get("kind").cloned() {
+            table.insert("action".to_string(), kind);
+        }
+    }
+}
+
+/// Expand all `StepEntry` entries (groups and templates) into a flat `Vec<Step>`.
+pub(crate) fn expand_steps(
+    entries: Vec<StepEntry>,
+    templates: &HashMap<String, StepTemplateDef>,
+    groups: &HashMap<String, StepGroupDef>,
+    _sim_path: &Path,
+) -> Result<Vec<Step>> {
+    // First pass: expand groups.
+    let mut flat: Vec<StepEntry> = Vec::new();
+    for entry in entries {
+        match entry {
+            StepEntry::UseTemplate(ref use_step) if groups.contains_key(&use_step.use_name) => {
+                let group = groups.get(&use_step.use_name).unwrap();
+                for raw_table in &group.steps {
+                    let mut table = raw_table.clone();
+                    // Substitute ${group.key} tokens in all string values.
+                    substitute_group_vars_in_table(&mut table, &use_step.vars).with_context(
+                        || format!("substituting group vars for group '{}'", use_step.use_name),
+                    )?;
+                    normalize_step_table(&mut table);
+                    // Group steps may themselves reference templates.
+                    // Detect via presence of `use` key before converting.
+                    if let Some(toml::Value::String(use_name)) = table.get("use").cloned() {
+                        // This group step itself uses a template — expand it.
+                        let use_step_inner = UseStep {
+                            use_name: use_name.clone(),
+                            vars: HashMap::new(),
+                            id: table
+                                .get("id")
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.to_string()),
+                            device: table
+                                .get("device")
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.to_string()),
+                            env: HashMap::new(),
+                            args: vec![],
+                            requires: table
+                                .get("requires")
+                                .and_then(|v| v.as_array())
+                                .map(|a| {
+                                    a.iter()
+                                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                                        .collect()
+                                })
+                                .unwrap_or_default(),
+                            results: None,
+                            timeout: None,
+                            captures: HashMap::new(),
+                        };
+                        flat.push(StepEntry::UseTemplate(use_step_inner));
+                    } else {
+                        let step =
+                            toml::Value::Table(table)
+                                .try_into::<Step>()
+                                .with_context(|| {
+                                    format!("parse group step in '{}'", use_step.use_name)
+                                })?;
+                        flat.push(StepEntry::Concrete(step));
+                    }
+                }
+            }
+            other => flat.push(other),
+        }
+    }
+
+    // Second pass: expand templates.
+    let mut steps: Vec<Step> = Vec::new();
+    for entry in flat {
+        match entry {
+            StepEntry::Concrete(step) => steps.push(step),
+            StepEntry::UseTemplate(use_step) => {
+                let tpl = templates.get(&use_step.use_name).ok_or_else(|| {
+                    anyhow!(
+                        "unknown template or group '{}' (checked {} templates, {} groups)",
+                        use_step.use_name,
+                        templates.len(),
+                        0
+                    )
+                })?;
+                let step = merge_use_step(use_step, tpl)
+                    .with_context(|| format!("expanding template '{}'", tpl.name))?;
+                steps.push(step);
+            }
+        }
+    }
+
+    Ok(steps)
+}
+
+/// Substitute `${group.key}` tokens in all string values of a TOML table.
+fn substitute_group_vars_in_table(
+    table: &mut toml::value::Table,
+    vars: &HashMap<String, String>,
+) -> Result<()> {
+    let keys: Vec<String> = table.keys().cloned().collect();
+    for key in keys {
+        let val = table.get_mut(&key).unwrap();
+        substitute_group_vars_in_value(val, vars)?;
+    }
+    Ok(())
+}
+
+fn substitute_group_vars_in_value(
+    val: &mut toml::Value,
+    vars: &HashMap<String, String>,
+) -> Result<()> {
+    match val {
+        toml::Value::String(s) => {
+            *s = substitute_group_vars_str(s, vars)?;
+        }
+        toml::Value::Array(arr) => {
+            for v in arr.iter_mut() {
+                substitute_group_vars_in_value(v, vars)?;
+            }
+        }
+        toml::Value::Table(tbl) => {
+            substitute_group_vars_in_table(tbl, vars)?;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// Replace `${group.key}` with the corresponding var value.
+/// Unknown `${group.*}` keys are errors; other `${...}` tokens are left as-is.
+fn substitute_group_vars_str(s: &str, vars: &HashMap<String, String>) -> Result<String> {
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while !rest.is_empty() {
+        if let Some(idx) = rest.find("${group.") {
+            out.push_str(&rest[..idx]);
+            rest = &rest[idx + 2..]; // skip "${"
+            let end = rest
+                .find('}')
+                .ok_or_else(|| anyhow!("unclosed '{{' in {:?}", s))?;
+            let key_full = &rest[..end]; // "group.key"
+            rest = &rest[end + 1..];
+            if let Some(var_key) = key_full.strip_prefix("group.") {
+                let val = vars.get(var_key).ok_or_else(|| {
+                    anyhow!(
+                        "group variable '{}' not provided (available: {:?})",
+                        var_key,
+                        vars.keys().collect::<Vec<_>>()
+                    )
+                })?;
+                out.push_str(val);
+            } else {
+                out.push_str("${");
+                out.push_str(key_full);
+                out.push('}');
+            }
+        } else {
+            out.push_str(rest);
+            break;
+        }
+    }
+    Ok(out)
+}
+
+/// Merge a `UseStep` call-site onto a template's raw TOML table, then parse into `Step`.
+fn merge_use_step(use_step: UseStep, template: &StepTemplateDef) -> Result<Step> {
+    let mut table = template.raw.clone();
+
+    // Apply id override.
+    if let Some(id) = use_step.id {
+        table.insert("id".to_string(), toml::Value::String(id));
+    }
+    // Apply device override.
+    if let Some(device) = use_step.device {
+        table.insert("device".to_string(), toml::Value::String(device));
+    }
+    // Apply timeout override.
+    if let Some(timeout) = use_step.timeout {
+        table.insert("timeout".to_string(), toml::Value::String(timeout));
+    }
+    // Merge env (use_step wins on collision).
+    if !use_step.env.is_empty() {
+        let env_tbl = table
+            .entry("env".to_string())
+            .or_insert_with(|| toml::Value::Table(toml::value::Table::new()));
+        if let toml::Value::Table(ref mut t) = env_tbl {
+            for (k, v) in use_step.env {
+                t.insert(k, toml::Value::String(v));
+            }
+        }
+    }
+    // Append args to cmd.
+    if !use_step.args.is_empty() {
+        let cmd = table
+            .entry("cmd".to_string())
+            .or_insert_with(|| toml::Value::Array(vec![]));
+        if let toml::Value::Array(ref mut arr) = cmd {
+            for arg in use_step.args {
+                arr.push(toml::Value::String(arg));
+            }
+        }
+    }
+    // Merge captures (use_step wins on collision).
+    if !use_step.captures.is_empty() {
+        let caps_tbl = table
+            .entry("captures".to_string())
+            .or_insert_with(|| toml::Value::Table(toml::value::Table::new()));
+        if let toml::Value::Table(ref mut t) = caps_tbl {
+            for (k, v) in use_step.captures {
+                let v_toml =
+                    toml::Value::try_from(v).map_err(|e| anyhow!("serialize capture spec: {e}"))?;
+                t.insert(k, v_toml);
+            }
+        }
+    }
+    // Merge requires.
+    if !use_step.requires.is_empty() {
+        let existing = table
+            .entry("requires".to_string())
+            .or_insert_with(|| toml::Value::Array(vec![]));
+        if let toml::Value::Array(ref mut arr) = existing {
+            for r in use_step.requires {
+                arr.push(toml::Value::String(r));
+            }
+        }
+    }
+    // Results: use_step overrides template.
+    if let Some(results) = use_step.results {
+        let mut results_tbl = toml::value::Table::new();
+        if let Some(d) = results.duration {
+            results_tbl.insert("duration".to_string(), toml::Value::String(d));
+        }
+        if let Some(u) = results.up_bytes {
+            results_tbl.insert("up_bytes".to_string(), toml::Value::String(u));
+        }
+        if let Some(d) = results.down_bytes {
+            results_tbl.insert("down_bytes".to_string(), toml::Value::String(d));
+        }
+        table.insert("results".to_string(), toml::Value::Table(results_tbl));
+    }
+    // Rewrite `.capture_name` shorthand in results (requires step id).
+    let step_id_val = table
+        .get("id")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    if let Some(toml::Value::Table(ref mut results_tbl)) = table.get_mut("results") {
+        let keys: Vec<String> = results_tbl.keys().cloned().collect();
+        for k in keys {
+            if let Some(toml::Value::String(ref mut v)) = results_tbl.get_mut(&k) {
+                if v.starts_with('.') && !v[1..].contains('.') {
+                    if let Some(ref id) = step_id_val {
+                        *v = format!("{}{}", id, v);
+                    }
+                }
+            }
+        }
+    }
+
+    normalize_step_table(&mut table);
+    toml::Value::Table(table)
+        .try_into::<Step>()
+        .with_context(|| format!("parse merged template '{}'", template.name))
 }
 
 #[cfg(test)]

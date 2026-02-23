@@ -4,6 +4,46 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
 
+use crate::sim::capture::CaptureStore;
+
+/// A step result record collected from `[step.results]` capture mappings.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct StepResultRecord {
+    /// Step identifier.
+    pub id: String,
+    /// Duration value from capture (raw string, e.g. microseconds).
+    pub duration_raw: Option<String>,
+    /// Upload bytes value from capture.
+    pub up_bytes_raw: Option<String>,
+    /// Download bytes value from capture.
+    pub down_bytes_raw: Option<String>,
+}
+
+impl StepResultRecord {
+    /// Parse duration as microseconds → seconds.
+    pub fn elapsed_s(&self) -> Option<f64> {
+        let s = self.duration_raw.as_deref()?;
+        let us: u64 = s.parse().ok()?;
+        Some(us as f64 / 1_000_000.0)
+    }
+
+    /// Parse down_bytes as u64.
+    pub fn size_bytes(&self) -> Option<u64> {
+        self.down_bytes_raw.as_deref()?.parse().ok()
+    }
+
+    /// Compute Mbit/s from bytes and duration.
+    pub fn mbps(&self) -> Option<f64> {
+        let bytes = self.size_bytes()? as f64;
+        let secs = self.elapsed_s()?;
+        if secs > 0.0 {
+            Some(bytes * 8.0 / (secs * 1_000_000.0))
+        } else {
+            None
+        }
+    }
+}
+
 /// Parsed result from one iroh-transfer run.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct TransferResult {
@@ -174,19 +214,51 @@ fn is_direct_addr(addr: &serde_json::Value) -> bool {
 }
 
 /// Write results to `<work_dir>/results.json` and `<work_dir>/results.md`.
+///
+/// If `results` (legacy iroh-transfer) is empty, synthesize `TransferResult` entries
+/// from `step_results` (new capture-based path) so the UI's `transfers` field stays populated.
 pub async fn write_results(
     work_dir: &Path,
     sim_name: &str,
     results: &[TransferResult],
     iperf_results: &[IperfResult],
+    step_results: &[StepResultRecord],
+    _captures: &CaptureStore,
 ) -> Result<()> {
-    if results.is_empty() && iperf_results.is_empty() {
+    // Synthesize transfer rows from step_results when legacy path produced nothing.
+    let synthesized: Vec<TransferResult>;
+    let effective_results: &[TransferResult] = if results.is_empty() && !step_results.is_empty() {
+        synthesized = step_results
+            .iter()
+            .map(|r| {
+                let elapsed_s = r.elapsed_s();
+                let size_bytes = r.size_bytes();
+                let mbps = r.mbps();
+                TransferResult {
+                    id: r.id.clone(),
+                    provider: String::new(),
+                    fetcher: String::new(),
+                    size_bytes,
+                    elapsed_s,
+                    mbps,
+                    final_conn_direct: None,
+                    conn_upgrade: None,
+                    conn_events: 0,
+                }
+            })
+            .collect();
+        &synthesized
+    } else {
+        results
+    };
+
+    if effective_results.is_empty() && iperf_results.is_empty() {
         return Ok(());
     }
 
     let json = serde_json::to_string_pretty(&serde_json::json!({
         "sim": sim_name,
-        "transfers": results,
+        "transfers": effective_results,
         "iperf": iperf_results,
     }))
     .context("serialize results")?;
@@ -197,7 +269,7 @@ pub async fn write_results(
     let mut md = String::new();
     md.push_str("| sim | id | provider | fetcher | size_bytes | elapsed_s | mbps | final_conn_direct | conn_upgrade | conn_events |\n");
     md.push_str("| --- | -- | -------- | ------- | ---------- | --------- | ---- | ----------------- | ------------ | ----------- |\n");
-    for r in results {
+    for r in effective_results {
         md.push_str(&format!(
             "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
             sim_name,
@@ -616,7 +688,7 @@ mod tests {
             delta_mbps: None,
             delta_pct: None,
         }];
-        write_results(&dir, "sim-a", &transfers, &iperf)
+        write_results(&dir, "sim-a", &transfers, &iperf, &[], &CaptureStore::new())
             .await
             .unwrap();
 
@@ -659,8 +731,12 @@ mod tests {
             conn_upgrade: Some(false),
             conn_events: 1,
         }];
-        write_results(&run_a, "sim-a", &r1, &[]).await.unwrap();
-        write_results(&run_b, "sim-b", &r2, &[]).await.unwrap();
+        write_results(&run_a, "sim-a", &r1, &[], &[], &CaptureStore::new())
+            .await
+            .unwrap();
+        write_results(&run_b, "sim-b", &r2, &[], &[], &CaptureStore::new())
+            .await
+            .unwrap();
 
         write_combined_results_for_runs(&root, &["sim-a".to_string()])
             .await

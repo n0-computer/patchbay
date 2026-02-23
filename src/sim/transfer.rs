@@ -40,7 +40,7 @@ pub struct TransferHandle {
 pub fn start_transfer(state: &mut SimState, step: &Step, binary: &Path) -> Result<TransferHandle> {
     let Step::Spawn {
         id,
-        kind,
+        iroh_transfer_kind: kind,
         provider,
         fetcher,
         fetchers,
