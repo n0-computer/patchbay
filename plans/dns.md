@@ -4,9 +4,23 @@
 
 ## TODO
 
-- [] Write plan
-  - [] refine plan, gather feedback
-- [] Add impl plan and TODOs
+- [x] Write plan
+- [ ] Phase 1: bind-mount infra (`NsFileOverrides` registry, `pre_exec` hook)
+- [ ] Phase 1: `/etc/hosts` per device (`add_host_entry`, `add_host_entry_all`, `auto_populate_hosts`)
+- [ ] Phase 1: `/etc/resolv.conf` per device (`set_nameserver`, `set_nameserver_all`)
+- [ ] Phase 1: TOML `[dns]` / `[[device]] dns_name` / `[[dns.host]]` (phase 1 fields)
+- [ ] Phase 1: tests (hosts visible, isolation, nameserver written, auto-populate)
+- [ ] Phase 2: `hickory-server` dep + `DnsServer` struct + `InMemoryAuthority` zone
+- [ ] Phase 2: `ServerFuture` binding in root namespace worker
+- [ ] Phase 2: `Lab::spawn_dns_server`, `auto_populate_dns`, `start_dns`
+- [ ] Phase 2: TOML `[dns] enabled` / `dns_txt` device field
+- [ ] Phase 2: tests (A/AAAA/TXT roundtrip, runtime mutation, resolver method, isolation)
+- [ ] Phase 3: pebble binary acquisition + config + process lifecycle (`PebbleHandle`)
+- [ ] Phase 3: cert trust injection (env vars + optional `inject_system_ca`)
+- [ ] Phase 3: DNS-01 challenge responder task
+- [ ] Phase 3: `Lab::start_acme`, `run_with_acme`, TOML `[acme]`
+- [ ] Phase 3: tests (cert issued HTTP-01, cert trusted, DNS-01 challenge, env injection)
+- [ ] Final review
 
 ---
 

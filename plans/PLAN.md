@@ -4,6 +4,7 @@
 
 ## Open
 
+- [dns.md](dns.md) — priority 2
 - [ipv6.md](ipv6.md) — priority 2
 - [testing.md](testing.md) — priority 2
 
