@@ -926,9 +926,21 @@ mod tests {
         let text = std::fs::read_to_string(&results_path)
             .unwrap_or_else(|e| panic!("read {}: {e}", results_path.display()));
         let json: serde_json::Value = serde_json::from_str(&text).expect("parse results");
-        let mbps = json["transfers"][0]["mbps"]
-            .as_f64()
-            .expect("mbps should be present");
-        assert!(mbps > 0.0, "expected mbps > 0, got {mbps}");
+        let step = &json["steps"][0];
+        let down_bytes: f64 = step["down_bytes"]
+            .as_str()
+            .expect("down_bytes should be present")
+            .parse()
+            .expect("down_bytes should be numeric");
+        let duration: f64 = step["duration"]
+            .as_str()
+            .expect("duration should be present")
+            .parse::<u64>()
+            .map(|us| us as f64 / 1_000_000.0)
+            .unwrap_or_else(|_| {
+                step["duration"].as_str().unwrap().parse::<f64>().expect("duration as float")
+            });
+        let mb_s = down_bytes / (duration * 1_000_000.0);
+        assert!(mb_s > 0.0, "expected mb_s > 0, got {mb_s}");
     }
 }

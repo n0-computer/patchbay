@@ -74,10 +74,10 @@ cmd    = ["${binary.transfer}", "--output", "json", "fetch", "--env", "dev"]
 env    = { RUST_LOG = "iroh=info,iroh::_events=debug" }
 # caller appends via args: <endpoint_id> --relay-url <url> etc.
 [step-template.captures.size]
-match = { kind = "DownloadComplete" }
+match = { kind = "DownloadCompleted" }
 pick  = ".size"
 [step-template.captures.duration]
-match = { kind = "DownloadComplete" }
+match = { kind = "DownloadCompleted" }
 pick  = ".duration"
 [step-template.captures.remote-addr]
 match  = { kind = "ConnectionTypeChanged", status = "Selected" }

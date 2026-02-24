@@ -657,18 +657,18 @@ fn collect_step_results(
         let key = opt.as_deref()?;
         captures.get(key)
     };
-    let duration_raw = resolve(&results.duration);
-    let up_bytes_raw = resolve(&results.up_bytes);
-    let down_bytes_raw = resolve(&results.down_bytes);
+    let duration = resolve(&results.duration);
+    let up_bytes = resolve(&results.up_bytes);
+    let down_bytes = resolve(&results.down_bytes);
 
-    if duration_raw.is_none() && up_bytes_raw.is_none() && down_bytes_raw.is_none() {
+    if duration.is_none() && up_bytes.is_none() && down_bytes.is_none() {
         return None;
     }
     Some(StepResultRecord {
         id: step_id.to_string(),
-        duration_raw,
-        up_bytes_raw,
-        down_bytes_raw,
+        duration,
+        up_bytes,
+        down_bytes,
     })
 }
 

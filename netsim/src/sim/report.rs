@@ -9,18 +9,18 @@ use std::path::Path;
 pub struct StepResultRecord {
     /// Step identifier.
     pub id: String,
-    /// Duration value from capture (raw string, e.g. microseconds).
-    pub duration_raw: Option<String>,
+    /// Duration value from capture (raw string, e.g. microseconds or seconds).
+    pub duration: Option<String>,
     /// Upload bytes value from capture.
-    pub up_bytes_raw: Option<String>,
+    pub up_bytes: Option<String>,
     /// Download bytes value from capture.
-    pub down_bytes_raw: Option<String>,
+    pub down_bytes: Option<String>,
 }
 
 impl StepResultRecord {
     /// Parse duration as microseconds (integer) or seconds (float).
     pub fn elapsed_s(&self) -> Option<f64> {
-        let s = self.duration_raw.as_deref()?;
+        let s = self.duration.as_deref()?;
         if let Ok(us) = s.parse::<u64>() {
             return Some(us as f64 / 1_000_000.0);
         }
@@ -29,45 +29,33 @@ impl StepResultRecord {
 
     /// Parse down_bytes as u64.
     pub fn size_bytes(&self) -> Option<u64> {
-        self.down_bytes_raw.as_deref()?.parse().ok()
+        self.down_bytes.as_deref()?.parse().ok()
     }
 
-    /// Compute Mbit/s from bytes and duration.
-    pub fn mbps(&self) -> Option<f64> {
+    /// Compute download MB/s from bytes and duration.
+    pub fn mb_s(&self) -> Option<f64> {
         let bytes = self.size_bytes()? as f64;
         let secs = self.elapsed_s()?;
         if secs > 0.0 {
-            Some(bytes * 8.0 / (secs * 1_000_000.0))
+            Some(bytes / (secs * 1_000_000.0))
+        } else {
+            None
+        }
+    }
+
+    /// Compute upload MB/s from up_bytes and duration.
+    pub fn up_mb_s(&self) -> Option<f64> {
+        let bytes = self.up_bytes.as_deref()?.parse::<u64>().ok()? as f64;
+        let secs = self.elapsed_s()?;
+        if secs > 0.0 {
+            Some(bytes / (secs * 1_000_000.0))
         } else {
             None
         }
     }
 }
 
-/// Transfer result row synthesized from step results (for UI `results.json`).
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct TransferResult {
-    pub id: String,
-    pub provider: String,
-    pub fetcher: String,
-    /// Bytes transferred.
-    pub size_bytes: Option<u64>,
-    /// Transfer duration in seconds.
-    pub elapsed_s: Option<f64>,
-    /// Throughput in Mbit/s.
-    pub mbps: Option<f64>,
-    /// Was the final connection direct (not relay)?
-    pub final_conn_direct: Option<bool>,
-    /// Did the connection ever upgrade to direct?
-    pub conn_upgrade: Option<bool>,
-    /// Total number of ConnectionTypeChanged events observed.
-    pub conn_events: usize,
-}
-
 /// Write results to `<work_dir>/results.json` and `<work_dir>/results.md`.
-///
-/// Synthesizes `TransferResult` entries from `step_results` so the UI's
-/// `transfers` field stays populated.
 pub async fn write_results(
     work_dir: &Path,
     sim_name: &str,
@@ -77,51 +65,16 @@ pub async fn write_results(
         return Ok(());
     }
 
-    let transfers: Vec<TransferResult> = step_results
-        .iter()
-        .map(|r| TransferResult {
-            id: r.id.clone(),
-            provider: String::new(),
-            fetcher: String::new(),
-            size_bytes: r.size_bytes(),
-            elapsed_s: r.elapsed_s(),
-            mbps: r.mbps(),
-            final_conn_direct: None,
-            conn_upgrade: None,
-            conn_events: 0,
-        })
-        .collect();
-
     let json = serde_json::to_string_pretty(&serde_json::json!({
         "sim": sim_name,
-        "transfers": transfers,
-        "iperf": [],
+        "steps": step_results,
     }))
     .context("serialize results")?;
     tokio::fs::write(work_dir.join("results.json"), json)
         .await
         .context("write results.json")?;
 
-    let mut md = String::new();
-    md.push_str("| sim | id | provider | fetcher | size_bytes | elapsed_s | mbps | final_conn_direct | conn_upgrade | conn_events |\n");
-    md.push_str("| --- | -- | -------- | ------- | ---------- | --------- | ---- | ----------------- | ------------ | ----------- |\n");
-    for r in &transfers {
-        md.push_str(&format!(
-            "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
-            sim_name,
-            r.id,
-            r.provider,
-            r.fetcher,
-            r.size_bytes.map(|v| v.to_string()).unwrap_or_default(),
-            r.elapsed_s.map(|v| format!("{:.3}", v)).unwrap_or_default(),
-            r.mbps.map(|v| format!("{:.1}", v)).unwrap_or_default(),
-            r.final_conn_direct
-                .map(|v| v.to_string())
-                .unwrap_or_default(),
-            r.conn_upgrade.map(|v| v.to_string()).unwrap_or_default(),
-            r.conn_events,
-        ));
-    }
+    let md = build_steps_md_table(sim_name, step_results);
     tokio::fs::write(work_dir.join("results.md"), md)
         .await
         .context("write results.md")?;
@@ -129,12 +82,66 @@ pub async fn write_results(
     Ok(())
 }
 
+/// Build a data-driven markdown table for step results.
+/// Columns: sim, id, down_bytes, elapsed_s, mb_s, up_bytes, up_mb_s.
+/// Only emits columns with at least one non-empty value.
+fn build_steps_md_table(sim_name: &str, step_results: &[StepResultRecord]) -> String {
+    let headers = ["sim", "id", "down_bytes", "elapsed_s", "mb_s", "up_bytes", "up_mb_s"];
+
+    let rows: Vec<Vec<String>> = step_results
+        .iter()
+        .map(|r| {
+            vec![
+                sim_name.to_string(),
+                r.id.clone(),
+                r.down_bytes.clone().unwrap_or_default(),
+                r.elapsed_s()
+                    .map(|v| format!("{:.3}", v))
+                    .unwrap_or_default(),
+                r.mb_s().map(|v| format!("{:.2}", v)).unwrap_or_default(),
+                r.up_bytes.clone().unwrap_or_default(),
+                r.up_mb_s()
+                    .map(|v| format!("{:.2}", v))
+                    .unwrap_or_default(),
+            ]
+        })
+        .collect();
+
+    let active: Vec<usize> = (0..headers.len())
+        .filter(|&ci| rows.iter().any(|row| !row[ci].is_empty()))
+        .collect();
+
+    if active.is_empty() {
+        return String::new();
+    }
+
+    let mut md = String::new();
+    md.push('|');
+    for &ci in &active {
+        md.push_str(&format!(" {} |", headers[ci]));
+    }
+    md.push('\n');
+    md.push('|');
+    for &ci in &active {
+        md.push_str(&format!(" {} |", "-".repeat(headers[ci].len())));
+    }
+    md.push('\n');
+    for row in &rows {
+        md.push('|');
+        for &ci in &active {
+            md.push_str(&format!(" {} |", row[ci]));
+        }
+        md.push('\n');
+    }
+    md
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct RunResults {
     run: String,
     sim_dir: String,
     sim: String,
-    transfers: Vec<TransferResult>,
+    steps: Vec<StepResultRecord>,
 }
 
 /// Scan per-sim result directories under one run root and emit combined reports.
@@ -152,77 +159,97 @@ pub async fn write_combined_results_for_runs(work_root: &Path, run_names: &[Stri
         .await
         .context("write combined-results.json")?;
 
-    let mut transfer_by_sim: BTreeMap<String, Vec<&TransferResult>> = BTreeMap::new();
+    // Summary table: one row per sim, aggregating all runs.
+    let mut steps_by_sim: BTreeMap<String, Vec<&StepResultRecord>> = BTreeMap::new();
     for run in &runs {
-        for t in &run.transfers {
-            transfer_by_sim.entry(run.sim.clone()).or_default().push(t);
+        for s in &run.steps {
+            steps_by_sim.entry(run.sim.clone()).or_default().push(s);
         }
     }
 
     let mut md = String::new();
-    md.push_str("| sim | transfers | avg_mbps | direct_final_pct |\n");
-    md.push_str("| --- | --------- | -------- | ---------------- |\n");
-    for (sim, transfers) in &transfer_by_sim {
-        let mut mbps_sum = 0.0f64;
-        let mut mbps_count = 0usize;
-        let mut direct_total = 0usize;
-        let mut direct_yes = 0usize;
-        for t in transfers {
-            if let Some(v) = t.mbps {
-                mbps_sum += v;
-                mbps_count += 1;
-            }
-            if let Some(v) = t.final_conn_direct {
-                direct_total += 1;
-                if v {
-                    direct_yes += 1;
-                }
-            }
-        }
-        let avg_mbps = if mbps_count > 0 {
-            format!("{:.1}", mbps_sum / mbps_count as f64)
-        } else {
-            String::new()
-        };
-        let direct_pct = if direct_total > 0 {
-            format!(
-                "{:.0}%",
-                100.0 * (direct_yes as f64) / (direct_total as f64)
-            )
-        } else {
-            String::new()
-        };
+    md.push_str("| Sim | N | Max Down (MB/s) | Max Up (MB/s) |\n");
+    md.push_str("| --- | - | --------------- | ------------- |\n");
+    for (sim, steps) in &steps_by_sim {
+        let max_down = steps
+            .iter()
+            .filter_map(|r| r.mb_s())
+            .reduce(f64::max)
+            .map(|v| format!("{:.2}", v))
+            .unwrap_or_default();
+        let max_up = steps
+            .iter()
+            .filter_map(|r| r.up_mb_s())
+            .reduce(f64::max)
+            .map(|v| format!("{:.2}", v))
+            .unwrap_or_default();
         md.push_str(&format!(
             "| {} | {} | {} | {} |\n",
             sim,
-            transfers.len(),
-            avg_mbps,
-            direct_pct
+            steps.len(),
+            max_down,
+            max_up,
         ));
     }
     md.push('\n');
-    md.push_str("| run | sim | id | provider | fetcher | size_bytes | elapsed_s | mbps | final_conn_direct | conn_upgrade | conn_events |\n");
-    md.push_str("| --- | --- | -- | -------- | ------- | ---------- | --------- | ---- | ----------------- | ------------ | ----------- |\n");
-    for run in &runs {
-        for r in &run.transfers {
-            md.push_str(&format!(
-                "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
-                run.run,
-                run.sim,
-                r.id,
-                r.provider,
-                r.fetcher,
-                r.size_bytes.map(|v| v.to_string()).unwrap_or_default(),
-                r.elapsed_s.map(|v| format!("{:.3}", v)).unwrap_or_default(),
-                r.mbps.map(|v| format!("{:.1}", v)).unwrap_or_default(),
-                r.final_conn_direct
-                    .map(|v| v.to_string())
-                    .unwrap_or_default(),
-                r.conn_upgrade.map(|v| v.to_string()).unwrap_or_default(),
-                r.conn_events,
-            ));
+
+    // Detail table: data-driven, one row per step across all runs.
+    let detail_headers = [
+        "run",
+        "sim",
+        "id",
+        "down_bytes",
+        "elapsed_s",
+        "mb_s",
+        "up_bytes",
+        "up_mb_s",
+    ];
+    let detail_rows: Vec<Vec<String>> = runs
+        .iter()
+        .flat_map(|run| {
+            run.steps.iter().map(move |r| {
+                vec![
+                    run.run.clone(),
+                    run.sim.clone(),
+                    r.id.clone(),
+                    r.down_bytes.clone().unwrap_or_default(),
+                    r.elapsed_s()
+                        .map(|v| format!("{:.3}", v))
+                        .unwrap_or_default(),
+                    r.mb_s().map(|v| format!("{:.2}", v)).unwrap_or_default(),
+                    r.up_bytes.clone().unwrap_or_default(),
+                    r.up_mb_s()
+                        .map(|v| format!("{:.2}", v))
+                        .unwrap_or_default(),
+                ]
+            })
+        })
+        .collect();
+
+    let active: Vec<usize> = (0..detail_headers.len())
+        .filter(|&ci| detail_rows.iter().any(|row| !row[ci].is_empty()))
+        .collect();
+
+    if !active.is_empty() {
+        md.push('|');
+        for &ci in &active {
+            md.push_str(&format!(" {} |", detail_headers[ci]));
+        }
+        md.push('\n');
+        md.push('|');
+        for &ci in &active {
+            md.push_str(&format!(" {} |", "-".repeat(detail_headers[ci].len())));
+        }
+        md.push('\n');
+        for row in &detail_rows {
+            md.push('|');
+            for &ci in &active {
+                md.push_str(&format!(" {} |", row[ci]));
+            }
+            md.push('\n');
         }
     }
+
     tokio::fs::write(work_root.join("combined-results.md"), md)
         .await
         .context("write combined-results.md")?;
@@ -236,31 +263,26 @@ pub fn print_run_summary_table_for_runs(work_root: &Path, run_names: &[String]) 
         return Ok(());
     }
 
-    #[derive(Deserialize)]
-    struct SimStatus {
-        status: Option<String>,
-    }
-
     let mut table = Table::new();
     table.load_preset(UTF8_FULL);
-    table.set_header(vec!["sim", "status", "down_mbps"]);
+    table.set_header(vec!["Sim", "N", "Max Down (MB/s)", "Max Up (MB/s)"]);
     for run in &runs {
-        let status = std::fs::read_to_string(work_root.join(&run.sim_dir).join("sim.json"))
-            .ok()
-            .and_then(|text| serde_json::from_str::<SimStatus>(&text).ok())
-            .and_then(|s| s.status)
-            .unwrap_or_else(|| "unknown".to_string());
-        let (down_sum, down_n) = run
-            .transfers
+        let n = run.steps.len();
+        let max_down = run
+            .steps
             .iter()
-            .filter_map(|r| r.mbps)
-            .fold((0.0f64, 0usize), |(sum, n), v| (sum + v, n + 1));
-        let down = if down_n > 0 {
-            format!("{:.1}", down_sum / down_n as f64)
-        } else {
-            "-".to_string()
-        };
-        table.add_row(vec![run.sim.clone(), status, down]);
+            .filter_map(|r| r.mb_s())
+            .reduce(f64::max)
+            .map(|v| format!("{:.2}", v))
+            .unwrap_or_else(|| "-".to_string());
+        let max_up = run
+            .steps
+            .iter()
+            .filter_map(|r| r.up_mb_s())
+            .reduce(f64::max)
+            .map(|v| format!("{:.2}", v))
+            .unwrap_or_else(|| "-".to_string());
+        table.add_row(vec![run.sim.clone(), n.to_string(), max_down, max_up]);
     }
     println!("\nRun Summary:");
     println!("{table}");
@@ -310,17 +332,17 @@ fn load_runs(work_root: &Path, run_names: &[String]) -> Result<Vec<RunResults>> 
             .and_then(|s| s.as_str())
             .unwrap_or("")
             .to_string();
-        let transfers: Vec<TransferResult> = serde_json::from_value(
-            v.get("transfers")
+        let steps: Vec<StepResultRecord> = serde_json::from_value(
+            v.get("steps")
                 .cloned()
                 .unwrap_or_else(|| serde_json::Value::Array(vec![])),
         )
-        .context("parse transfers array")?;
+        .context("parse steps array")?;
         runs.push(RunResults {
             run: run_name.clone(),
             sim_dir: name.to_string(),
             sim,
-            transfers,
+            steps,
         });
     }
     Ok(runs)
@@ -342,17 +364,17 @@ mod tests {
     }
 
     #[test]
-    fn step_result_record_computes_mbps() {
+    fn step_result_record_computes_mb_s() {
         let r = StepResultRecord {
             id: "xfer".to_string(),
-            duration_raw: Some("2000000".to_string()), // 2s in microseconds
-            up_bytes_raw: None,
-            down_bytes_raw: Some("1000000".to_string()), // 1 MB
+            duration: Some("2000000".to_string()), // 2s in microseconds
+            up_bytes: None,
+            down_bytes: Some("1000000".to_string()), // 1 MB
         };
         assert_eq!(r.elapsed_s(), Some(2.0));
         assert_eq!(r.size_bytes(), Some(1_000_000));
-        // 1MB in 2s = 4 Mbit/s
-        assert_eq!(r.mbps(), Some(4.0));
+        // 1MB in 2s = 0.5 MB/s
+        assert_eq!(r.mb_s(), Some(0.5));
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -360,15 +382,16 @@ mod tests {
         let dir = temp_dir("report-write");
         let step_results = vec![StepResultRecord {
             id: "xfer".to_string(),
-            duration_raw: Some("2000000".to_string()),
-            up_bytes_raw: None,
-            down_bytes_raw: Some("1000000".to_string()),
+            duration: Some("2000000".to_string()),
+            up_bytes: None,
+            down_bytes: Some("1000000".to_string()),
         }];
         write_results(&dir, "sim-a", &step_results).await.unwrap();
 
         let json = std::fs::read_to_string(dir.join("results.json")).unwrap();
         let md = std::fs::read_to_string(dir.join("results.md")).unwrap();
         assert!(json.contains("\"sim\": \"sim-a\""));
+        assert!(json.contains("\"steps\""));
         assert!(json.contains("\"id\": \"xfer\""));
         assert!(md.contains("sim-a"));
         assert!(md.contains("xfer"));
@@ -384,15 +407,15 @@ mod tests {
 
         let r1 = vec![StepResultRecord {
             id: "xfer-a".to_string(),
-            duration_raw: Some("1000000".to_string()),
-            up_bytes_raw: None,
-            down_bytes_raw: Some("1000000".to_string()),
+            duration: Some("1000000".to_string()),
+            up_bytes: None,
+            down_bytes: Some("1000000".to_string()),
         }];
         let r2 = vec![StepResultRecord {
             id: "xfer-b".to_string(),
-            duration_raw: Some("2000000".to_string()),
-            up_bytes_raw: None,
-            down_bytes_raw: Some("1000000".to_string()),
+            duration: Some("2000000".to_string()),
+            up_bytes: None,
+            down_bytes: Some("1000000".to_string()),
         }];
         write_results(&run_a, "sim-a", &r1).await.unwrap();
         write_results(&run_b, "sim-b", &r2).await.unwrap();

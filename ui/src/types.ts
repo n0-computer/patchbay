@@ -1,15 +1,8 @@
-export interface TransferResult {
+export interface StepResult {
   id: string
-  provider: string
-  fetcher: string
-  size_bytes?: number
-  elapsed_s?: number
-  mbps?: number
-  up_mbps?: number
-  down_mbps?: number
-  final_conn_direct?: boolean
-  conn_upgrade?: boolean
-  conn_events: number
+  duration?: string
+  down_bytes?: string
+  up_bytes?: string
 }
 
 export interface IperfResult {
@@ -27,8 +20,8 @@ export interface IperfResult {
 
 export interface SimResults {
   sim: string
-  transfers: TransferResult[]
-  iperf: IperfResult[]
+  steps: StepResult[]
+  iperf?: IperfResult[]
 }
 
 export type LogKind = 'transfer' | 'text' | 'qlog'
@@ -110,8 +103,7 @@ export interface CombinedRunResult {
   run: string
   sim_dir?: string
   sim: string
-  transfers: TransferResult[]
-  iperf: IperfResult[]
+  steps: StepResult[]
 }
 
 export interface CombinedResults {

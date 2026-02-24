@@ -1,0 +1,32 @@
+[sim]
+name     = "iperf-1to1-udp"
+topology = "1to1-public"
+
+[[step]]
+action      = "spawn"
+id          = "iperf-server"
+device      = "provider"
+cmd         = ["iperf3", "-s", "-1"]
+ready_after = "1s"
+
+[[step]]
+action = "run"
+id     = "iperf-udp"
+device = "fetcher"
+parser = "json"
+cmd    = ["iperf3", "-c", "$NETSIM_IP_provider", "-u", "-b", "1G", "-t", "10", "-J"]
+[step.captures.bytes]
+pick = ".end.sum.bytes"
+[step.captures.duration_s]
+pick = ".end.sum.seconds"
+[step.captures.jitter_ms]
+pick = ".end.sum.jitter_ms"
+[step.captures.lost_percent]
+pick = ".end.sum.lost_percent"
+[step.results]
+duration   = "iperf-udp.duration_s"
+down_bytes = "iperf-udp.bytes"
+
+[[step]]
+action = "wait-for"
+id     = "iperf-server"

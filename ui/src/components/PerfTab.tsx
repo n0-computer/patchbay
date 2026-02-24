@@ -1,88 +1,65 @@
-import type { SimResults } from '../types'
+import type { SimResults, StepResult } from '../types'
 
 function fmt(v: number | undefined | null, decimals = 1, suffix = '') {
   if (v == null) return <span style={{ color: 'var(--text-muted)' }}>—</span>
   return <>{v.toFixed(decimals)}{suffix}</>
 }
 
-type NodeRow = {
-  node: string
-  up: number
-  down: number
+function elapsedS(dur: string | undefined): number | null {
+  if (!dur) return null
+  const trimmed = dur.trim()
+  const asInt = parseInt(trimmed, 10)
+  if (!isNaN(asInt) && String(asInt) === trimmed) return asInt / 1_000_000
+  const asFloat = parseFloat(trimmed)
+  return isNaN(asFloat) ? null : asFloat
 }
 
-function transferNodeRows(results: SimResults): NodeRow[] {
-  const byNode = new Map<string, NodeRow>()
-  for (const transfer of results.transfers) {
-    const upMbps = transfer.up_mbps ?? transfer.mbps ?? 0
-    const downMbps = transfer.down_mbps ?? transfer.mbps ?? 0
-    if (!transfer.provider || !transfer.fetcher) continue
-    if (!byNode.has(transfer.provider)) {
-      byNode.set(transfer.provider, { node: transfer.provider, up: 0, down: 0 })
-    }
-    if (!byNode.has(transfer.fetcher)) {
-      byNode.set(transfer.fetcher, { node: transfer.fetcher, up: 0, down: 0 })
-    }
-    byNode.get(transfer.provider)!.up += upMbps
-    byNode.get(transfer.fetcher)!.down += downMbps
-  }
-  return [...byNode.values()].sort((a, b) => a.node.localeCompare(b.node))
+function mbS(bytes: string | undefined, duration: string | undefined): number | null {
+  if (!bytes) return null
+  const b = parseFloat(bytes)
+  const s = elapsedS(duration)
+  if (isNaN(b) || s == null || s <= 0) return null
+  return b / (s * 1_000_000)
+}
+
+function hasAny(steps: StepResult[], field: keyof StepResult): boolean {
+  return steps.some((s) => s[field] != null && s[field] !== '')
 }
 
 export default function PerfTab({ results }: { results: SimResults | null }) {
   if (!results) return <div className="empty">no results for this simulation yet</div>
-  const nodeRows = transferNodeRows(results)
+  const { steps, iperf = [] } = results
+
+  const showDown = hasAny(steps, 'down_bytes')
+  const showUp = hasAny(steps, 'up_bytes')
+  const showDuration = hasAny(steps, 'duration')
 
   return (
     <div className="perf-layout">
-      {nodeRows.length > 0 && (
+      {steps.length > 0 && (
         <div className="section">
-          <div className="section-header">transfer per-node throughput</div>
+          <div className="section-header">steps</div>
           <div className="tbl-wrap">
             <table>
               <thead>
                 <tr>
-                  <th>node</th>
-                  <th>up_mbps</th>
-                  <th>down_mbps</th>
+                  <th>ID</th>
+                  {showDown && <th>Down MB/s</th>}
+                  {showUp && <th>Up MB/s</th>}
+                  {showDuration && <th>Elapsed (s)</th>}
+                  {showDown && <th>Down Bytes</th>}
+                  {showUp && <th>Up Bytes</th>}
                 </tr>
               </thead>
               <tbody>
-                {nodeRows.map((r) => (
-                  <tr key={r.node}>
-                    <td>{r.node}</td>
-                    <td>{fmt(r.up, 2)}</td>
-                    <td>{fmt(r.down, 2)}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      )}
-
-      {results.transfers.length > 0 && (
-        <div className="section">
-          <div className="section-header">transfer details</div>
-          <div className="tbl-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>id</th>
-                  <th>up_mbps</th>
-                  <th>down_mbps</th>
-                  <th>elapsed</th>
-                  <th>size</th>
-                </tr>
-              </thead>
-              <tbody>
-                {results.transfers.map((r, i) => (
+                {steps.map((r, i) => (
                   <tr key={i}>
                     <td>{r.id}</td>
-                    <td>{fmt(r.up_mbps ?? r.mbps, 1)}</td>
-                    <td>{fmt(r.down_mbps ?? r.mbps, 1)}</td>
-                    <td>{fmt(r.elapsed_s, 2, 's')}</td>
-                    <td>{fmt(r.size_bytes ? r.size_bytes / 1e6 : undefined, 1, ' MB')}</td>
+                    {showDown && <td>{fmt(mbS(r.down_bytes, r.duration), 2)}</td>}
+                    {showUp && <td>{fmt(mbS(r.up_bytes, r.duration), 2)}</td>}
+                    {showDuration && <td>{fmt(elapsedS(r.duration), 2, 's')}</td>}
+                    {showDown && <td>{r.down_bytes ?? '—'}</td>}
+                    {showUp && <td>{r.up_bytes ?? '—'}</td>}
                   </tr>
                 ))}
               </tbody>
@@ -91,23 +68,23 @@ export default function PerfTab({ results }: { results: SimResults | null }) {
         </div>
       )}
 
-      {results.iperf.length > 0 && (
+      {iperf.length > 0 && (
         <div className="section">
           <div className="section-header">iperf</div>
           <div className="tbl-wrap">
             <table>
               <thead>
                 <tr>
-                  <th>id</th>
-                  <th>device</th>
-                  <th>mbps</th>
-                  <th>retx</th>
-                  <th>baseline</th>
-                  <th>delta</th>
+                  <th>ID</th>
+                  <th>Device</th>
+                  <th>Mbps</th>
+                  <th>Retx</th>
+                  <th>Baseline</th>
+                  <th>Delta</th>
                 </tr>
               </thead>
               <tbody>
-                {results.iperf.map((r, i) => (
+                {iperf.map((r, i) => (
                   <tr key={i}>
                     <td>{r.id}</td>
                     <td>{r.device}</td>

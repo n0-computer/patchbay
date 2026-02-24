@@ -4,27 +4,24 @@ import PerfTab from './components/PerfTab'
 import TimelineTab from './components/TimelineTab'
 import type {
   CombinedResults,
-  IperfResult,
   RunIndex,
   RunManifest,
   RunProgress,
   SimResults,
   SimSummary,
-  TransferResult,
 } from './types'
 
 type Tab = 'perf' | 'logs' | 'timeline'
 type SelectedItem = 'overview' | string
 
-type NodeThroughput = { node: string; up: number; down: number }
 type SimOverviewRow = {
   sim: string
   sim_dir: string
   status: string
   error: string | null
-  nodes: number | null
-  up: number | null
-  down: number | null
+  n: number | null
+  maxDown: number | null
+  maxUp: number | null
 }
 
 async function fetchJson<T>(url: string): Promise<T | null> {
@@ -41,51 +38,24 @@ function baseForRun(run: string | null): string {
   return run ? `./${run}/` : './'
 }
 
-function sum(nums: number[]): number {
-  return nums.reduce((acc, v) => acc + v, 0)
+function elapsedS(dur: string | undefined): number | null {
+  if (!dur) return null
+  const trimmed = dur.trim()
+  const asInt = parseInt(trimmed, 10)
+  if (!isNaN(asInt) && String(asInt) === trimmed) return asInt / 1_000_000
+  const asFloat = parseFloat(trimmed)
+  return isNaN(asFloat) ? null : asFloat
 }
 
-function avg(nums: number[]): number | null {
-  return nums.length ? sum(nums) / nums.length : null
+function mbS(bytes: string | undefined, duration: string | undefined): number | null {
+  if (!bytes) return null
+  const b = parseFloat(bytes)
+  const s = elapsedS(duration)
+  if (isNaN(b) || s == null || s <= 0) return null
+  return b / (s * 1_000_000)
 }
 
-function transferNodeThroughput(transfers: TransferResult[]): NodeThroughput[] {
-  const byNode = new Map<string, NodeThroughput>()
-  for (const transfer of transfers) {
-    if (!transfer.provider || !transfer.fetcher) continue
-    const upMbps = transfer.up_mbps ?? transfer.mbps ?? 0
-    const downMbps = transfer.down_mbps ?? transfer.mbps ?? 0
-    if (!byNode.has(transfer.provider)) {
-      byNode.set(transfer.provider, { node: transfer.provider, up: 0, down: 0 })
-    }
-    if (!byNode.has(transfer.fetcher)) {
-      byNode.set(transfer.fetcher, { node: transfer.fetcher, up: 0, down: 0 })
-    }
-    byNode.get(transfer.provider)!.up += upMbps
-    byNode.get(transfer.fetcher)!.down += downMbps
-  }
-  return [...byNode.values()].sort((a, b) => a.node.localeCompare(b.node))
-}
-
-function throughputFromTransfersOrIperf(transfers: TransferResult[], iperf: IperfResult[]) {
-  const nodeRows = transferNodeThroughput(transfers)
-  if (nodeRows.length > 0) {
-    return {
-      up: sum(nodeRows.map((n) => n.up)),
-      down: sum(nodeRows.map((n) => n.down)),
-    }
-  }
-  const upRows = transfers.map((row) => row.up_mbps).filter((v): v is number => v != null)
-  const downRows = transfers.map((row) => row.down_mbps ?? row.mbps).filter((v): v is number => v != null)
-  if (upRows.length > 0 || downRows.length > 0) {
-    return { up: avg(upRows), down: avg(downRows) }
-  }
-  const iperfMbps = iperf.map((row) => row.mbps).filter((v): v is number => v != null)
-  const mean = avg(iperfMbps)
-  return { up: mean, down: mean }
-}
-
-function nodeCount(summary: SimSummary | null, transfers: TransferResult[], iperf: IperfResult[]): number | null {
+function nodeCount(summary: SimSummary | null): number | null {
   if (summary?.setup) {
     const routers = summary.setup.routers ?? 0
     const devices = summary.setup.devices ?? 0
@@ -96,15 +66,7 @@ function nodeCount(summary: SimSummary | null, transfers: TransferResult[], iper
   if (summary?.logs?.length) {
     return new Set(summary.logs.map((l) => l.node)).size
   }
-  const inferred = new Set<string>()
-  for (const row of transfers) {
-    if (row.provider) inferred.add(row.provider)
-    if (row.fetcher) inferred.add(row.fetcher)
-  }
-  for (const row of iperf) {
-    inferred.add(row.device)
-  }
-  return inferred.size > 0 ? inferred.size : null
+  return null
 }
 
 function statusForSim(simDir: string, manifest: RunManifest | null, progress: RunProgress | null, summary: SimSummary | null): string {
@@ -266,17 +228,24 @@ export default function App() {
       .map((simDir) => {
         const simSummary = simSummaries[simDir] ?? null
         const row = combined?.runs.find((r) => r.sim_dir === simDir)
-        const transfers = row?.transfers ?? []
-        const iperf = row?.iperf ?? []
-        const throughput = throughputFromTransfersOrIperf(transfers, iperf)
+        const steps = row?.steps ?? []
+        const n = steps.length > 0 ? steps.length : nodeCount(simSummary)
+        const maxDown = steps.reduce<number | null>((acc, s) => {
+          const v = mbS(s.down_bytes, s.duration)
+          return v != null ? (acc == null ? v : Math.max(acc, v)) : acc
+        }, null)
+        const maxUp = steps.reduce<number | null>((acc, s) => {
+          const v = mbS(s.up_bytes, s.duration)
+          return v != null ? (acc == null ? v : Math.max(acc, v)) : acc
+        }, null)
         return {
           sim: simNameForDir(simDir, manifest, progress, simSummary, combined),
           sim_dir: simDir,
           status: statusForSim(simDir, manifest, progress, simSummary),
           error: errorForSim(simDir, manifest, progress, simSummary),
-          nodes: nodeCount(simSummary, transfers, iperf),
-          up: throughput.up,
-          down: throughput.down,
+          n,
+          maxDown,
+          maxUp,
         }
       })
       .sort((a, b) => a.sim.localeCompare(b.sim))
@@ -359,12 +328,12 @@ export default function App() {
                   <table>
                     <thead>
                       <tr>
-                        <th>sim</th>
+                        <th>Sim</th>
                         <th>status</th>
                         <th>error</th>
-                        <th>nodes</th>
-                        <th>up_mbps (iroh/iperf)</th>
-                        <th>down_mbps (iroh/iperf)</th>
+                        <th>N</th>
+                        <th>Max Down (MB/s)</th>
+                        <th>Max Up (MB/s)</th>
                         <th>open</th>
                       </tr>
                     </thead>
@@ -374,9 +343,9 @@ export default function App() {
                           <td>{row.sim}</td>
                           <td>{row.status}</td>
                           <td title={row.error ?? ''}>{row.error ? shortText(row.error, 140) : '—'}</td>
-                          <td>{row.nodes ?? '—'}</td>
-                          <td>{fmt(row.up)}</td>
-                          <td>{fmt(row.down)}</td>
+                          <td>{row.n ?? '—'}</td>
+                          <td>{fmt(row.maxDown)}</td>
+                          <td>{fmt(row.maxUp)}</td>
                           <td>
                             <button className="btn" onClick={() => setSelectedItem(row.sim_dir)}>
                               open

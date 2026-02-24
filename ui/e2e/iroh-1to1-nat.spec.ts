@@ -32,13 +32,13 @@ test('ui shows iperf run results', async ({ page }) => {
   try {
     execFileSync(
       'cargo',
-      ['run', '--', 'run', '--work-dir', workDir, './iroh-integration/netsim/sims/iperf-1to1-public.toml'],
+      ['run', '--bin', 'netsim', '--', 'run', '--work-dir', workDir, './iroh-integration/netsim/sims/iperf-1to1-public.toml'],
       { cwd: REPO_ROOT, stdio: 'inherit' },
     )
 
     serveProc = spawn(
       'cargo',
-      ['run', '--', 'serve', '--work-dir', workDir, '--bind', UI_BIND],
+      ['run', '--bin', 'netsim', '--', 'serve', '--work-dir', workDir, '--bind', UI_BIND],
       { cwd: REPO_ROOT, stdio: 'ignore' },
     )
     await waitForHttp(UI_URL, 30_000)
