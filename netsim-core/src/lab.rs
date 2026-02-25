@@ -488,12 +488,17 @@ impl Lab {
     // ── User-facing API ─────────────────────────────────────────────────
 
     /// Adds a one-way inter-region latency in milliseconds.
+    ///
+    /// If IX-connected routers are already built, the latency rules are applied
+    /// immediately. Otherwise they are deferred until all routers are ready.
     pub fn add_region_latency(&self, from: &str, to: &str, latency_ms: u32) {
         self.inner.lock().unwrap().region_latencies.push((
             from.to_string(),
             to.to_string(),
             latency_ms,
         ));
+        // Best-effort immediate application; no-op if routers aren't built yet.
+        let _ = self.apply_region_latencies();
     }
 
     /// Returns the network namespace name for a device by name.
@@ -1009,6 +1014,12 @@ impl RouterBuilder {
             let mut inner = self.inner.lock().unwrap();
             inner.core.own_netns.push(setup_data.router.ns.clone());
         }
+
+        // Apply any pending region latency rules now that this router is ready.
+        let lab_handle = Lab {
+            inner: Arc::clone(&self.inner),
+        };
+        let _ = lab_handle.apply_region_latencies();
 
         let lab = Arc::clone(&self.inner);
         Ok(Router { id, lab })
