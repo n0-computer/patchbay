@@ -46,7 +46,8 @@ mod userns;
 /// Shared string sanitizers.
 pub mod util;
 
-pub use crate::core::{spawn_command_in_namespace, NodeId, ResourceList};
+pub use crate::core::{spawn_command_in_namespace, NodeId};
+pub use crate::netns::cleanup_registry_prefix;
 pub use crate::userns::{init_userns, init_userns_for_ctor};
 pub use lab::{
     Device, DeviceBuilder, DeviceIface, Impair, IpSupport, Lab, NatMode, NatV6Mode, ObservedAddr,

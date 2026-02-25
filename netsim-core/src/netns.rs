@@ -176,8 +176,8 @@ type BoxFuture = Pin<Box<dyn Future<Output = ()> + 'static>>;
 enum AsyncMsg {
     #[allow(dead_code)]
     Task(Box<dyn FnOnce() -> BoxFuture + Send>),
-    /// Task that receives the namespace's persistent `Netlink` handle.
-    NetlinkTask(Box<dyn FnOnce(Arc<tokio::sync::Mutex<Netlink>>) -> BoxFuture + Send>),
+    /// Task that receives a clone of the namespace's persistent `Netlink` handle.
+    NetlinkTask(Box<dyn FnOnce(Netlink) -> BoxFuture + Send>),
     Shutdown,
 }
 
@@ -187,17 +187,13 @@ struct AsyncWorker {
 }
 
 impl AsyncWorker {
-    fn spawn(
-        ns: &str,
-        own_links: Arc<Mutex<Vec<String>>>,
-        parent_span: &tracing::Span,
-    ) -> Result<Self> {
+    fn spawn(ns: &str, parent_span: &tracing::Span) -> Result<Self> {
         let target = open_netns_fd(ns)
             .with_context(|| format!("open namespace fd for async worker '{ns}'"))?;
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let ns_name = ns.to_string();
         let span = debug_span!(parent: parent_span, "worker", ns = %ns);
-        let join = thread::spawn(move || async_worker_main(ns_name, target, rx, own_links, span));
+        let join = thread::spawn(move || async_worker_main(ns_name, target, rx, span));
         Ok(Self {
             tx,
             join: Some(join),
@@ -214,11 +210,12 @@ impl Drop for AsyncWorker {
     }
 }
 
+static TASK_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 fn async_worker_main(
     _ns: String,
     target: File,
     mut rx: tokio::sync::mpsc::UnboundedReceiver<AsyncMsg>,
-    own_links: Arc<Mutex<Vec<String>>>,
     span: tracing::Span,
 ) {
     let _guard = span.clone().entered();
@@ -240,14 +237,12 @@ fn async_worker_main(
 
     let local = tokio::task::LocalSet::new();
     rt.block_on(local.run_until(async move {
-        // Create one rtnetlink connection per namespace worker and wrap it in a
-        // persistent Netlink.  All netlink tasks share this instance via an Arc.
-        let netlink: Option<Arc<tokio::sync::Mutex<Netlink>>> = match rtnetlink::new_connection() {
+        // Create one rtnetlink connection per namespace worker.  Netlink is Clone
+        // (cheap Arc-based Handle), so each task gets its own clone.
+        let netlink: Option<Netlink> = match rtnetlink::new_connection() {
             Ok((conn, handle, _)) => {
                 tokio::task::spawn_local(conn);
-                Some(Arc::new(tokio::sync::Mutex::new(Netlink::new_tracked(
-                    handle, own_links,
-                ))))
+                Some(Netlink::new(handle))
             }
             Err(err) => {
                 error!(error = %err, "async netns worker: rtnetlink connection failed");
@@ -256,19 +251,26 @@ fn async_worker_main(
         };
 
         while let Some(msg) = rx.recv().await {
+            let id = TASK_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             match msg {
                 AsyncMsg::Task(f) => {
-                    tokio::task::spawn_local(f().instrument(span.clone()));
+                    let s = debug_span!(parent: &span, "task", id);
+                    tokio::task::spawn_local(f().instrument(s));
                 }
                 AsyncMsg::NetlinkTask(f) => {
                     if let Some(nl) = netlink.as_ref() {
-                        tokio::task::spawn_local(f(nl.clone()).instrument(span.clone()));
+                        let s = debug_span!(parent: &span, "nl", id);
+                        tokio::task::spawn_local(f(nl.clone()).instrument(s));
                     }
                     // else: factory dropped → result_tx dropped → TaskHandle resolves Err
                 }
-                AsyncMsg::Shutdown => break,
+                AsyncMsg::Shutdown => {
+                    debug!("worker received shutdown");
+                    break;
+                }
             }
         }
+        debug!("worker loop ended, LocalSet dropping");
     }));
 }
 
@@ -330,17 +332,15 @@ fn sync_worker_main(_ns: String, target: File, rx: mpsc::Receiver<SyncMsg>, span
 
 struct Worker {
     ns: String,
-    own_links: Arc<Mutex<Vec<String>>>,
     parent_span: tracing::Span,
     async_worker: Mutex<Option<AsyncWorker>>,
     sync_worker: Mutex<Option<SyncWorker>>,
 }
 
 impl Worker {
-    fn new(ns: &str, own_links: Arc<Mutex<Vec<String>>>, parent_span: tracing::Span) -> Self {
+    fn new(ns: &str, parent_span: tracing::Span) -> Self {
         Self {
             ns: ns.to_string(),
-            own_links,
             parent_span,
             async_worker: Mutex::new(None),
             sync_worker: Mutex::new(None),
@@ -353,11 +353,7 @@ impl Worker {
             .lock()
             .expect("async worker mutex poisoned");
         if guard.is_none() {
-            *guard = Some(AsyncWorker::spawn(
-                &self.ns,
-                self.own_links.clone(),
-                &self.parent_span,
-            )?);
+            *guard = Some(AsyncWorker::spawn(&self.ns, &self.parent_span)?);
         }
         Ok(guard.as_ref().unwrap().tx.clone())
     }
@@ -381,7 +377,6 @@ impl Worker {
 /// `LocalSet`, and one sync worker thread for short-lived blocking operations.
 /// Workers are started lazily on first use.
 pub struct NetnsManager {
-    own_links: Arc<Mutex<Vec<String>>>,
     parent_span: tracing::Span,
     workers: Mutex<HashMap<String, Worker>>,
 }
@@ -393,19 +388,17 @@ impl Default for NetnsManager {
 }
 
 impl NetnsManager {
-    /// Create an empty namespace manager without link tracking.
+    /// Create an empty namespace manager.
     pub fn new() -> Self {
         Self {
-            own_links: Arc::new(Mutex::new(Vec::new())),
             parent_span: tracing::Span::none(),
             workers: Mutex::new(HashMap::new()),
         }
     }
 
-    /// Create a namespace manager whose workers register created links in `own_links`.
-    pub fn new_with_tracker(own_links: Arc<Mutex<Vec<String>>>, parent_span: tracing::Span) -> Self {
+    /// Create a namespace manager with a parent tracing span.
+    pub fn new_with_span(parent_span: tracing::Span) -> Self {
         Self {
-            own_links,
             parent_span,
             workers: Mutex::new(HashMap::new()),
         }
@@ -416,7 +409,7 @@ impl NetnsManager {
         if !workers.contains_key(ns) {
             workers.insert(
                 ns.to_string(),
-                Worker::new(ns, self.own_links.clone(), self.parent_span.clone()),
+                Worker::new(ns, self.parent_span.clone()),
             );
         }
         workers.get(ns).expect("just inserted").async_tx()
@@ -427,7 +420,7 @@ impl NetnsManager {
         if !workers.contains_key(ns) {
             workers.insert(
                 ns.to_string(),
-                Worker::new(ns, self.own_links.clone(), self.parent_span.clone()),
+                Worker::new(ns, self.parent_span.clone()),
             );
         }
         workers.get(ns).expect("just inserted").sync_tx()
@@ -462,14 +455,13 @@ impl NetnsManager {
         TaskHandle(result_rx)
     }
 
-    /// Enqueue an async task that receives the namespace's persistent `Netlink`.
+    /// Enqueue an async task that receives a clone of the namespace's `Netlink`.
     ///
-    /// The `Arc<tokio::sync::Mutex<Netlink>>` is created once per worker thread;
-    /// tasks lock it to perform netlink operations.
+    /// `Netlink` is `Clone` (cheap Arc-based Handle); each task gets its own clone.
     /// Returns a `TaskHandle` that resolves to the task's output.
     pub fn spawn_netlink_task_in<F, Fut, T>(&self, ns: &str, f: F) -> TaskHandle<T>
     where
-        F: FnOnce(Arc<tokio::sync::Mutex<Netlink>>) -> Fut + Send + 'static,
+        F: FnOnce(Netlink) -> Fut + Send + 'static,
         Fut: Future<Output = T> + 'static,
         T: Send + 'static,
     {

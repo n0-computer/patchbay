@@ -4,44 +4,22 @@ use rtnetlink::{Handle, LinkBridge, LinkUnspec, LinkVeth, RouteMessageBuilder};
 use std::fs::File;
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::os::fd::AsRawFd;
-use std::sync::{Arc, Mutex};
 use tracing::trace;
 
+/// Wraps an rtnetlink `Handle` for namespace-scoped network operations.
+///
+/// `Clone` is cheap — `Handle` is an `Arc`-based channel sender.
+#[derive(Clone)]
 pub(crate) struct Netlink {
     handle: Handle,
-    /// Receives names of links created by this handle; `None` for read-only contexts.
-    tracker: Option<Arc<Mutex<Vec<String>>>>,
 }
 
 impl Netlink {
-    /// Creates a handle that registers every created link into `tracker`.
-    pub(crate) fn new_tracked(handle: Handle, tracker: Arc<Mutex<Vec<String>>>) -> Self {
-        Self {
-            handle,
-            tracker: Some(tracker),
-        }
+    pub(crate) fn new(handle: Handle) -> Self {
+        Self { handle }
     }
 
-    fn register_link(&self, name: &str) {
-        // Only track root-namespace links (lab-* veths and br-* bridges).
-        // In-namespace interfaces (ix, wan, eth0, …) are cleaned up automatically
-        // when their namespace is deleted, so we must not attempt to delete them
-        // from outside.
-        if !(name.starts_with("lab-") || name.starts_with("br-")) {
-            return;
-        }
-        if let Some(t) = &self.tracker {
-            t.lock().unwrap().push(name.to_string());
-        }
-    }
-
-    /// Returns the underlying rtnetlink `Handle` for low-level operations.
-    #[allow(dead_code)]
-    pub(crate) fn handle(&self) -> &Handle {
-        &self.handle
-    }
-
-    pub(crate) async fn link_index(&mut self, ifname: &str) -> Result<u32> {
+    pub(crate) async fn link_index(&self, ifname: &str) -> Result<u32> {
         let mut links = self
             .handle
             .link()
@@ -55,7 +33,7 @@ impl Netlink {
             .ok_or_else(|| anyhow!("link not found: {}", ifname))
     }
 
-    pub(crate) async fn ensure_link_deleted(&mut self, ifname: &str) -> Result<()> {
+    pub(crate) async fn ensure_link_deleted(&self, ifname: &str) -> Result<()> {
         if let Ok(idx) = self.link_index(ifname).await {
             trace!(ifname = %ifname, "delete link");
             self.handle.link().del(idx).execute().await?;
@@ -63,7 +41,7 @@ impl Netlink {
         Ok(())
     }
 
-    pub(crate) async fn add_bridge(&mut self, name: &str) -> Result<()> {
+    pub(crate) async fn add_bridge(&self, name: &str) -> Result<()> {
         trace!(bridge = %name, "add bridge");
         if let Err(err) = self
             .handle
@@ -78,23 +56,21 @@ impl Netlink {
                 return Err(err.into());
             }
         }
-        self.register_link(name);
+
         Ok(())
     }
 
-    pub(crate) async fn add_veth(&mut self, a: &str, b: &str) -> Result<()> {
+    pub(crate) async fn add_veth(&self, a: &str, b: &str) -> Result<()> {
         trace!(a = %a, b = %b, "add veth pair");
         self.handle
             .link()
             .add(LinkVeth::new(a, b).build())
             .execute()
             .await?;
-        self.register_link(a);
-        self.register_link(b);
         Ok(())
     }
 
-    pub(crate) async fn set_link_up(&mut self, ifname: &str) -> Result<()> {
+    pub(crate) async fn set_link_up(&self, ifname: &str) -> Result<()> {
         trace!(ifname = %ifname, "set link up");
         let idx = self.link_index(ifname).await?;
         let msg = LinkUnspec::new_with_index(idx).up().build();
@@ -102,7 +78,7 @@ impl Netlink {
         Ok(())
     }
 
-    pub(crate) async fn set_link_down(&mut self, ifname: &str) -> Result<()> {
+    pub(crate) async fn set_link_down(&self, ifname: &str) -> Result<()> {
         trace!(ifname = %ifname, "set link down");
         let idx = self.link_index(ifname).await?;
         let msg = LinkUnspec::new_with_index(idx).down().build();
@@ -110,7 +86,7 @@ impl Netlink {
         Ok(())
     }
 
-    pub(crate) async fn rename_link(&mut self, from: &str, to: &str) -> Result<()> {
+    pub(crate) async fn rename_link(&self, from: &str, to: &str) -> Result<()> {
         trace!(from = %from, to = %to, "rename link");
         let idx = self.link_index(from).await?;
         let msg = LinkUnspec::new_with_index(idx).name(to.to_string()).build();
@@ -118,7 +94,7 @@ impl Netlink {
         Ok(())
     }
 
-    pub(crate) async fn set_master(&mut self, ifname: &str, master: &str) -> Result<()> {
+    pub(crate) async fn set_master(&self, ifname: &str, master: &str) -> Result<()> {
         trace!(ifname = %ifname, master = %master, "set master");
         let idx = self.link_index(ifname).await?;
         let midx = self.link_index(master).await?;
@@ -127,7 +103,7 @@ impl Netlink {
         Ok(())
     }
 
-    pub(crate) async fn move_link_to_netns(&mut self, ifname: &str, ns_fd: &File) -> Result<()> {
+    pub(crate) async fn move_link_to_netns(&self, ifname: &str, ns_fd: &File) -> Result<()> {
         trace!(ifname = %ifname, "move link to netns");
         let idx = self.link_index(ifname).await?;
         let msg = LinkUnspec::new_with_index(idx)
@@ -137,7 +113,7 @@ impl Netlink {
         Ok(())
     }
 
-    pub(crate) async fn add_addr4(&mut self, ifname: &str, ip: Ipv4Addr, prefix: u8) -> Result<()> {
+    pub(crate) async fn add_addr4(&self, ifname: &str, ip: Ipv4Addr, prefix: u8) -> Result<()> {
         trace!(ifname = %ifname, ip = %ip, prefix, "add addr4");
         let idx = self.link_index(ifname).await?;
         if let Err(err) = self
@@ -155,7 +131,7 @@ impl Netlink {
         Ok(())
     }
 
-    pub(crate) async fn add_default_route_v4(&mut self, via: Ipv4Addr) -> Result<()> {
+    pub(crate) async fn add_default_route_v4(&self, via: Ipv4Addr) -> Result<()> {
         trace!(via = %via, "add default route v4");
         let msg = RouteMessageBuilder::<Ipv4Addr>::new().gateway(via).build();
         if let Err(err) = self.handle.route().add(msg).execute().await {
@@ -168,7 +144,7 @@ impl Netlink {
     }
 
     pub(crate) async fn replace_default_route_v4(
-        &mut self,
+        &self,
         ifname: &str,
         via: Ipv4Addr,
     ) -> Result<()> {
@@ -195,7 +171,7 @@ impl Netlink {
     }
 
     pub(crate) async fn add_route_v4(
-        &mut self,
+        &self,
         dst: Ipv4Addr,
         prefix: u8,
         via: Ipv4Addr,
@@ -216,7 +192,7 @@ impl Netlink {
 
     // ── IPv6 methods ──
 
-    pub(crate) async fn add_addr6(&mut self, ifname: &str, ip: Ipv6Addr, prefix: u8) -> Result<()> {
+    pub(crate) async fn add_addr6(&self, ifname: &str, ip: Ipv6Addr, prefix: u8) -> Result<()> {
         trace!(ifname = %ifname, ip = %ip, prefix, "add addr6");
         let idx = self.link_index(ifname).await?;
         if let Err(err) = self
@@ -234,7 +210,7 @@ impl Netlink {
         Ok(())
     }
 
-    pub(crate) async fn add_default_route_v6(&mut self, via: Ipv6Addr) -> Result<()> {
+    pub(crate) async fn add_default_route_v6(&self, via: Ipv6Addr) -> Result<()> {
         trace!(via = %via, "add default route v6");
         let msg = RouteMessageBuilder::<Ipv6Addr>::new().gateway(via).build();
         if let Err(err) = self.handle.route().add(msg).execute().await {
@@ -248,7 +224,7 @@ impl Netlink {
 
     #[allow(dead_code)]
     pub(crate) async fn replace_default_route_v6(
-        &mut self,
+        &self,
         ifname: &str,
         via: Ipv6Addr,
     ) -> Result<()> {
@@ -275,7 +251,7 @@ impl Netlink {
     }
 
     pub(crate) async fn add_route_v6(
-        &mut self,
+        &self,
         dst: Ipv6Addr,
         prefix: u8,
         via: Ipv6Addr,

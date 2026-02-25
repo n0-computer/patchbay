@@ -1,20 +1,18 @@
 use anyhow::{anyhow, bail, Context, Result};
 use ipnet::{Ipv4Net, Ipv6Net};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fs::File;
 use std::io::Write as IoWrite;
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::process::ExitStatus;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
-use std::sync::{Arc, Mutex, Once, OnceLock};
+use std::sync::Arc;
 use std::thread;
-use tracing::{debug, instrument, warn, Instrument as _};
+use tracing::{debug, instrument, Instrument as _};
 
 use crate::netlink::Netlink;
 use crate::netns;
 use crate::{qdisc, Impair, IpSupport, NatMode, NatV6Mode};
-use nix::libc;
 
 /// Defines static addressing and naming for one lab instance.
 #[derive(Clone, Debug)]
@@ -222,164 +220,22 @@ pub(crate) struct NetworkCore {
     routers: HashMap<NodeId, RouterData>,
     switches: HashMap<NodeId, Switch>,
     nodes_by_name: HashMap<String, NodeId>,
-    /// Links created by this instance; cleaned up on drop.
-    own_links: Arc<Mutex<Vec<String>>>,
     /// Namespaces created by this instance; cleaned up on drop.
     pub(crate) own_netns: Vec<String>,
     /// Whether root namespace and IX bridge have been set up.
     pub(crate) root_ns_initialized: bool,
 }
 
-// ─────────────────────────────────────────────
-// Global resource tracking / cleanup
-// ─────────────────────────────────────────────
-
-/// Process-wide prefix registry — used only as a safety net at process exit and on panic.
-/// Per-instance resource tracking (links, namespaces) lives in `NetworkCore`.
-#[derive(Default)]
-struct ResourceState {
-    prefixes: HashSet<String>,
-}
-
-/// Tracks lab prefixes for best-effort cleanup on panic/exit.
-pub struct ResourceList {
-    state: Mutex<ResourceState>,
-    cleanup_enabled: AtomicBool,
-}
-
-impl Default for ResourceList {
-    fn default() -> Self {
-        Self {
-            state: Mutex::new(ResourceState::default()),
-            cleanup_enabled: AtomicBool::new(true),
-        }
-    }
-}
-
-static RESOURCES: OnceLock<ResourceList> = OnceLock::new();
-static INIT_HOOKS: Once = Once::new();
-
-impl ResourceList {
-    /// Returns the global process resource tracker (singleton).
-    pub fn global() -> &'static ResourceList {
-        RESOURCES.get_or_init(|| {
-            INIT_HOOKS.call_once(|| {
-                unsafe {
-                    libc::atexit(cleanup_at_exit);
-                }
-                let prev = std::panic::take_hook();
-                std::panic::set_hook(Box::new(move |info| {
-                    ResourceList::global().cleanup_registered_prefixes();
-                    prev(info);
-                }));
-            });
-            ResourceList::default()
-        })
-    }
-}
-
-extern "C" fn cleanup_at_exit() {
-    ResourceList::global().cleanup_registered_prefixes();
-}
-
-impl ResourceList {
-    /// Enables or disables automatic cleanup in panic/atexit paths.
-    pub fn set_cleanup_enabled(&self, enabled: bool) {
-        self.cleanup_enabled.store(enabled, Ordering::Relaxed);
-    }
-
-    /// Registers a resource-name prefix for broad cleanup at process exit or on panic.
-    pub fn register_prefix(&self, prefix: &str) {
-        let mut st = self.state.lock().unwrap();
-        st.prefixes.insert(prefix.to_string());
-    }
-
-    /// Removes links and namespaces that match `prefix`.
-    pub fn cleanup_by_prefix(&self, prefix: &str) {
-        debug!("netsim cleanup: scanning prefix '{prefix}'");
-        cleanup_links_with_prefix_ip(prefix);
-        debug!("netsim cleanup: drop fd-registry entries with prefix '{prefix}'");
-        netns::cleanup_registry_prefix(prefix);
-    }
-
-    /// Safety-net cleanup: removes all resources matching any registered prefix.
-    /// Called at process exit and on panic. Normal cleanup goes through `NetworkCore::drop`.
-    pub fn cleanup_registered_prefixes(&self) {
-        if !self.cleanup_enabled.load(Ordering::Relaxed) {
-            debug!("netsim cleanup: skipped (disabled)");
-            return;
-        }
-        let prefixes = {
-            let st = self.state.lock().unwrap();
-            st.prefixes.clone()
-        };
-        debug!(
-            "netsim cleanup: registered prefixes: {}",
-            prefixes
-                .iter()
-                .map(String::as_str)
-                .collect::<Vec<_>>()
-                .join(", ")
-        );
-        for prefix in prefixes {
-            self.cleanup_by_prefix(&prefix);
-        }
-    }
-}
-
-fn cleanup_links_with_prefix_ip(prefix: &str) {
-    let output = std::process::Command::new("ip")
-        .args(["-o", "link", "show"])
-        .output();
-    if let Ok(out) = output {
-        if let Ok(text) = String::from_utf8(out.stdout) {
-            for line in text.lines() {
-                let mut parts = line.split_whitespace();
-                let _ = parts.next();
-                if let Some(name) = parts.next() {
-                    let name = name.trim_end_matches(':');
-                    let ifname = name.split('@').next().unwrap_or(name);
-                    if ifname.starts_with(prefix) {
-                        delete_link_logged(ifname);
-                    }
-                }
-            }
-        }
-    }
-}
-
-fn delete_link_logged(name: &str) {
-    debug!("netsim cleanup: ip link del {name}");
-    let out = std::process::Command::new("ip")
-        .args(["link", "del", name])
-        .output();
-    if let Ok(out) = out {
-        if !out.status.success() {
-            let msg = String::from_utf8_lossy(&out.stderr).trim().to_string();
-            if msg.contains("Cannot find device") {
-                debug!("netsim cleanup: link '{name}' already gone");
-            } else {
-                warn!("netsim cleanup: failed ip link del {name}: {msg}");
-            }
-        }
-    }
-}
-
 impl Drop for NetworkCore {
     fn drop(&mut self) {
-        let links: Vec<String> = std::mem::take(&mut *self.own_links.lock().unwrap());
         let netns: Vec<String> = std::mem::take(&mut self.own_netns);
         debug!(
-            "netsim cleanup: NetworkCore drop: {} links, {} namespaces",
-            links.len(),
+            "netsim cleanup: NetworkCore drop: {} namespaces",
             netns.len()
         );
         for ns in netns {
             debug!("netsim cleanup: drop netns {ns}");
             netns::cleanup_netns(&ns);
-        }
-        for link in links {
-            delete_link_logged(&link);
         }
     }
 }
@@ -387,12 +243,8 @@ impl Drop for NetworkCore {
 impl NetworkCore {
     /// Constructs a new topology core and pre-creates the IX switch.
     pub fn new(cfg: CoreConfig) -> Self {
-        let own_links = Arc::new(Mutex::new(Vec::new()));
         let mut core = Self {
-            netns: Arc::new(netns::NetnsManager::new_with_tracker(
-                own_links.clone(),
-                cfg.span.clone(),
-            )),
+            netns: Arc::new(netns::NetnsManager::new_with_span(cfg.span.clone())),
             cfg,
             next_id: 1,
             next_private_subnet: 1,
@@ -406,7 +258,6 @@ impl NetworkCore {
             routers: HashMap::new(),
             switches: HashMap::new(),
             nodes_by_name: HashMap::new(),
-            own_links,
             own_netns: Vec::new(),
             root_ns_initialized: false,
         };
@@ -920,16 +771,12 @@ impl NetworkCore {
 /// Helper: run a netlink operation in a namespace via the shared NetnsManager.
 pub(crate) async fn nl_run<F>(netns: &Arc<netns::NetnsManager>, ns: &str, f: F) -> Result<()>
 where
-    F: AsyncFnOnce(&mut Netlink) -> Result<()> + Send + 'static,
+    F: AsyncFnOnce(&Netlink) -> Result<()> + Send + 'static,
 {
     let span = tracing::Span::current();
     netns
-        .spawn_netlink_task_in(ns, move |nl_arc| {
-            async move {
-                let mut nl = nl_arc.lock().await;
-                f(&mut *nl).await
-            }
-            .instrument(span)
+        .spawn_netlink_task_in(ns, move |nl| {
+            async move { f(&nl).await }.instrument(span)
         })
         .await
         .map_err(|_| anyhow!("netns task cancelled"))?

@@ -17,7 +17,7 @@ use std::{
 };
 
 use crate::core::{
-    apply_impair_in, apply_nat, apply_nat_v6, cleanup_netns, run_closure_in_namespace, ResourceList,
+    apply_impair_in, apply_nat, apply_nat_v6, cleanup_netns, run_closure_in_namespace,
     run_nft_in, setup_device_async, setup_root_ns_async, setup_router_async,
     spawn_command_in_namespace, CoreConfig, DownstreamPool, IfaceBuild, NetworkCore, NodeId,
     RouterSetupData, TaskHandle,
@@ -200,9 +200,6 @@ impl Lab {
         let lab_span = debug_span!("lab", id = lab_seq);
         let _lab_enter = lab_span.enter();
         debug!(prefix = %prefix, "lab: created");
-        ResourceList::global().register_prefix(&prefix);
-        ResourceList::global().register_prefix(&format!("br-{}-", bridge_tag));
-        ResourceList::global().register_prefix(&format!("lab{lab_seq}-"));
         let core = NetworkCore::new(CoreConfig {
             lab_id: lab_seq,
             prefix: prefix.clone(),
@@ -632,14 +629,11 @@ impl Lab {
         self.inner.lock().unwrap().core.ix_gw()
     }
 
-    /// Safety-net cleanup via prefix scan (normal cleanup happens in `NetworkCore::drop`).
+    /// Safety-net cleanup: drops fd-registry entries for this lab's prefix.
+    /// Normal cleanup happens in `NetworkCore::drop`.
     pub fn cleanup(&self) {
-        ResourceList::global().cleanup_registered_prefixes();
-    }
-
-    /// Removes any resources whose names match the lab prefix.
-    pub fn cleanup_everything() {
-        ResourceList::global().cleanup_registered_prefixes();
+        let prefix = self.prefix();
+        crate::netns::cleanup_registry_prefix(&prefix);
     }
 
     // ── Dynamic operations ────────────────────────────────────────────────
@@ -1458,8 +1452,7 @@ impl Device {
         };
         let ifname = ifname.to_string();
         netns
-            .spawn_netlink_task_in(&ns, move |nl_arc| async move {
-                let mut nl = nl_arc.lock().await;
+            .spawn_netlink_task_in(&ns, move |nl| async move {
                 nl.set_link_down(&ifname).await
             })
             .await
@@ -1491,8 +1484,7 @@ impl Device {
         netns
             .spawn_netlink_task_in(&ns, {
                 let ifname_owned = ifname_owned.clone();
-                move |nl_arc| async move {
-                    let mut nl = nl_arc.lock().await;
+                move |nl| async move {
                     nl.set_link_up(&ifname_owned).await
                 }
             })
@@ -1506,8 +1498,7 @@ impl Device {
                 .core
                 .router_downlink_gw_for_switch(uplink)?;
             netns
-                .spawn_netlink_task_in(&ns, move |nl_arc| async move {
-                    let mut nl = nl_arc.lock().await;
+                .spawn_netlink_task_in(&ns, move |nl| async move {
                     nl.replace_default_route_v4(&ifname_owned, gw_ip).await
                 })
                 .await
@@ -1542,8 +1533,7 @@ impl Device {
             .router_downlink_gw_for_switch(uplink)?;
         let to_owned = to.to_string();
         netns
-            .spawn_netlink_task_in(&ns, move |nl_arc| async move {
-                let mut nl = nl_arc.lock().await;
+            .spawn_netlink_task_in(&ns, move |nl| async move {
                 nl.replace_default_route_v4(&to_owned, gw_ip).await
             })
             .await
