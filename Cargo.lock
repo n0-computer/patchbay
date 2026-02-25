@@ -1110,7 +1110,6 @@ dependencies = [
  "nix",
  "rtnetlink",
  "serde",
- "serial_test",
  "strum",
  "tokio",
  "toml",

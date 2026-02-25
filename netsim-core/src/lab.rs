@@ -881,7 +881,6 @@ mod test_init {
 mod tests {
     use anyhow::{anyhow, bail, Context, Result};
     use n0_tracing_test::traced_test;
-    use serial_test::serial;
     use std::io::{Read, Write};
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
     use std::thread;
@@ -1474,7 +1473,6 @@ mod tests {
     // ── Builder-API NAT tests ────────────────────────────────────────────
 
     #[tokio::test(flavor = "current_thread")]
-    #[serial]
     #[traced_test]
     async fn smoke_debug_netns_exit_trace() -> Result<()> {
         check_caps()?;
@@ -1519,7 +1517,6 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    #[serial]
     #[traced_test]
     async fn nat_dest_independent_keeps_port() -> Result<()> {
         check_caps()?;
@@ -1555,7 +1552,6 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    #[serial]
     #[traced_test]
     async fn nat_dest_dependent_changes_port() -> Result<()> {
         check_caps()?;
@@ -1591,7 +1587,6 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    #[serial]
     #[traced_test]
     async fn cgnat_hides_behind_isp_public_ip() -> Result<()> {
         check_caps()?;
@@ -1621,7 +1616,6 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    #[serial]
     #[traced_test]
     async fn iroh_nat_like_nodes_report_public_203_mapped_addrs() -> Result<()> {
         check_caps()?;
@@ -1701,7 +1695,6 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    #[serial]
     async fn load_from_toml() -> Result<()> {
         check_caps()?;
         let toml = r#"
@@ -1730,7 +1723,6 @@ gateway = "lan1"
     }
 
     #[tokio::test(flavor = "current_thread")]
-    #[serial]
     #[traced_test]
     async fn smoke_ping_gateway() -> Result<()> {
         check_caps()?;
@@ -1748,7 +1740,6 @@ gateway = "lan1"
     }
 
     #[tokio::test(flavor = "current_thread")]
-    #[serial]
     #[traced_test]
     async fn smoke_udp_dc_roundtrip() -> Result<()> {
         check_caps()?;
@@ -1773,7 +1764,6 @@ gateway = "lan1"
     }
 
     #[tokio::test(flavor = "current_thread")]
-    #[serial]
     #[traced_test]
     async fn smoke_tcp_dc_roundtrip() -> Result<()> {
         check_caps()?;
@@ -1798,7 +1788,6 @@ gateway = "lan1"
     }
 
     #[tokio::test(flavor = "current_thread")]
-    #[serial]
     #[traced_test]
     async fn smoke_ping_home_to_isp() -> Result<()> {
         check_caps()?;
@@ -1814,7 +1803,6 @@ gateway = "lan1"
     }
 
     #[tokio::test(flavor = "current_thread")]
-    #[serial]
     #[traced_test]
     async fn smoke_ping_isp_to_ix_and_dc() -> Result<()> {
         check_caps()?;
@@ -1831,7 +1819,6 @@ gateway = "lan1"
     }
 
     #[tokio::test(flavor = "current_thread")]
-    #[serial]
     #[traced_test]
     async fn smoke_nat_homes_can_ping_public_relay_device() -> Result<()> {
         check_caps()?;
@@ -1865,7 +1852,6 @@ gateway = "lan1"
     }
 
     #[tokio::test(flavor = "current_thread")]
-    #[serial]
     #[traced_test]
     async fn nat_matrix_public_connectivity_and_reflexive_ip() -> Result<()> {
         check_caps()?;
@@ -1901,7 +1887,6 @@ gateway = "lan1"
     }
 
     #[tokio::test(flavor = "current_thread")]
-    #[serial]
     #[traced_test]
     async fn nat_mapping_port_behavior_by_mode_and_wiring() -> Result<()> {
         check_caps()?;
@@ -1959,7 +1944,6 @@ gateway = "lan1"
     }
 
     #[tokio::test(flavor = "current_thread")]
-    #[serial]
     #[traced_test]
     async fn nat_private_reachability_isolated_public_reachable() -> Result<()> {
         check_caps()?;
@@ -2009,7 +1993,6 @@ gateway = "lan1"
     }
 
     #[tokio::test(flavor = "current_thread")]
-    #[serial]
     #[traced_test]
     async fn smoke_device_to_device_same_lan() -> Result<()> {
         check_caps()?;
@@ -2027,7 +2010,6 @@ gateway = "lan1"
     }
 
     #[tokio::test(flavor = "current_thread")]
-    #[serial]
     #[traced_test]
     async fn latency_directional_between_regions() -> Result<()> {
         check_caps()?;
@@ -2081,7 +2063,6 @@ gateway = "lan1"
     }
 
     #[tokio::test(flavor = "current_thread")]
-    #[serial]
     #[traced_test]
     async fn latency_inter_region_dc_to_dc() -> Result<()> {
         check_caps()?;
@@ -2110,7 +2091,6 @@ gateway = "lan1"
     }
 
     #[tokio::test(flavor = "current_thread")]
-    #[serial]
     #[traced_test]
     async fn latency_device_impair_adds_delay() -> Result<()> {
         check_caps()?;
@@ -2147,7 +2127,6 @@ gateway = "lan1"
     }
 
     #[tokio::test(flavor = "current_thread")]
-    #[serial]
     #[traced_test]
     async fn latency_manual_impair_applies() -> Result<()> {
         check_caps()?;
@@ -2186,7 +2165,6 @@ gateway = "lan1"
     }
 
     #[tokio::test(flavor = "current_thread")]
-    #[serial]
     #[traced_test]
     async fn isp_home_wan_pool_selection() -> Result<()> {
         check_caps()?;
@@ -2223,7 +2201,6 @@ gateway = "lan1"
     }
 
     #[tokio::test(flavor = "current_thread")]
-    #[serial]
     #[traced_test]
     async fn dynamic_set_impair_changes_rtt() -> Result<()> {
         check_caps()?;
@@ -2258,7 +2235,6 @@ gateway = "lan1"
     }
 
     #[tokio::test(flavor = "current_thread")]
-    #[serial]
     #[traced_test]
     async fn dynamic_link_down_up_connectivity() -> Result<()> {
         check_caps()?;
@@ -2282,7 +2258,6 @@ gateway = "lan1"
     }
 
     #[tokio::test(flavor = "current_thread")]
-    #[serial]
     #[traced_test]
     async fn dynamic_switch_route_changes_path() -> Result<()> {
         check_caps()?;
