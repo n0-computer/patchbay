@@ -15,6 +15,8 @@ use std::thread;
 use tokio::sync::oneshot;
 use tracing::{debug, error};
 
+use crate::netlink::Netlink;
+
 // ─────────────────────────────────────────────
 // FD registry
 // ─────────────────────────────────────────────
@@ -173,7 +175,10 @@ impl<T> Future for TaskHandle<T> {
 type BoxFuture = Pin<Box<dyn Future<Output = ()> + 'static>>;
 
 enum AsyncMsg {
+    #[allow(dead_code)]
     Task(Box<dyn FnOnce() -> BoxFuture + Send>),
+    /// Task that receives the namespace's persistent `Netlink` handle.
+    NetlinkTask(Box<dyn FnOnce(Arc<tokio::sync::Mutex<Netlink>>) -> BoxFuture + Send>),
     Shutdown,
 }
 
@@ -183,12 +188,12 @@ struct AsyncWorker {
 }
 
 impl AsyncWorker {
-    fn spawn(ns: &str) -> Result<Self> {
+    fn spawn(ns: &str, own_links: Arc<Mutex<Vec<String>>>) -> Result<Self> {
         let target = open_netns_fd(ns)
             .with_context(|| format!("open namespace fd for async worker '{ns}'"))?;
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let ns_name = ns.to_string();
-        let join = thread::spawn(move || async_worker_main(ns_name, target, rx));
+        let join = thread::spawn(move || async_worker_main(ns_name, target, rx, own_links));
         Ok(Self {
             tx,
             join: Some(join),
@@ -209,6 +214,7 @@ fn async_worker_main(
     ns: String,
     target: File,
     mut rx: tokio::sync::mpsc::UnboundedReceiver<AsyncMsg>,
+    own_links: Arc<Mutex<Vec<String>>>,
 ) {
     if let Err(err) = setns(&target, CloneFlags::CLONE_NEWNET) {
         error!(ns = %ns, error = %err, "async netns worker: setns failed");
@@ -228,10 +234,32 @@ fn async_worker_main(
 
     let local = tokio::task::LocalSet::new();
     rt.block_on(local.run_until(async move {
+        // Create one rtnetlink connection per namespace worker and wrap it in a
+        // persistent Netlink.  All netlink tasks share this instance via an Arc.
+        let netlink: Option<Arc<tokio::sync::Mutex<Netlink>>> =
+            match rtnetlink::new_connection() {
+                Ok((conn, handle, _)) => {
+                    tokio::task::spawn_local(conn);
+                    Some(Arc::new(tokio::sync::Mutex::new(
+                        Netlink::new_tracked(handle, own_links),
+                    )))
+                }
+                Err(err) => {
+                    error!(ns = %ns, error = %err, "async netns worker: rtnetlink connection failed");
+                    None
+                }
+            };
+
         while let Some(msg) = rx.recv().await {
             match msg {
                 AsyncMsg::Task(f) => {
                     tokio::task::spawn_local(f());
+                }
+                AsyncMsg::NetlinkTask(f) => {
+                    if let Some(nl) = netlink.as_ref() {
+                        tokio::task::spawn_local(f(nl.clone()));
+                    }
+                    // else: factory dropped → result_tx dropped → TaskHandle resolves Err
                 }
                 AsyncMsg::Shutdown => break,
             }
@@ -295,14 +323,16 @@ fn sync_worker_main(ns: String, target: File, rx: mpsc::Receiver<SyncMsg>) {
 
 struct Worker {
     ns: String,
+    own_links: Arc<Mutex<Vec<String>>>,
     async_worker: Mutex<Option<AsyncWorker>>,
     sync_worker: Mutex<Option<SyncWorker>>,
 }
 
 impl Worker {
-    fn new(ns: &str) -> Self {
+    fn new(ns: &str, own_links: Arc<Mutex<Vec<String>>>) -> Self {
         Self {
             ns: ns.to_string(),
+            own_links,
             async_worker: Mutex::new(None),
             sync_worker: Mutex::new(None),
         }
@@ -314,7 +344,7 @@ impl Worker {
             .lock()
             .expect("async worker mutex poisoned");
         if guard.is_none() {
-            *guard = Some(AsyncWorker::spawn(&self.ns)?);
+            *guard = Some(AsyncWorker::spawn(&self.ns, self.own_links.clone())?);
         }
         Ok(guard.as_ref().unwrap().tx.clone())
     }
@@ -337,21 +367,38 @@ impl Worker {
 /// Each namespace gets one long-lived async worker thread with a persistent
 /// `LocalSet`, and one sync worker thread for short-lived blocking operations.
 /// Workers are started lazily on first use.
-#[derive(Default)]
 pub struct NetnsManager {
+    own_links: Arc<Mutex<Vec<String>>>,
     workers: Mutex<HashMap<String, Worker>>,
 }
 
+impl Default for NetnsManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl NetnsManager {
-    /// Create an empty namespace manager.
+    /// Create an empty namespace manager without link tracking.
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            own_links: Arc::new(Mutex::new(Vec::new())),
+            workers: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Create a namespace manager whose workers register created links in `own_links`.
+    pub fn new_with_tracker(own_links: Arc<Mutex<Vec<String>>>) -> Self {
+        Self {
+            own_links,
+            workers: Mutex::new(HashMap::new()),
+        }
     }
 
     fn async_tx_for(&self, ns: &str) -> Result<tokio::sync::mpsc::UnboundedSender<AsyncMsg>> {
         let mut workers = self.workers.lock().expect("netns worker map poisoned");
         if !workers.contains_key(ns) {
-            workers.insert(ns.to_string(), Worker::new(ns));
+            workers.insert(ns.to_string(), Worker::new(ns, self.own_links.clone()));
         }
         workers.get(ns).expect("just inserted").async_tx()
     }
@@ -359,7 +406,7 @@ impl NetnsManager {
     fn sync_tx_for(&self, ns: &str) -> Result<mpsc::SyncSender<SyncMsg>> {
         let mut workers = self.workers.lock().expect("netns worker map poisoned");
         if !workers.contains_key(ns) {
-            workers.insert(ns.to_string(), Worker::new(ns));
+            workers.insert(ns.to_string(), Worker::new(ns, self.own_links.clone()));
         }
         workers.get(ns).expect("just inserted").sync_tx()
     }
@@ -368,6 +415,7 @@ impl NetnsManager {
     ///
     /// Returns a `TaskHandle` (a `Future`) that resolves to the task's output.
     /// This call is sync and non-blocking — safe from any async or sync context.
+    #[allow(dead_code)]
     pub fn spawn_task_in<F, Fut, T>(&self, ns: &str, f: F) -> TaskHandle<T>
     where
         F: FnOnce() -> Fut + Send + 'static,
@@ -392,7 +440,36 @@ impl NetnsManager {
         TaskHandle(result_rx)
     }
 
+    /// Enqueue an async task that receives the namespace's persistent `Netlink`.
+    ///
+    /// The `Arc<tokio::sync::Mutex<Netlink>>` is created once per worker thread;
+    /// tasks lock it to perform netlink operations.
+    /// Returns a `TaskHandle` that resolves to the task's output.
+    pub fn spawn_netlink_task_in<F, Fut, T>(&self, ns: &str, f: F) -> TaskHandle<T>
+    where
+        F: FnOnce(Arc<tokio::sync::Mutex<Netlink>>) -> Fut + Send + 'static,
+        Fut: Future<Output = T> + 'static,
+        T: Send + 'static,
+    {
+        let (result_tx, result_rx) = oneshot::channel();
+        match self.async_tx_for(ns) {
+            Ok(tx) => {
+                let _ = tx.send(AsyncMsg::NetlinkTask(Box::new(move |nl| {
+                    Box::pin(async move {
+                        let result = f(nl).await;
+                        let _ = result_tx.send(result);
+                    })
+                })));
+            }
+            Err(e) => {
+                debug!("spawn_netlink_task_in ns={ns}: {e}");
+            }
+        }
+        TaskHandle(result_rx)
+    }
+
     /// Spawn a persistent OS thread inside `ns`. Non-blocking.
+    #[allow(dead_code)]
     pub fn spawn_thread_in<F>(&self, ns: &str, f: F) -> thread::JoinHandle<()>
     where
         F: FnOnce() + Send + 'static,
@@ -435,6 +512,7 @@ impl NetnsManager {
 
 /// Enqueue an async task in `ns` on the global namespace manager.
 /// Returns a `TaskHandle` that resolves to the task's output.
+#[allow(dead_code)]
 pub fn spawn_task_in_netns<F, Fut, T>(ns: &str, f: F) -> TaskHandle<T>
 where
     F: FnOnce() -> Fut + Send + 'static,

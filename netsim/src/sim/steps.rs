@@ -60,7 +60,7 @@ pub(crate) fn step_device(step: &Step) -> Option<&str> {
 
 const DEFAULT_CAPTURE_TIMEOUT: Duration = Duration::from_secs(300);
 
-pub(crate) fn execute_step(state: &mut SimState, step: &Step) -> Result<()> {
+pub(crate) async fn execute_step(state: &mut SimState, step: &Step) -> Result<()> {
     tracing::info!(
         action = %step_action(step),
         id = ?step_id(step),
@@ -366,15 +366,15 @@ pub(crate) fn execute_step(state: &mut SimState, step: &Step) -> Result<()> {
 
         // ── switch-route / set-default-route ──────────────────────────────
         Step::SwitchRoute { device, to } | Step::SetDefaultRoute { device, to } => {
-            state.lab.switch_route(device, to)?;
+            state.lab.switch_route(device, to).await?;
         }
 
         // ── link-down / link-up ───────────────────────────────────────────
         Step::LinkDown { device, interface } => {
-            state.lab.link_down(device, interface)?;
+            state.lab.link_down(device, interface).await?;
         }
         Step::LinkUp { device, interface } => {
-            state.lab.link_up(device, interface)?;
+            state.lab.link_up(device, interface).await?;
         }
 
         // ── assert ────────────────────────────────────────────────────────

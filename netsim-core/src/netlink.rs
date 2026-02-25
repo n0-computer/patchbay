@@ -14,11 +14,6 @@ pub(crate) struct Netlink {
 }
 
 impl Netlink {
-    /// Creates a handle without resource tracking (for read-only / mutate-only operations).
-    pub(crate) fn new(handle: Handle) -> Self {
-        Self { handle, tracker: None }
-    }
-
     /// Creates a handle that registers every created link into `tracker`.
     pub(crate) fn new_tracked(handle: Handle, tracker: Arc<Mutex<Vec<String>>>) -> Self {
         Self { handle, tracker: Some(tracker) }
@@ -35,6 +30,12 @@ impl Netlink {
         if let Some(t) = &self.tracker {
             t.lock().unwrap().push(name.to_string());
         }
+    }
+
+    /// Returns the underlying rtnetlink `Handle` for low-level operations.
+    #[allow(dead_code)]
+    pub(crate) fn handle(&self) -> &Handle {
+        &self.handle
     }
 
     pub(crate) async fn link_index(&mut self, ifname: &str) -> Result<u32> {

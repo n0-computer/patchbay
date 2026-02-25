@@ -755,7 +755,7 @@ async fn execute_single_sim(
 
     // ── Execute steps ────────────────────────────────────────────────────
     for (idx, step) in steps.iter().enumerate() {
-        if let Err(err) = execute_step(&mut state, step) {
+        if let Err(err) = execute_step(&mut state, step).await {
             let step_info = StepFailureInfo {
                 index: idx,
                 action: step_action(step).to_string(),

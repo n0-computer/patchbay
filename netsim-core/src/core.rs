@@ -1,6 +1,5 @@
 use anyhow::{anyhow, bail, Context, Result};
 use ipnet::Ipv4Net;
-use rtnetlink::new_connection;
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::Write as IoWrite;
@@ -352,9 +351,10 @@ impl Drop for NetworkCore {
 impl NetworkCore {
     /// Constructs a new topology core and pre-creates the IX switch.
     pub fn new(cfg: CoreConfig) -> Self {
+        let own_links = Arc::new(Mutex::new(Vec::new()));
         let mut core = Self {
             cfg,
-            netns: netns::NetnsManager::new(),
+            netns: netns::NetnsManager::new_with_tracker(own_links.clone()),
             next_id: 1,
             next_private_subnet: 1,
             next_public_subnet: 1,
@@ -367,7 +367,7 @@ impl NetworkCore {
             routers: HashMap::new(),
             switches: HashMap::new(),
             nodes_by_name: HashMap::new(),
-            own_links: Arc::new(Mutex::new(Vec::new())),
+            own_links,
             own_netns: Vec::new(),
         };
         let ix_sw = core.add_switch("ix", Some(core.cfg.ix_cidr), Some(core.cfg.ix_gw));
@@ -387,21 +387,17 @@ impl NetworkCore {
         format!("{}-{}", self.cfg.prefix, id)
     }
 
-    async fn with_netns<F>(&self, ns: &str, f: F) -> Result<()>
+    async fn netlink<F>(&self, ns: &str, f: F) -> Result<()>
     where
         F: AsyncFnOnce(&mut Netlink) -> Result<()> + Send + 'static,
     {
-        let own_links = self.own_links.clone();
         self.netns
-            .spawn_task_in(&ns, move || async move {
-                let (conn, handle, _) =
-                    new_connection().context("rtnetlink new_connection in netns")?;
-                tokio::spawn(conn);
-                let mut nl = Netlink::new_tracked(handle, own_links);
-                f(&mut nl).await
+            .spawn_netlink_task_in(ns, move |nl_arc| async move {
+                let mut nl = nl_arc.lock().await;
+                f(&mut *nl).await
             })
             .await
-            .map_err(|_| anyhow!("netns async task cancelled"))?
+            .map_err(|_| anyhow!("netns task cancelled"))?
     }
 
     /// Returns the IX gateway address.
@@ -649,58 +645,33 @@ impl NetworkCore {
     }
 
     /// Sets interface admin state in `ns` using rtnetlink.
-    pub fn set_link_state_in_namespace(&self, ns: &str, ifname: &str, up: bool) -> Result<()> {
-        let ns_name = ns.to_string();
+    pub async fn set_link_state_in_namespace(
+        &self,
+        ns: &str,
+        ifname: &str,
+        up: bool,
+    ) -> Result<()> {
         let ifname = ifname.to_string();
-        std::thread::scope(|scope| {
-            let join = scope.spawn(|| -> Result<()> {
-                let rt = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .context("create tokio runtime for link state change")?;
-                rt.block_on(self.netns.spawn_task_in(&ns_name, move || async move {
-                    let (conn, handle, _) = new_connection().context("rtnetlink new_connection")?;
-                    tokio::spawn(conn);
-                    let mut nl = Netlink::new(handle);
-                    if up {
-                        nl.set_link_up(&ifname).await
-                    } else {
-                        nl.set_link_down(&ifname).await
-                    }
-                }))
-                .map_err(|_| anyhow!("netns async task cancelled"))?
-            });
-            join.join()
-                .map_err(|_| anyhow!("link state thread panicked"))?
+        self.netlink(ns, async move |nl| {
+            if up {
+                nl.set_link_up(&ifname).await
+            } else {
+                nl.set_link_down(&ifname).await
+            }
         })
+        .await
     }
 
     /// Replaces default route in `ns` with `default via <via> dev <ifname>`.
-    pub fn replace_default_route_in_namespace(
+    pub async fn replace_default_route_in_namespace(
         &self,
         ns: &str,
         ifname: &str,
         via: Ipv4Addr,
     ) -> Result<()> {
-        let ns_name = ns.to_string();
         let ifname = ifname.to_string();
-        std::thread::scope(|scope| {
-            let join = scope.spawn(|| -> Result<()> {
-                let rt = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .context("create tokio runtime for route switch")?;
-                rt.block_on(self.netns.spawn_task_in(&ns_name, move || async move {
-                    let (conn, handle, _) = new_connection().context("rtnetlink new_connection")?;
-                    tokio::spawn(conn);
-                    let mut nl = Netlink::new(handle);
-                    nl.replace_default_route_v4(&ifname, via).await
-                }))
-                .map_err(|_| anyhow!("netns async task cancelled"))?
-            });
-            join.join()
-                .map_err(|_| anyhow!("route switch thread panicked"))?
-        })
+        self.netlink(ns, async move |nl| nl.replace_default_route_v4(&ifname, via).await)
+            .await
     }
 
     /// Adds a switch node and returns its identifier.
@@ -829,7 +800,7 @@ impl NetworkCore {
         let ix_br = self.cfg.ix_br.clone();
         let ix_ip = self.cfg.ix_gw;
         let ix_prefix = self.cfg.ix_cidr.prefix_len();
-        self.with_netns(&root_ns, {
+        self.netlink(&root_ns, {
             let root_ns = root_ns.clone();
             let ix_br = ix_br.clone();
             async move |h| {
@@ -854,7 +825,7 @@ impl NetworkCore {
             let ns_if = "ix".to_string();
             let ix_br = self.cfg.ix_br.clone();
             let ix_gw = self.cfg.ix_gw;
-            self.with_netns(&root_ns, {
+            self.netlink(&root_ns, {
                 let root_if = root_if.clone();
                 let ns_if = ns_if.clone();
                 let ix_br = ix_br.clone();
@@ -874,7 +845,7 @@ impl NetworkCore {
 
             let ix_ip = router.upstream_ip.unwrap();
             let ix_prefix = self.cfg.ix_cidr.prefix_len();
-            self.with_netns(&router.ns, {
+            self.netlink(&router.ns, {
                 let ns_if = ns_if.clone();
                 async move |h| {
                     h.set_link_up("lo").await?;
@@ -956,7 +927,7 @@ impl NetworkCore {
                 let br = sw.bridge.clone().unwrap_or_else(|| "br-lan".to_string());
                 let lan_ip = sw.gw.unwrap();
                 let lan_prefix = sw.cidr.unwrap().prefix_len();
-                self.with_netns(&router.ns, async move |h| {
+                self.netlink(&router.ns, async move |h| {
                     h.set_link_up("lo").await?;
                     h.ensure_link_deleted(&br).await.ok();
                     h.add_bridge(&br).await?;
@@ -989,7 +960,7 @@ impl NetworkCore {
 
             let root_a = self.root_if("a", id.0);
             let root_b = self.root_if("b", id.0);
-            self.with_netns(&root_ns, {
+            self.netlink(&root_ns, {
                 let root_a = root_a.clone();
                 let root_b = root_b.clone();
                 let owner_ns = owner_ns.clone();
@@ -1008,7 +979,7 @@ impl NetworkCore {
             .await?;
 
             let owner_if = format!("h{}", id.0);
-            self.with_netns(&owner_ns, {
+            self.netlink(&owner_ns, {
                 let root_a = root_a.clone();
                 let owner_if = owner_if.clone();
                 let bridge = bridge.clone();
@@ -1024,7 +995,7 @@ impl NetworkCore {
             let wan_if = "wan".to_string();
             let wan_ip = router.upstream_ip.unwrap();
             let wan_prefix = sw.cidr.unwrap().prefix_len();
-            self.with_netns(&router.ns, {
+            self.netlink(&router.ns, {
                 let root_b = root_b.clone();
                 let wan_if = wan_if.clone();
                 async move |h| {
@@ -1107,7 +1078,7 @@ impl NetworkCore {
                 )
             })
             .collect();
-        self.with_netns(&root_ns, async move |h| {
+        self.netlink(&root_ns, async move |h| {
             for (net, prefix_len, via) in return_routes {
                 debug!(
                     dst = %format!("{}/{}", net, prefix_len),
@@ -1147,7 +1118,7 @@ impl NetworkCore {
         let root_gw = self.root_if("g", dev.idx);
         let root_dev = self.root_if("e", dev.idx);
         let root_ns = self.cfg.root_ns.clone();
-        self.with_netns(&root_ns, {
+        self.netlink(&root_ns, {
             let root_gw = root_gw.clone();
             let root_dev = root_dev.clone();
             let dev_ns = dev.dev_ns.clone();
@@ -1170,7 +1141,7 @@ impl NetworkCore {
         let ifname = dev.ifname.clone();
         let is_default = dev.is_default;
         let gw_ip = dev.gw_ip;
-        self.with_netns(&dev.dev_ns, {
+        self.netlink(&dev.dev_ns, {
             let root_dev = root_dev.clone();
             let ifname = ifname.clone();
             async move |h| {
@@ -1186,7 +1157,7 @@ impl NetworkCore {
         })
         .await?;
 
-        self.with_netns(&dev.gw_ns, {
+        self.netlink(&dev.gw_ns, {
             let root_gw = root_gw.clone();
             let gw_if = format!("v{}", dev.idx);
             let gw_br = dev.gw_br.clone();

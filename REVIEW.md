@@ -6,12 +6,7 @@ Higher-level suggestions that were not applied directly.
 
 ## Open
 
-- rename NetworkCore::with_netns to NetworkCore::netlink, and store the Netlink on the AsyncWorker to not recreate the netlink socket all the time
-- many fns in core have unneccessary complexity. i.e. fn replace_default_route_in_namespace should read sth lik self.netns.spawn_task_in(..).await, and be an async fn. no ceremony around it.
 - many unneeded to_string in core.rs
-- NetworkCore and Lab have unclear semantics around building + build() vs runtime modification. suggestion: NetworkBuilder in core.rs for basic setup, then all ops execute directly. setup is only ix creation and static params. then everything else happens live. can be async fns.
-- add build way for router like we have for devices
-- both device and router builders assemble state in self, and only build() applies it to the core, and after my previous suggestion it then is actually applied/created
 - add Namespace { core: &'a mut NetworkCore (or NetnsManager?), id/name } abstraction and put the spawn etc fns on there and *only* use those, remove all other ways to run thins in ns
 - have NetworkCore::device(&mut self, id: NodeId) and router and device_by_name and router_by_name that return new structs Device, Router each with reference on core and fns for everything related to them instead of direct fns on NetworkCore. if colliding with existing internal ones rename those to DeviceData, RouterData
 - same for lab (just reexpose)
@@ -38,4 +33,7 @@ Higher-level suggestions that were not applied directly.
 15. **Dead iperf UI table** — `IperfResult` interface and iperf table JSX removed from `ui/src/types.ts` and `ui/src/components/PerfTab.tsx` ✅
 16. **`Lab::init_tracing()` was cfg(test)-only no-op** — replaced by `netsim_utils::init_tracing()` called at startup in both `netsim` and `netsim-vm` binaries ✅
 17. **Async Namespace Worker Redesign** — two workers per namespace (AsyncWorker + SyncWorker, lazy); `netns::TaskHandle<T>` + `spawn_task_in` + `run_closure_in`; TCP test helpers rewritten with `tokio::net` + `tokio::time::timeout`; `nat_rebind_mode_ip` DestinationIndependent→None case removed ✅
+19. **`NetworkCore::with_netns` → `netlink`; persistent `Netlink` per namespace** — renamed to `netlink`; `Netlink` created once per `AsyncWorker` and stored as `Arc<tokio::sync::Mutex<Netlink>>`; `own_links` tracker threaded through `NetnsManager::new_with_tracker`; `netlink::Netlink::handle()` accessor added; `netlink()` in `core.rs` simplified to lock the Arc ✅
+20. **Core fns simplified to `async fn`** — `set_link_state_in_namespace` and `replace_default_route_in_namespace` converted from `thread::scope + new runtime + block_on` to simple `async fn` delegating to `self.netlink()`; `link_down`, `link_up`, `switch_route` in `lab.rs` made async; `execute_step` in `steps.rs` made async ✅
+21. **`RouterBuilder`** — builder pattern for routers mirroring `DeviceBuilder`; `.region()`, `.upstream()`, `.nat()`, `.build()` methods; all ~60 `add_router` call-sites updated ✅
 18. **Test suite debugging + fixes** — fixed 5 failing tests: (a) `reflexive_ip_all_combos` skips `None/Via*Isp` combos (no return route); (b) `link_down_up_connectivity` UDP: `Lab::link_up` now re-adds default route (kernel removes it on link-down); (c) `link_down_up_connectivity` TCP: replaced 3× single-use echo spawns with one persistent `spawn_tcp_echo_server` loop; (d) `switch_route_reflexive_ip` SpecificIp: re-reads device IP after each `switch_route` call; (e) `latency_device_plus_region`: lowered threshold to ≥25ms (upload-only impair); (f) `rate_presets` Mobile: 1000 packets instead of 100 for reliable 1% loss detection ✅

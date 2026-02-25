@@ -20,8 +20,8 @@
 //! # #[tokio::main(flavor = "current_thread")]
 //! # async fn main() -> anyhow::Result<()> {
 //! let mut lab = Lab::new();
-//! let isp  = lab.add_router("isp1",  Some("eu"), None,      NatMode::Cgnat)?;
-//! let home = lab.add_router("home1", None,        Some(isp), NatMode::DestinationIndependent)?;
+//! let isp  = lab.add_router("isp1").region("eu").nat(NatMode::Cgnat).build()?;
+//! let home = lab.add_router("home1").upstream(isp).nat(NatMode::DestinationIndependent).build()?;
 //! lab.add_device("dev1").iface("eth0", home, None).build()?;
 //! lab.build().await?;
 //! # Ok(())
@@ -49,7 +49,7 @@ pub mod util;
 
 pub use crate::core::NodeId;
 pub use crate::userns::{init_userns, init_userns_for_ctor};
-pub use lab::{DeviceBuilder, Impair, Lab, NatMode, ObservedAddr};
+pub use lab::{DeviceBuilder, Impair, Lab, NatMode, ObservedAddr, RouterBuilder};
 
 /// Verifies the process has enough privileges to manage namespaces, routes, and raw sockets.
 pub fn check_caps() -> Result<()> {
