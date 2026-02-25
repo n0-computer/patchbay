@@ -2,8 +2,6 @@
 
 ## In Progress
 
-- [ipv6.md](ipv6.md) — priority 5
-
 ## Open
 
 - [dns.md](dns.md) — priority 2
@@ -17,6 +15,7 @@
 
 ## Completed
 
+- [ipv6.md](ipv6.md) — priority 5 — dual-stack + v6-only support, DAD consolidation, all 69 tests pass
 - [new-api.md](new-api.md) — priority 5 — Arc\<Mutex\<LabInner\>\>, Device/Router handles, instant construction
 
 - [iroh-isolation.md](iroh-isolation.md) — priority 2

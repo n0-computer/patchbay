@@ -7,9 +7,9 @@
 - [x] Phase 2: Builder + async setup + handle accessors
 - [x] Phase 3: NAT v6 + qdisc dual-protocol + config/TOML
 - [x] Phase 4: Tests
-- [ ] Final review
+- [x] Final review — DAD consolidation, parent_route_v6, spawn_closure deadlock fix
 
-**Status:** implementation complete, pending final review
+**Status:** complete — all 69 tests passing
 
 ---
 
