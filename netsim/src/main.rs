@@ -561,7 +561,7 @@ fn perform_cleanup(prefixes: &[String]) -> Result<()> {
             prefixes.join(", ")
         );
     }
-    let resources = netsim_core::core::resources();
+    let resources = netsim_core::resources();
     if !prefixes.is_empty() {
         for prefix in prefixes {
             resources.cleanup_by_prefix(prefix);
@@ -632,7 +632,7 @@ fn spawn_keeper_in_namespace(ns: &str) -> Result<u32> {
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
-    let child = netsim_core::core::spawn_command_in_namespace(ns, cmd)
+    let child = netsim_core::spawn_command_in_namespace(ns, cmd)
         .with_context(|| format!("spawn namespace keeper in '{ns}'"))?;
     Ok(child.id())
 }
@@ -642,9 +642,9 @@ async fn inspect_command(input: PathBuf, work_dir: PathBuf) -> Result<()> {
     install_signal_cleanup_handler(vec![])?;
 
     let (topo, is_sim) = load_topology_for_inspect(&input)?;
-    let mut lab = netsim::Lab::from_config(topo.clone())
+    let lab = netsim::Lab::from_config(topo.clone())
+        .await
         .with_context(|| format!("build lab config from {}", input.display()))?;
-    lab.build().await.context("build inspected topology")?;
 
     let mut node_namespaces = HashMap::new();
     let mut node_ips_v4 = HashMap::new();

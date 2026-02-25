@@ -7,9 +7,10 @@
 //! # #[tokio::main(flavor = "current_thread")]
 //! # async fn main() -> anyhow::Result<()> {
 //! let lab = Lab::load("lab.toml").await?;
+//! let dev = lab.device_by_name("home-eu1").unwrap();
 //! let mut cmd = Command::new("ping");
 //! cmd.args(["-c1", "8.8.8.8"]);
-//! lab.run_on("home-eu1", cmd)?;
+//! dev.spawn_command(cmd)?;
 //! # Ok(())
 //! # }
 //! ```
@@ -19,11 +20,10 @@
 //! # use netsim_core::{Lab, NatMode};
 //! # #[tokio::main(flavor = "current_thread")]
 //! # async fn main() -> anyhow::Result<()> {
-//! let mut lab = Lab::new();
-//! let isp  = lab.add_router("isp1").region("eu").nat(NatMode::Cgnat).build()?;
-//! let home = lab.add_router("home1").upstream(isp).nat(NatMode::DestinationIndependent).build()?;
-//! lab.add_device("dev1").iface("eth0", home, None).build()?;
-//! lab.build().await?;
+//! let lab = Lab::new();
+//! let isp  = lab.add_router("isp1").region("eu").nat(NatMode::Cgnat).build().await?;
+//! let home = lab.add_router("home1").upstream(isp.id()).nat(NatMode::DestinationIndependent).build().await?;
+//! lab.add_device("dev1").iface("eth0", home.id(), None).build().await?;
 //! # Ok(())
 //! # }
 //! ```
@@ -35,8 +35,7 @@ use anyhow::{anyhow, bail, Context, Result};
 
 /// Defines TOML configuration structures used by [`Lab::load`].
 pub mod config;
-/// Exposes low-level topology and namespace construction primitives.
-pub mod core;
+pub(crate) mod core;
 mod lab;
 mod netlink;
 mod netns;
@@ -47,9 +46,11 @@ mod userns;
 /// Shared string sanitizers.
 pub mod util;
 
-pub use crate::core::NodeId;
+pub use crate::core::{resources, spawn_command_in_namespace, NodeId, ResourceList};
 pub use crate::userns::{init_userns, init_userns_for_ctor};
-pub use lab::{DeviceBuilder, Impair, Lab, NatMode, ObservedAddr, RouterBuilder};
+pub use lab::{
+    Device, DeviceBuilder, DeviceIface, Impair, Lab, NatMode, ObservedAddr, Router, RouterBuilder,
+};
 
 /// Verifies the process has enough privileges to manage namespaces, routes, and raw sockets.
 pub fn check_caps() -> Result<()> {

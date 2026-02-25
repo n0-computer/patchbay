@@ -106,7 +106,9 @@ pub(crate) async fn execute_step(state: &mut SimState, step: &Step) -> Result<()
             cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
             let mut child = state
                 .lab
-                .spawn_unmanaged_on(device, cmd)
+                .device_by_name(device)
+                .ok_or_else(|| anyhow::anyhow!("unknown device '{}'", device))?
+                .spawn_command(cmd)
                 .with_context(|| format!("spawn run on '{}'", device))?;
             let stdout = child.stdout.take().context("take run stdout")?;
             let stderr = child.stderr.take().context("take run stderr")?;
@@ -213,7 +215,9 @@ pub(crate) async fn execute_step(state: &mut SimState, step: &Step) -> Result<()
 
             let mut child = state
                 .lab
-                .spawn_unmanaged_on(device, cmd)
+                .device_by_name(device)
+                .ok_or_else(|| anyhow::anyhow!("unknown device '{}'", device))?
+                .spawn_command(cmd)
                 .with_context(|| format!("spawn '{}'", id))?;
 
             let (out_pump, err_pump, cap_reader) = if needs_pipes {
@@ -361,20 +365,43 @@ pub(crate) async fn execute_step(state: &mut SimState, step: &Step) -> Result<()
             impair,
         } => {
             let impair = parse_impair(impair)?;
-            state.lab.set_impair(device, interface.as_deref(), impair)?;
+            let dev = state
+                .lab
+                .device_by_name(device)
+                .ok_or_else(|| anyhow::anyhow!("unknown device '{}'", device))?;
+            let ifname = match interface.as_deref() {
+                Some(n) => n.to_string(),
+                None => dev.default_iface().name().to_string(),
+            };
+            dev.set_impair(&ifname, impair)?;
         }
 
         // ── switch-route / set-default-route ──────────────────────────────
         Step::SwitchRoute { device, to } | Step::SetDefaultRoute { device, to } => {
-            state.lab.switch_route(device, to).await?;
+            state
+                .lab
+                .device_by_name(device)
+                .ok_or_else(|| anyhow::anyhow!("unknown device '{}'", device))?
+                .switch_route(to)
+                .await?;
         }
 
         // ── link-down / link-up ───────────────────────────────────────────
         Step::LinkDown { device, interface } => {
-            state.lab.link_down(device, interface).await?;
+            state
+                .lab
+                .device_by_name(device)
+                .ok_or_else(|| anyhow::anyhow!("unknown device '{}'", device))?
+                .link_down(interface)
+                .await?;
         }
         Step::LinkUp { device, interface } => {
-            state.lab.link_up(device, interface).await?;
+            state
+                .lab
+                .device_by_name(device)
+                .ok_or_else(|| anyhow::anyhow!("unknown device '{}'", device))?
+                .link_up(interface)
+                .await?;
         }
 
         // ── assert ────────────────────────────────────────────────────────

@@ -1,22 +1,25 @@
 //! High-level lab API: [`Lab`], [`DeviceBuilder`], [`NatMode`], [`Impair`], [`ObservedAddr`].
 
 use anyhow::{anyhow, bail, Context, Result};
-use nix::unistd::Pid;
+use ipnet::Ipv4Net;
 use serde::Deserialize;
 use std::{
     collections::HashMap,
     net::{Ipv4Addr, SocketAddr},
     path::Path,
-    process::{Command, ExitStatus},
-    sync::atomic::{AtomicU64, Ordering},
+    process::Command,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc, Mutex,
+    },
     thread,
     time::Duration,
 };
 
 use crate::core::{
-    apply_impair_in, apply_nat, cleanup_netns, resources, run_closure_in_namespace,
-    run_command_in_namespace, run_nft_in, spawn_closure_in_namespace_thread,
-    spawn_command_in_namespace, CoreConfig, DownstreamPool, NetworkCore, NodeId, TaskHandle,
+    apply_impair_in, apply_nat, cleanup_netns, resources, run_closure_in_namespace, run_nft_in,
+    setup_device_async, setup_root_ns_async, setup_router_async, spawn_command_in_namespace,
+    CoreConfig, DownstreamPool, IfaceBuild, NetworkCore, NodeId, RouterSetupData, TaskHandle,
 };
 
 pub(crate) static LAB_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -26,7 +29,9 @@ pub(crate) static LAB_COUNTER: AtomicU64 = AtomicU64::new(0);
 // ─────────────────────────────────────────────
 
 /// NAT mode for a router.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, strum::EnumIter, strum::Display)]
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, strum::EnumIter, strum::Display,
+)]
 #[serde(rename_all = "kebab-case")]
 pub enum NatMode {
     /// No NAT — downstream addresses are publicly routable (DC behaviour).
@@ -101,21 +106,35 @@ pub struct ObservedAddr {
 // ─────────────────────────────────────────────
 
 /// High-level lab API built on top of `NetworkCore`.
+///
+/// `Lab` wraps `Arc<Mutex<LabInner>>` and is cheaply cloneable. All methods
+/// take `&self` and use interior mutability through the mutex.
 pub struct Lab {
+    pub(crate) inner: Arc<Mutex<LabInner>>,
+}
+
+impl Clone for Lab {
+    fn clone(&self) -> Self {
+        Self {
+            inner: Arc::clone(&self.inner),
+        }
+    }
+}
+
+pub(crate) struct LabInner {
     /// Short process-unique prefix used on root-namespace interface names.
-    prefix: String,
+    pub(crate) prefix: String,
     /// (from_region, to_region, latency_ms) pairs; applied as tc netem during build.
-    region_latencies: Vec<(String, String, u32)>,
+    pub(crate) region_latencies: Vec<(String, String, u32)>,
 
     /// Background tasks spawned by the lab (reflectors, commands).
     children: Vec<ChildTask>,
 
     /// Low-level topology model.
-    core: NetworkCore,
+    pub(crate) core: NetworkCore,
 }
 
 enum ChildTask {
-    Process(std::process::Child),
     Thread {
         handle: TaskHandle,
         join: thread::JoinHandle<Result<()>>,
@@ -148,41 +167,42 @@ impl Lab {
             public_cidr: "203.0.113.0/24".parse().expect("valid public cidr"),
         });
         Self {
-            prefix,
-            region_latencies: vec![],
-            children: vec![],
-            core,
+            inner: Arc::new(Mutex::new(LabInner {
+                prefix,
+                region_latencies: vec![],
+                children: vec![],
+                core,
+            })),
         }
     }
 
     /// Returns the unique resource prefix associated with this lab instance.
-    pub fn prefix(&self) -> &str {
-        &self.prefix
+    pub fn prefix(&self) -> String {
+        self.inner.lock().unwrap().prefix.clone()
     }
 
     /// Returns the dedicated lab root namespace name.
-    pub fn root_namespace_name(&self) -> &str {
-        self.core.root_ns()
+    pub fn root_namespace_name(&self) -> String {
+        self.inner.lock().unwrap().core.root_ns().to_string()
     }
 
     /// Parses `lab.toml`, builds the network, and returns a ready-to-use lab.
     pub async fn load(path: impl AsRef<Path>) -> Result<Self> {
         let text = std::fs::read_to_string(path).context("read lab config")?;
         let cfg: crate::config::LabConfig = toml::from_str(&text).context("parse lab config")?;
-        let mut lab = Self::from_config(cfg)?;
-        lab.build().await?;
-        Ok(lab)
+        Self::from_config(cfg).await
     }
 
-    /// Builds a `Lab` from a parsed config without building the network yet.
-    pub fn from_config(cfg: crate::config::LabConfig) -> Result<Self> {
-        let mut lab = Self::new();
+    /// Builds a `Lab` from a parsed config, creating all namespaces and links.
+    pub async fn from_config(cfg: crate::config::LabConfig) -> Result<Self> {
+        let lab = Self::new();
 
         // Region latency pairs.
         if let Some(regions) = &cfg.region {
+            let mut inner = lab.inner.lock().unwrap();
             for (from, rcfg) in regions {
                 for (to, &ms) in &rcfg.latencies {
-                    lab.region_latencies.push((from.clone(), to.clone(), ms));
+                    inner.region_latencies.push((from.clone(), to.clone(), ms));
                 }
             }
         }
@@ -210,14 +230,20 @@ impl Lab {
             ready.sort();
             for name in ready {
                 let rcfg = pending.remove(name).unwrap();
-                let upstream = rcfg
-                    .upstream
-                    .as_deref()
-                    .and_then(|n| lab.core.router_id_by_name(n));
+                let upstream = {
+                    let inner = lab.inner.lock().unwrap();
+                    rcfg.upstream
+                        .as_deref()
+                        .and_then(|n| inner.core.router_id_by_name(n))
+                };
                 let mut rb = lab.add_router(&rcfg.name).nat(rcfg.nat);
-                if let Some(r) = &rcfg.region { rb = rb.region(r); }
-                if let Some(u) = upstream { rb = rb.upstream(u); }
-                rb.build()?;
+                if let Some(r) = &rcfg.region {
+                    rb = rb.region(r);
+                }
+                if let Some(u) = upstream {
+                    rb = rb.upstream(u);
+                }
+                rb.build().await?;
             }
         }
         if !pending.is_empty() {
@@ -282,14 +308,20 @@ impl Lab {
                         .ok_or_else(|| {
                             anyhow!("device '{}' iface '{}' missing 'gateway'", dev_name, ifname)
                         })?;
-                    let router_id = lab.core.router_id_by_name(gw_name).ok_or_else(|| {
-                        anyhow!(
-                            "device '{}' iface '{}' references unknown router '{}'",
-                            dev_name,
-                            ifname,
-                            gw_name
-                        )
-                    })?;
+                    let router_id = lab
+                        .inner
+                        .lock()
+                        .unwrap()
+                        .core
+                        .router_id_by_name(gw_name)
+                        .ok_or_else(|| {
+                            anyhow!(
+                                "device '{}' iface '{}' references unknown router '{}'",
+                                dev_name,
+                                ifname,
+                                gw_name
+                            )
+                        })?;
                     let impair: Option<Impair> = match iface_table.get("impair") {
                         None => None,
                         Some(v) => Some(v.clone().try_into().map_err(|e: toml::de::Error| {
@@ -329,10 +361,73 @@ impl Lab {
             if let Some(via) = dev.default_via {
                 builder = builder.default_via(&via);
             }
-            builder.build()?;
+            builder.build().await?;
         }
 
+        // Apply inter-region latency rules now that all routers are built.
+        lab.apply_region_latencies()?;
+
         Ok(lab)
+    }
+
+    /// Applies stored region latency rules to IX-connected routers' "ix" interfaces.
+    fn apply_region_latencies(&self) -> Result<()> {
+        let inner = self.inner.lock().unwrap();
+        if inner.region_latencies.is_empty() {
+            return Ok(());
+        }
+
+        // Build region → target CIDRs map from IX-connected routers.
+        let mut region_targets: HashMap<String, Vec<ipnet::Ipv4Net>> = HashMap::new();
+        for router in inner.core.all_routers() {
+            let Some(uplink) = router.uplink else {
+                continue;
+            };
+            if uplink != inner.core.ix_sw() {
+                continue;
+            }
+            let Some(region) = router.region.as_ref() else {
+                continue;
+            };
+            if let Some(ix_ip) = router.upstream_ip {
+                if let Ok(cidr) = ipnet::Ipv4Net::new(ix_ip, 32) {
+                    region_targets.entry(region.clone()).or_default().push(cidr);
+                }
+            }
+            if router.cfg.downstream_pool == crate::core::DownstreamPool::Public {
+                if let Some(cidr) = router.downstream_cidr {
+                    region_targets.entry(region.clone()).or_default().push(cidr);
+                }
+            }
+        }
+
+        // Apply tc netem filters on each IX-connected router's "ix" interface.
+        for router in inner.core.all_routers() {
+            let Some(uplink) = router.uplink else {
+                continue;
+            };
+            if uplink != inner.core.ix_sw() {
+                continue;
+            }
+            let Some(region) = router.region.as_ref() else {
+                continue;
+            };
+            let mut filters = Vec::new();
+            for (from, to, latency) in &inner.region_latencies {
+                if from != region {
+                    continue;
+                }
+                if let Some(targets) = region_targets.get(to) {
+                    for cidr in targets {
+                        filters.push((*cidr, *latency));
+                    }
+                }
+            }
+            if !filters.is_empty() {
+                crate::core::apply_region_latency(&router.ns, "ix", &filters)?;
+            }
+        }
+        Ok(())
     }
 
     // ── Builder methods (sync — just populate data structures) ──────────
@@ -344,10 +439,11 @@ impl Lab {
     /// [`.build()`][RouterBuilder::build] to finalise.
     ///
     /// Default NAT mode is [`NatMode::None`] (public DC-style router, IX-connected).
-    pub fn add_router(&mut self, name: &str) -> RouterBuilder<'_> {
-        if self.core.router_id_by_name(name).is_some() {
+    pub fn add_router(&self, name: &str) -> RouterBuilder {
+        let inner = self.inner.lock().unwrap();
+        if inner.core.router_id_by_name(name).is_some() {
             return RouterBuilder {
-                lab: self,
+                inner: Arc::clone(&self.inner),
                 name: name.to_string(),
                 region: None,
                 upstream: None,
@@ -356,7 +452,7 @@ impl Lab {
             };
         }
         RouterBuilder {
-            lab: self,
+            inner: Arc::clone(&self.inner),
             name: name.to_string(),
             region: None,
             upstream: None,
@@ -369,17 +465,18 @@ impl Lab {
     ///
     /// Call [`.iface()`][DeviceBuilder::iface] one or more times to attach network
     /// interfaces, then [`.build()`][DeviceBuilder::build] to finalize.
-    pub fn add_device(&mut self, name: &str) -> DeviceBuilder<'_> {
-        if self.core.device_id_by_name(name).is_some() {
+    pub fn add_device(&self, name: &str) -> DeviceBuilder {
+        let mut inner = self.inner.lock().unwrap();
+        if inner.core.device_id_by_name(name).is_some() {
             return DeviceBuilder {
-                lab: self,
+                inner: Arc::clone(&self.inner),
                 id: NodeId(u64::MAX),
                 result: Err(anyhow!("device '{}' already exists", name)),
             };
         }
-        let id = self.core.add_device(name);
+        let id = inner.core.add_device(name);
         DeviceBuilder {
-            lab: self,
+            inner: Arc::clone(&self.inner),
             id,
             result: Ok(()),
         }
@@ -388,89 +485,52 @@ impl Lab {
     // ── build ────────────────────────────────────────────────────────────
 
     /// Creates all namespaces, links, addresses, routes, and NAT rules.
-    pub async fn build(&mut self) -> Result<()> {
-        self.core.build(&self.region_latencies).await
-    }
-
     // ── User-facing API ─────────────────────────────────────────────────
 
     /// Adds a one-way inter-region latency in milliseconds.
-    pub fn add_region_latency(&mut self, from: &str, to: &str, latency_ms: u32) {
-        self.region_latencies
-            .push((from.to_string(), to.to_string(), latency_ms));
-    }
-
-    /// Runs a command inside a device namespace and waits for exit.
-    pub fn run_on(&self, name: &str, cmd: Command) -> Result<ExitStatus> {
-        let id = self.resolve_device(name)?;
-        let ns = self.core.device_ns(id)?;
-        run_command_in_namespace(ns, cmd)
-    }
-
-    /// Runs a closure inside a named network namespace.
-    pub fn run_in_namespace<F, R>(ns_name: &str, f: F) -> Result<R>
-    where
-        F: FnOnce() -> Result<R> + Send + 'static,
-        R: Send + 'static,
-    {
-        run_closure_in_namespace(ns_name, f)
-    }
-
-    /// Spawns a thread-backed task that runs `f` in `ns_name`.
-    pub fn run_in_namespace_thread<F, R>(ns_name: &str, f: F) -> thread::JoinHandle<Result<R>>
-    where
-        F: FnOnce() -> Result<R> + Send + 'static,
-        R: Send + 'static,
-    {
-        spawn_closure_in_namespace_thread(ns_name.to_string(), f)
-    }
-
-    /// Spawns a long-running process inside a device namespace and returns its PID.
-    pub fn spawn_on(&mut self, name: &str, cmd: Command) -> Result<Pid> {
-        let id = self.resolve_device(name)?;
-        let ns = self.core.device_ns(id)?.to_string();
-        let child = spawn_command_in_namespace(&ns, cmd)?;
-        let pid = Pid::from_raw(child.id() as i32);
-        self.children.push(ChildTask::Process(child));
-        Ok(pid)
-    }
-
-    /// Spawns an unmanaged command in a device namespace and returns the raw `Child`.
-    pub fn spawn_unmanaged_on(&self, device: &str, cmd: Command) -> Result<std::process::Child> {
-        let id = self.resolve_device(device)?;
-        let ns = self.core.device_ns(id)?.to_string();
-        spawn_command_in_namespace(&ns, cmd)
+    pub fn add_region_latency(&self, from: &str, to: &str, latency_ms: u32) {
+        self.inner.lock().unwrap().region_latencies.push((
+            from.to_string(),
+            to.to_string(),
+            latency_ms,
+        ));
     }
 
     /// Returns the network namespace name for a device by name.
     pub fn device_ns_name(&self, device: &str) -> Result<String> {
-        let id = self.resolve_device(device)?;
-        Ok(self.core.device_ns(id)?.to_string())
+        let inner = self.inner.lock().unwrap();
+        let id = inner
+            .core
+            .device_id_by_name(device)
+            .ok_or_else(|| anyhow!("unknown device '{}'", device))?;
+        Ok(inner.core.device_ns(id)?.to_string())
     }
 
     /// Returns the network namespace name for a router by name.
     pub fn router_ns_name(&self, router: &str) -> Result<String> {
-        let id = self.resolve_router(router)?;
-        Ok(self.core.router_ns(id)?.to_string())
+        let inner = self.inner.lock().unwrap();
+        let id = inner
+            .core
+            .router_id_by_name(router)
+            .ok_or_else(|| anyhow!("unknown router '{}'", router))?;
+        Ok(inner.core.router_ns(id)?.to_string())
     }
 
     /// Builds a map of `NETSIM_*` environment variables from the current lab state.
     pub fn env_vars(&self) -> std::collections::HashMap<String, String> {
+        let inner = self.inner.lock().unwrap();
         let mut map = std::collections::HashMap::new();
-        for dev in self.core.all_devices() {
+        for dev in inner.core.all_devices() {
             let norm = normalize_env_name(&dev.name);
-            // Default-via IP
             if let Some(ip) = dev.default_iface().ip {
                 map.insert(format!("NETSIM_IP_{}", norm), ip.to_string());
             }
-            // Per-interface IPs
             for iface in &dev.interfaces {
                 if let Some(ip) = iface.ip {
                     let ifnorm = normalize_env_name(&iface.ifname);
                     map.insert(format!("NETSIM_IP_{}_{}", norm, ifnorm), ip.to_string());
                 }
             }
-            // Namespace name
             map.insert(format!("NETSIM_NS_{}", norm), dev.ns.clone());
         }
         map
@@ -479,9 +539,9 @@ impl Lab {
     // ── Reflector / probe helpers (mainly for tests) ─────────────────────
 
     /// Spawns a UDP reflector in a named device/router namespace.
-    pub fn spawn_reflector(&mut self, ns_name: &str, bind: SocketAddr) -> Result<TaskHandle> {
+    pub fn spawn_reflector(&self, ns_name: &str, bind: SocketAddr) -> Result<TaskHandle> {
         let (handle, join) = crate::test_utils::spawn_reflector_in(ns_name, bind)?;
-        self.children.push(ChildTask::Thread {
+        self.inner.lock().unwrap().children.push(ChildTask::Thread {
             handle: handle.clone(),
             join,
         });
@@ -489,9 +549,10 @@ impl Lab {
     }
 
     /// Spawns a UDP reflector in the lab root namespace (IX bridge side).
-    pub fn spawn_reflector_on_ix(&mut self, bind: SocketAddr) -> Result<TaskHandle> {
-        let (handle, join) = crate::test_utils::spawn_reflector_in(self.core.root_ns(), bind)?;
-        self.children.push(ChildTask::Thread {
+    pub fn spawn_reflector_on_ix(&self, bind: SocketAddr) -> Result<TaskHandle> {
+        let root_ns = self.inner.lock().unwrap().core.root_ns().to_string();
+        let (handle, join) = crate::test_utils::spawn_reflector_in(&root_ns, bind)?;
+        self.inner.lock().unwrap().children.push(ChildTask::Thread {
             handle: handle.clone(),
             join,
         });
@@ -500,29 +561,38 @@ impl Lab {
 
     /// Probes the NAT mapping seen by a reflector from a named device.
     pub fn probe_udp_mapping(&self, device: &str, reflector: SocketAddr) -> Result<ObservedAddr> {
-        let id = self.resolve_device(device)?;
-        let ns = self.core.device_ns(id)?;
+        let inner = self.inner.lock().unwrap();
+        let id = inner
+            .core
+            .device_id_by_name(device)
+            .ok_or_else(|| anyhow!("unknown device '{}'", device))?;
+        let ns = inner.core.device_ns(id)?.to_string();
         let base = 40000u16;
         let port = base + ((id.0 % 20000) as u16);
-        crate::test_utils::probe_in_ns(ns, reflector, Duration::from_millis(500), Some(port))
+        drop(inner);
+        crate::test_utils::probe_in_ns(&ns, reflector, Duration::from_millis(500), Some(port))
     }
 
     // ── Lookup helpers ───────────────────────────────────────────────────
 
     /// Returns the network namespace name for a node.
-    pub fn node_ns(&self, id: NodeId) -> Result<&str> {
-        if let Some(r) = self.core.router(id) {
-            return Ok(&r.ns);
+    pub fn node_ns(&self, id: NodeId) -> Result<String> {
+        let inner = self.inner.lock().unwrap();
+        if let Some(r) = inner.core.router(id) {
+            return Ok(r.ns.clone());
         }
-        if let Some(d) = self.core.device(id) {
-            return Ok(&d.ns);
+        if let Some(d) = inner.core.device(id) {
+            return Ok(d.ns.clone());
         }
         Err(anyhow!("unknown node id"))
     }
 
     /// Returns the router's downstream gateway IP.
     pub fn router_downlink_gw(&self, id: NodeId) -> Result<Ipv4Addr> {
-        self.core
+        self.inner
+            .lock()
+            .unwrap()
+            .core
             .router(id)
             .and_then(|rt| rt.downstream_gw)
             .ok_or_else(|| anyhow!("router missing downstream gw"))
@@ -530,7 +600,10 @@ impl Lab {
 
     /// Returns the router's uplink IP.
     pub fn router_uplink_ip(&self, id: NodeId) -> Result<Ipv4Addr> {
-        self.core
+        self.inner
+            .lock()
+            .unwrap()
+            .core
             .router(id)
             .and_then(|rt| rt.upstream_ip)
             .ok_or_else(|| anyhow!("router missing upstream ip"))
@@ -538,7 +611,10 @@ impl Lab {
 
     /// Returns the assigned IP of a device's default interface.
     pub fn device_ip(&self, id: NodeId) -> Result<Ipv4Addr> {
-        self.core
+        self.inner
+            .lock()
+            .unwrap()
+            .core
             .device(id)
             .map(|dev| dev.default_iface().ip)
             .ok_or_else(|| anyhow!("unknown device id"))?
@@ -547,17 +623,17 @@ impl Lab {
 
     /// Resolves a router name to its [`NodeId`].
     pub fn router_id(&self, name: &str) -> Option<NodeId> {
-        self.core.router_id_by_name(name)
+        self.inner.lock().unwrap().core.router_id_by_name(name)
     }
 
     /// Resolves a device name to its [`NodeId`].
     pub fn device_id(&self, name: &str) -> Option<NodeId> {
-        self.core.device_id_by_name(name)
+        self.inner.lock().unwrap().core.device_id_by_name(name)
     }
 
     /// Returns the IX gateway IP (203.0.113.1).
     pub fn ix_gw(&self) -> Ipv4Addr {
-        self.core.ix_gw()
+        self.inner.lock().unwrap().core.ix_gw()
     }
 
     /// Safety-net cleanup via prefix scan (normal cleanup happens in `NetworkCore::drop`).
@@ -570,164 +646,136 @@ impl Lab {
         resources().cleanup_registered_prefixes();
     }
 
-    // ── Private helpers ──────────────────────────────────────────────────
-
-    fn dev_ns(&self, device: &str) -> Result<String> {
-        let id = self.resolve_device(device)?;
-        Ok(self.core.device_ns(id)?.to_string())
-    }
-
-    fn resolve_device(&self, name: &str) -> Result<NodeId> {
-        self.core
-            .device_id_by_name(name)
-            .ok_or_else(|| anyhow!("unknown device '{}'", name))
-    }
-
-    fn resolve_router(&self, name: &str) -> Result<NodeId> {
-        self.core
-            .router_id_by_name(name)
-            .ok_or_else(|| anyhow!("unknown router '{}'", name))
-    }
-
     // ── Dynamic operations ────────────────────────────────────────────────
 
-    /// Applies or removes a link-layer impairment on a device interface.
-    pub fn set_impair(
-        &mut self,
-        device: &str,
-        ifname: Option<&str>,
-        impair: Option<Impair>,
-    ) -> Result<()> {
-        let id = self.resolve_device(device)?;
-        let (ns, resolved_ifname) = {
-            let dev = self
-                .core
-                .device(id)
-                .ok_or_else(|| anyhow!("unknown device id"))?;
-            let iname = ifname.unwrap_or(&dev.default_via).to_string();
-            if dev.iface(&iname).is_none() {
-                bail!("interface '{}' not found on device '{}'", iname, device);
+    /// Applies or removes impairment on the link between two directly connected nodes.
+    ///
+    /// For **Device ↔ Router**: applies impairment on the device's interface in the
+    /// device namespace (affecting both upload and download on that link).
+    ///
+    /// For **Router ↔ Router**: applies impairment on the downstream router's WAN
+    /// interface (either "ix" for IX-connected or "wan" for sub-routers).
+    ///
+    /// The order of `from` and `to` does not matter — the method resolves the
+    /// connected pair in either direction.
+    pub fn impair_link(&self, a: NodeId, b: NodeId, impair: Option<Impair>) -> Result<()> {
+        let inner = self.inner.lock().unwrap();
+
+        // Try Device(a) ↔ Router(b) or Device(b) ↔ Router(a).
+        if let Some(dev) = inner.core.device(a) {
+            if let Some(router) = inner.core.router(b) {
+                let downlink_sw = router
+                    .downlink
+                    .ok_or_else(|| anyhow!("router '{}' has no downstream switch", router.name))?;
+                let iface = dev
+                    .interfaces
+                    .iter()
+                    .find(|i| i.uplink == downlink_sw)
+                    .ok_or_else(|| {
+                        anyhow!(
+                            "device '{}' is not connected to router '{}'",
+                            dev.name,
+                            router.name
+                        )
+                    })?;
+                let ns = dev.ns.clone();
+                let ifname = iface.ifname.clone();
+                drop(inner);
+                match impair {
+                    Some(imp) => apply_impair_in(&ns, &ifname, imp),
+                    None => crate::qdisc::remove_qdisc(&ns, &ifname),
+                }
+                return Ok(());
             }
-            (dev.ns.clone(), iname)
-        };
-        match impair {
-            Some(imp) => apply_impair_in(&ns, &resolved_ifname, imp),
-            None => crate::qdisc::remove_qdisc(&ns, &resolved_ifname),
         }
-        // Update stored impair so switch_route can re-apply it correctly.
-        if let Some(dev) = self.core.device_mut(id) {
-            if let Some(iface) = dev.iface_mut(&resolved_ifname) {
-                iface.impair = impair;
+        if let Some(dev) = inner.core.device(b) {
+            if let Some(router) = inner.core.router(a) {
+                let downlink_sw = router
+                    .downlink
+                    .ok_or_else(|| anyhow!("router '{}' has no downstream switch", router.name))?;
+                let iface = dev
+                    .interfaces
+                    .iter()
+                    .find(|i| i.uplink == downlink_sw)
+                    .ok_or_else(|| {
+                        anyhow!(
+                            "device '{}' is not connected to router '{}'",
+                            dev.name,
+                            router.name
+                        )
+                    })?;
+                let ns = dev.ns.clone();
+                let ifname = iface.ifname.clone();
+                drop(inner);
+                match impair {
+                    Some(imp) => apply_impair_in(&ns, &ifname, imp),
+                    None => crate::qdisc::remove_qdisc(&ns, &ifname),
+                }
+                return Ok(());
             }
         }
-        Ok(())
-    }
 
-    /// Brings a device interface administratively down.
-    pub async fn link_down(&mut self, device: &str, ifname: &str) -> Result<()> {
-        let ns = self.dev_ns(device)?;
-        self.core.set_link_state_in_namespace(&ns, ifname, false).await
-    }
-
-    /// Brings a device interface administratively up.
-    ///
-    /// Linux removes routes via an interface when it goes admin-down, so we
-    /// re-add the default route if `ifname` is the device's current `default_via`.
-    pub async fn link_up(&mut self, device: &str, ifname: &str) -> Result<()> {
-        let id = self.resolve_device(device)?;
-        let (ns, uplink, is_default_via) = {
-            let dev = self
-                .core
-                .device(id)
-                .ok_or_else(|| anyhow!("unknown device id"))?;
-            let iface = dev
-                .iface(ifname)
-                .ok_or_else(|| anyhow!("interface '{}' not found on device '{}'", ifname, device))?;
-            (dev.ns.clone(), iface.uplink, dev.default_via == ifname)
-        };
-        self.core.set_link_state_in_namespace(&ns, ifname, true).await?;
-        if is_default_via {
-            let gw_ip = self.core.router_downlink_gw_for_switch(uplink)?;
-            self.core
-                .replace_default_route_in_namespace(&ns, ifname, gw_ip)
-                .await?;
-        }
-        Ok(())
-    }
-
-    /// Switches the active default route to a different interface.
-    pub async fn switch_route(&mut self, device: &str, to: &str) -> Result<()> {
-        let id = self.resolve_device(device)?;
-        let (ns, uplink, impair) = {
-            let dev = self
-                .core
-                .device(id)
-                .ok_or_else(|| anyhow!("unknown device id"))?;
-            let iface = dev
-                .iface(to)
-                .ok_or_else(|| anyhow!("interface '{}' not found on device '{}'", to, device))?;
-            (dev.ns.clone(), iface.uplink, iface.impair)
-        };
-        let gw_ip = self.core.router_downlink_gw_for_switch(uplink)?;
-        self.core
-            .replace_default_route_in_namespace(&ns, to, gw_ip)
-            .await?;
-        match impair {
-            Some(imp) => apply_impair_in(&ns, to, imp),
-            None => crate::qdisc::remove_qdisc(&ns, to),
-        }
-        self.core.set_device_default_via(id, to)?;
-        Ok(())
-    }
-
-    /// Returns the bridge interface name used for the router's downstream LAN.
-    pub fn router_downlink_bridge(&self, router: NodeId) -> Result<String> {
-        self.core
-            .router(router)
-            .map(|r| r.downlink_bridge.clone())
-            .context("unknown router id")
-    }
-
-    /// Replaces NAT rules on `router` with `mode` at runtime.
-    ///
-    /// Flushes the `ip nat` table then re-applies the new rules.
-    pub async fn set_nat_mode(&mut self, router: NodeId, mode: NatMode) -> Result<()> {
-        let (ns, lan_if, wan_if, wan_ip) = self.core.router_nat_params(router)?;
-        run_nft_in(&ns, "flush table ip nat").await.ok();
-        apply_nat(&ns, mode, &lan_if, &wan_if, wan_ip).await?;
-        self.core.set_router_nat_mode(router, mode)
-    }
-
-    /// Flushes the conntrack table for `router`, forcing all active NAT mappings to expire.
-    ///
-    /// Subsequent flows get new external port assignments. Requires `conntrack-tools`.
-    pub fn rebind_nats(&mut self, router: NodeId) -> Result<()> {
-        let ns = self.core.router_ns(router)?.to_string();
-        run_closure_in_namespace(&ns, || {
-            let st = std::process::Command::new("conntrack")
-                .arg("-F")
-                .status()?;
-            if !st.success() {
-                bail!("conntrack -F failed: {st}");
+        // Try Router(a) ↔ Router(b) — one must be upstream of the other.
+        if let (Some(ra), Some(rb)) = (inner.core.router(a), inner.core.router(b)) {
+            // Check if b is downstream of a (b.uplink points to a's downlink switch).
+            if let Some(a_downlink) = ra.downlink {
+                if rb.uplink == Some(a_downlink) {
+                    let ns = rb.ns.clone();
+                    let wan_if = if rb.uplink == Some(inner.core.ix_sw()) {
+                        "ix"
+                    } else {
+                        "wan"
+                    };
+                    drop(inner);
+                    match impair {
+                        Some(imp) => apply_impair_in(&ns, wan_if, imp),
+                        None => crate::qdisc::remove_qdisc(&ns, wan_if),
+                    }
+                    return Ok(());
+                }
             }
-            Ok(())
-        })
+            // Check if a is downstream of b.
+            if let Some(b_downlink) = rb.downlink {
+                if ra.uplink == Some(b_downlink) {
+                    let ns = ra.ns.clone();
+                    let wan_if = if ra.uplink == Some(inner.core.ix_sw()) {
+                        "ix"
+                    } else {
+                        "wan"
+                    };
+                    drop(inner);
+                    match impair {
+                        Some(imp) => apply_impair_in(&ns, wan_if, imp),
+                        None => crate::qdisc::remove_qdisc(&ns, wan_if),
+                    }
+                    return Ok(());
+                }
+            }
+            bail!(
+                "routers '{}' and '{}' are not directly connected",
+                ra.name,
+                rb.name
+            );
+        }
+
+        bail!(
+            "nodes {:?} and {:?} are not a connected device-router or router-router pair",
+            a,
+            b
+        )
     }
 
-    /// Applies or removes impairment on a named interface of `router`.
-    ///
-    /// Use [`router_downlink_bridge`] to get the LAN-facing bridge name for
-    /// download-direction rate limiting.
-    pub fn set_router_impair(
-        &mut self,
-        router: NodeId,
-        ifname: &str,
-        impair: Option<Impair>,
-    ) -> Result<()> {
-        let ns = self.core.router_ns(router)?.to_string();
+    /// Applies or removes impairment on a router's downlink bridge, affecting
+    /// download-direction traffic to all downstream devices.
+    pub fn impair_router_downlink(&self, router: NodeId, impair: Option<Impair>) -> Result<()> {
+        let inner = self.inner.lock().unwrap();
+        let r = inner.core.router(router).context("unknown router id")?;
+        let ns = r.ns.clone();
+        let bridge = r.downlink_bridge.clone();
+        drop(inner);
         match impair {
-            Some(imp) => apply_impair_in(&ns, ifname, imp),
-            None => crate::qdisc::remove_qdisc(&ns, ifname),
+            Some(imp) => apply_impair_in(&ns, &bridge, imp),
+            None => crate::qdisc::remove_qdisc(&ns, &bridge),
         }
         Ok(())
     }
@@ -779,19 +827,12 @@ impl Default for Lab {
     }
 }
 
-impl Drop for Lab {
+impl Drop for LabInner {
     fn drop(&mut self) {
         for child in self.children.drain(..) {
-            match child {
-                ChildTask::Process(mut proc) => {
-                    let _ = proc.kill();
-                    let _ = proc.wait();
-                }
-                ChildTask::Thread { handle, join } => {
-                    handle.stop();
-                    let _ = join.join();
-                }
-            }
+            let ChildTask::Thread { handle, join } = child;
+            handle.stop();
+            let _ = join.join();
         }
         for ns_name in self.core.all_ns_names() {
             cleanup_netns(&ns_name);
@@ -804,8 +845,8 @@ impl Drop for Lab {
 // ─────────────────────────────────────────────
 
 /// Builder for a router node; returned by [`Lab::add_router`].
-pub struct RouterBuilder<'lab> {
-    lab: &'lab mut Lab,
+pub struct RouterBuilder {
+    inner: Arc<Mutex<LabInner>>,
     name: String,
     region: Option<String>,
     upstream: Option<NodeId>,
@@ -813,7 +854,7 @@ pub struct RouterBuilder<'lab> {
     result: Result<()>,
 }
 
-impl<'lab> RouterBuilder<'lab> {
+impl RouterBuilder {
     /// Sets the region tag used for inter-region latency rules.
     pub fn region(mut self, region: &str) -> Self {
         if self.result.is_ok() {
@@ -840,39 +881,137 @@ impl<'lab> RouterBuilder<'lab> {
         self
     }
 
-    /// Finalises the router and returns its [`NodeId`].
-    pub fn build(self) -> Result<NodeId> {
+    /// Finalises the router, creates its namespace and links, and returns a [`Router`] handle.
+    pub async fn build(self) -> Result<Router> {
         self.result?;
-        let lab = self.lab;
-        let nat = self.nat;
-        let downstream_pool = if nat == NatMode::None {
-            DownstreamPool::Public
-        } else {
-            DownstreamPool::Private
-        };
-        let id = lab
-            .core
-            .add_router(&self.name, nat, downstream_pool, self.region);
-        let sub_switch = lab
-            .core
-            .add_switch(&format!("{}-sub", self.name), None, None);
-        lab.core.connect_router_downlink(id, sub_switch)?;
-        match self.upstream {
-            None => {
-                let ix_ip = lab.core.alloc_ix_ip_low();
-                lab.core
-                    .connect_router_uplink(id, lab.core.ix_sw(), Some(ix_ip))?;
+
+        // Phase 1: Lock → register topology + extract snapshot → unlock.
+        let (id, setup_data, netns, need_root_setup) = {
+            let mut inner = self.inner.lock().unwrap();
+            let nat = self.nat;
+            let downstream_pool = if nat == NatMode::None {
+                DownstreamPool::Public
+            } else {
+                DownstreamPool::Private
+            };
+            let id = inner
+                .core
+                .add_router(&self.name, nat, downstream_pool, self.region);
+            let sub_switch = inner
+                .core
+                .add_switch(&format!("{}-sub", self.name), None, None);
+            inner.core.connect_router_downlink(id, sub_switch)?;
+            match self.upstream {
+                None => {
+                    let ix_ip = inner.core.alloc_ix_ip_low();
+                    let ix_sw = inner.core.ix_sw();
+                    inner.core.connect_router_uplink(id, ix_sw, Some(ix_ip))?;
+                }
+                Some(parent_id) => {
+                    let parent_downlink = inner
+                        .core
+                        .router(parent_id)
+                        .and_then(|r| r.downlink)
+                        .ok_or_else(|| anyhow!("parent router missing downlink switch"))?;
+                    inner
+                        .core
+                        .connect_router_uplink(id, parent_downlink, None)?;
+                }
             }
-            Some(parent_id) => {
-                let parent_downlink = lab
-                    .core
-                    .router(parent_id)
-                    .and_then(|r| r.downlink)
-                    .ok_or_else(|| anyhow!("parent router missing downlink switch"))?;
-                lab.core.connect_router_uplink(id, parent_downlink, None)?;
+
+            // Extract snapshot for async setup.
+            let router = inner.core.router(id).unwrap().clone();
+            let cfg = &inner.core.cfg;
+            let ix_sw = inner.core.ix_sw();
+
+            // Upstream info for sub-routers.
+            let (upstream_owner_ns, upstream_bridge, upstream_gw, upstream_cidr_prefix) =
+                if let Some(uplink) = router.uplink {
+                    if uplink != ix_sw {
+                        let sw = inner.core.switch(uplink).unwrap();
+                        let owner = sw.owner_router.unwrap();
+                        let owner_ns = inner.core.router(owner).unwrap().ns.clone();
+                        let bridge = sw.bridge.clone().unwrap_or_else(|| "br-lan".to_string());
+                        let gw = sw.gw;
+                        let prefix = sw.cidr.map(|c| c.prefix_len());
+                        (Some(owner_ns), Some(bridge), gw, prefix)
+                    } else {
+                        (None, None, None, None)
+                    }
+                } else {
+                    (None, None, None, None)
+                };
+
+            // Downlink bridge info.
+            let downlink_bridge = router.downlink.and_then(|sw_id| {
+                let sw = inner.core.switch(sw_id)?;
+                Some((
+                    sw.bridge.clone().unwrap_or_else(|| "br-lan".to_string()),
+                    sw.gw?,
+                    sw.cidr?.prefix_len(),
+                ))
+            });
+
+            // Return route for public downstreams.
+            let return_route = if router.uplink == Some(ix_sw)
+                && router.cfg.downstream_pool == DownstreamPool::Public
+            {
+                if let (Some(cidr), Some(via)) = (router.downstream_cidr, router.upstream_ip) {
+                    Some((cidr.addr(), cidr.prefix_len(), via))
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+            let setup_data = RouterSetupData {
+                router,
+                root_ns: cfg.root_ns.clone(),
+                prefix: cfg.prefix.clone(),
+                ix_sw,
+                ix_br: cfg.ix_br.clone(),
+                ix_gw: cfg.ix_gw,
+                ix_cidr_prefix: cfg.ix_cidr.prefix_len(),
+                upstream_owner_ns,
+                upstream_bridge,
+                upstream_gw,
+                upstream_cidr_prefix,
+                return_route,
+                downlink_bridge,
+            };
+
+            let netns = Arc::clone(&inner.core.netns);
+            let need_root = !inner.core.root_ns_initialized;
+            (id, setup_data, netns, need_root)
+        }; // lock released
+
+        // Phase 2: Async network setup (no lock held).
+        if need_root_setup {
+            let cfg = {
+                let inner = self.inner.lock().unwrap();
+                inner.core.cfg.clone()
+            };
+            setup_root_ns_async(&cfg, &netns).await?;
+            {
+                let mut inner = self.inner.lock().unwrap();
+                if !inner.core.root_ns_initialized {
+                    inner.core.own_netns.push(cfg.root_ns.clone());
+                    inner.core.root_ns_initialized = true;
+                }
             }
         }
-        Ok(id)
+
+        setup_router_async(&netns, &setup_data).await?;
+
+        // Phase 3: Lock → bookkeeping → unlock.
+        {
+            let mut inner = self.inner.lock().unwrap();
+            inner.core.own_netns.push(setup_data.router.ns.clone());
+        }
+
+        let lab = Arc::clone(&self.inner);
+        Ok(Router { id, lab })
     }
 }
 
@@ -881,20 +1020,45 @@ impl<'lab> RouterBuilder<'lab> {
 // ─────────────────────────────────────────────
 
 /// Builder for a device node; returned by [`Lab::add_device`].
-pub struct DeviceBuilder<'lab> {
-    lab: &'lab mut Lab,
+pub struct DeviceBuilder {
+    inner: Arc<Mutex<LabInner>>,
     id: NodeId,
     result: Result<()>,
 }
 
-impl<'lab> DeviceBuilder<'lab> {
+impl DeviceBuilder {
     /// Attach `ifname` inside the device namespace to `router`'s downstream switch.
     pub fn iface(mut self, ifname: &str, router: NodeId, impair: Option<Impair>) -> Self {
         if self.result.is_ok() {
             self.result = self
-                .lab
+                .inner
+                .lock()
+                .unwrap()
                 .core
                 .add_device_iface(self.id, ifname, router, impair)
+                .map(|_| ());
+        }
+        self
+    }
+
+    /// Attach to `router`'s downstream switch with auto-named interfaces (eth0, eth1, ...).
+    pub fn uplink(mut self, router: NodeId) -> Self {
+        if self.result.is_ok() {
+            let idx = {
+                let inner = self.inner.lock().unwrap();
+                inner
+                    .core
+                    .device(self.id)
+                    .map(|d| d.interfaces.len())
+                    .unwrap_or(0)
+            };
+            let ifname = format!("eth{}", idx);
+            self.result = self
+                .inner
+                .lock()
+                .unwrap()
+                .core
+                .add_device_iface(self.id, &ifname, router, None)
                 .map(|_| ());
         }
         self
@@ -903,15 +1067,728 @@ impl<'lab> DeviceBuilder<'lab> {
     /// Overrides which interface carries the default route.
     pub fn default_via(mut self, ifname: &str) -> Self {
         if self.result.is_ok() {
-            self.result = self.lab.core.set_device_default_via(self.id, ifname);
+            self.result = self
+                .inner
+                .lock()
+                .unwrap()
+                .core
+                .set_device_default_via(self.id, ifname);
         }
         self
     }
 
-    /// Finalizes the device and returns its [`NodeId`].
-    pub fn build(self) -> Result<NodeId> {
+    /// Finalizes the device, creates its namespace and links, and returns a [`Device`] handle.
+    pub async fn build(self) -> Result<Device> {
         self.result?;
-        Ok(self.id)
+
+        // Phase 1: Lock → extract snapshot → unlock.
+        let (dev, ifaces, prefix, root_ns, netns, need_root_setup) = {
+            let inner = self.inner.lock().unwrap();
+            let dev = inner
+                .core
+                .device(self.id)
+                .ok_or_else(|| anyhow!("unknown device id"))?
+                .clone();
+
+            let mut iface_data = Vec::new();
+            for iface in &dev.interfaces {
+                let sw = inner.core.switch(iface.uplink).ok_or_else(|| {
+                    anyhow!(
+                        "device '{}' iface '{}' switch missing",
+                        dev.name,
+                        iface.ifname
+                    )
+                })?;
+                let gw_router = sw.owner_router.ok_or_else(|| {
+                    anyhow!(
+                        "device '{}' iface '{}' switch missing owner",
+                        dev.name,
+                        iface.ifname
+                    )
+                })?;
+                let gw = sw.gw.ok_or_else(|| anyhow!("device switch missing gw"))?;
+                let gw_br = sw.bridge.clone().unwrap_or_else(|| "br-lan".to_string());
+                let gw_ns = inner.core.router(gw_router).unwrap().ns.clone();
+                iface_data.push(IfaceBuild {
+                    dev_ns: dev.ns.clone(),
+                    gw_ns,
+                    gw_ip: gw,
+                    gw_br,
+                    dev_ip: iface.ip.unwrap(),
+                    prefix_len: sw.cidr.unwrap().prefix_len(),
+                    impair: iface.impair,
+                    ifname: iface.ifname.clone(),
+                    is_default: iface.ifname == dev.default_via,
+                    idx: iface.idx,
+                });
+            }
+
+            let prefix = inner.core.cfg.prefix.clone();
+            let root_ns = inner.core.cfg.root_ns.clone();
+            let netns = Arc::clone(&inner.core.netns);
+            let need_root = !inner.core.root_ns_initialized;
+            (dev, iface_data, prefix, root_ns, netns, need_root)
+        }; // lock released
+
+        // Phase 2: Async network setup (no lock held).
+        if need_root_setup {
+            let cfg = {
+                let inner = self.inner.lock().unwrap();
+                inner.core.cfg.clone()
+            };
+            setup_root_ns_async(&cfg, &netns).await?;
+            {
+                let mut inner = self.inner.lock().unwrap();
+                if !inner.core.root_ns_initialized {
+                    inner.core.own_netns.push(cfg.root_ns.clone());
+                    inner.core.root_ns_initialized = true;
+                }
+            }
+        }
+
+        setup_device_async(&netns, &prefix, &root_ns, &dev, ifaces).await?;
+
+        // Phase 3: Lock → bookkeeping → unlock.
+        {
+            let mut inner = self.inner.lock().unwrap();
+            inner.core.own_netns.push(dev.ns.clone());
+        }
+
+        let lab = Arc::clone(&self.inner);
+        Ok(Device { id: self.id, lab })
+    }
+}
+
+// ─────────────────────────────────────────────
+// Device / Router / DeviceIface handles
+// ─────────────────────────────────────────────
+
+/// Owned snapshot of a single device network interface.
+///
+/// Returned by [`Device::iface`], [`Device::default_iface`], and
+/// [`Device::interfaces`]. This is a lightweight value type — no `Arc`.
+#[derive(Clone, Debug)]
+pub struct DeviceIface {
+    ifname: String,
+    ip: Ipv4Addr,
+    impair: Option<Impair>,
+}
+
+impl DeviceIface {
+    /// Returns the interface name (e.g. `"eth0"`).
+    pub fn name(&self) -> &str {
+        &self.ifname
+    }
+
+    /// Returns the assigned IPv4 address.
+    pub fn ip(&self) -> Ipv4Addr {
+        self.ip
+    }
+
+    /// Returns the impairment profile, if any.
+    pub fn impair(&self) -> Option<Impair> {
+        self.impair
+    }
+}
+
+/// Cloneable handle to a device in the lab topology.
+///
+/// Holds a `NodeId` and an `Arc` to the lab interior. All accessor methods
+/// briefly lock the mutex, read a value, and return owned data.
+pub struct Device {
+    id: NodeId,
+    lab: Arc<Mutex<LabInner>>,
+}
+
+impl Clone for Device {
+    fn clone(&self) -> Self {
+        Self {
+            id: self.id,
+            lab: Arc::clone(&self.lab),
+        }
+    }
+}
+
+impl std::fmt::Debug for Device {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Device").field("id", &self.id).finish()
+    }
+}
+
+impl Device {
+    /// Returns the node identifier.
+    pub fn id(&self) -> NodeId {
+        self.id
+    }
+
+    /// Returns the device name.
+    pub fn name(&self) -> String {
+        let inner = self.lab.lock().unwrap();
+        inner
+            .core
+            .device(self.id)
+            .map(|d| d.name.clone())
+            .unwrap_or_default()
+    }
+
+    /// Returns the IP address of the default interface.
+    pub fn ip(&self) -> Ipv4Addr {
+        let inner = self.lab.lock().unwrap();
+        inner
+            .core
+            .device(self.id)
+            .and_then(|d| d.default_iface().ip)
+            .unwrap_or(Ipv4Addr::UNSPECIFIED)
+    }
+
+    /// Returns a snapshot of the named interface, if it exists.
+    pub fn iface(&self, name: &str) -> Option<DeviceIface> {
+        let inner = self.lab.lock().unwrap();
+        let dev = inner.core.device(self.id)?;
+        let iface = dev.iface(name)?;
+        Some(DeviceIface {
+            ifname: iface.ifname.clone(),
+            ip: iface.ip.unwrap_or(Ipv4Addr::UNSPECIFIED),
+            impair: iface.impair,
+        })
+    }
+
+    /// Returns a snapshot of the default interface.
+    pub fn default_iface(&self) -> DeviceIface {
+        let inner = self.lab.lock().unwrap();
+        let dev = inner
+            .core
+            .device(self.id)
+            .expect("device handle has valid id");
+        let iface = dev.default_iface();
+        DeviceIface {
+            ifname: iface.ifname.clone(),
+            ip: iface.ip.unwrap_or(Ipv4Addr::UNSPECIFIED),
+            impair: iface.impair,
+        }
+    }
+
+    /// Returns snapshots of all interfaces.
+    pub fn interfaces(&self) -> Vec<DeviceIface> {
+        let inner = self.lab.lock().unwrap();
+        let dev = match inner.core.device(self.id) {
+            Some(d) => d,
+            None => return vec![],
+        };
+        dev.interfaces
+            .iter()
+            .map(|iface| DeviceIface {
+                ifname: iface.ifname.clone(),
+                ip: iface.ip.unwrap_or(Ipv4Addr::UNSPECIFIED),
+                impair: iface.impair,
+            })
+            .collect()
+    }
+
+    // ── Dynamic operations ──────────────────────────────────────────────
+
+    /// Brings an interface administratively down.
+    pub async fn link_down(&self, ifname: &str) -> Result<()> {
+        let (ns, netns) = {
+            let inner = self.lab.lock().unwrap();
+            let dev = inner
+                .core
+                .device(self.id)
+                .ok_or_else(|| anyhow!("unknown device id"))?;
+            (dev.ns.clone(), Arc::clone(&inner.core.netns))
+        };
+        let ifname = ifname.to_string();
+        netns
+            .spawn_netlink_task_in(&ns, move |nl_arc| async move {
+                let mut nl = nl_arc.lock().await;
+                nl.set_link_down(&ifname).await
+            })
+            .await
+            .map_err(|_| anyhow!("netns task cancelled"))?
+    }
+
+    /// Brings an interface administratively up.
+    ///
+    /// Linux removes routes via an interface when it goes admin-down, so we
+    /// re-add the default route if `ifname` is the device's current `default_via`.
+    pub async fn link_up(&self, ifname: &str) -> Result<()> {
+        let (ns, uplink, is_default_via, netns) = {
+            let inner = self.lab.lock().unwrap();
+            let dev = inner
+                .core
+                .device(self.id)
+                .ok_or_else(|| anyhow!("unknown device id"))?;
+            let iface = dev
+                .iface(ifname)
+                .ok_or_else(|| anyhow!("interface '{}' not found", ifname))?;
+            (
+                dev.ns.clone(),
+                iface.uplink,
+                dev.default_via == ifname,
+                Arc::clone(&inner.core.netns),
+            )
+        };
+        let ifname_owned = ifname.to_string();
+        netns
+            .spawn_netlink_task_in(&ns, {
+                let ifname_owned = ifname_owned.clone();
+                move |nl_arc| async move {
+                    let mut nl = nl_arc.lock().await;
+                    nl.set_link_up(&ifname_owned).await
+                }
+            })
+            .await
+            .map_err(|_| anyhow!("netns task cancelled"))??;
+        if is_default_via {
+            let gw_ip = self
+                .lab
+                .lock()
+                .unwrap()
+                .core
+                .router_downlink_gw_for_switch(uplink)?;
+            netns
+                .spawn_netlink_task_in(&ns, move |nl_arc| async move {
+                    let mut nl = nl_arc.lock().await;
+                    nl.replace_default_route_v4(&ifname_owned, gw_ip).await
+                })
+                .await
+                .map_err(|_| anyhow!("netns task cancelled"))??;
+        }
+        Ok(())
+    }
+
+    /// Switches the active default route to a different interface.
+    pub async fn switch_route(&self, to: &str) -> Result<()> {
+        let (ns, uplink, impair, netns) = {
+            let inner = self.lab.lock().unwrap();
+            let dev = inner
+                .core
+                .device(self.id)
+                .ok_or_else(|| anyhow!("unknown device id"))?;
+            let iface = dev
+                .iface(to)
+                .ok_or_else(|| anyhow!("interface '{}' not found", to))?;
+            (
+                dev.ns.clone(),
+                iface.uplink,
+                iface.impair,
+                Arc::clone(&inner.core.netns),
+            )
+        };
+        let gw_ip = self
+            .lab
+            .lock()
+            .unwrap()
+            .core
+            .router_downlink_gw_for_switch(uplink)?;
+        let to_owned = to.to_string();
+        netns
+            .spawn_netlink_task_in(&ns, move |nl_arc| async move {
+                let mut nl = nl_arc.lock().await;
+                nl.replace_default_route_v4(&to_owned, gw_ip).await
+            })
+            .await
+            .map_err(|_| anyhow!("netns task cancelled"))??;
+        match impair {
+            Some(imp) => apply_impair_in(&ns, to, imp),
+            None => crate::qdisc::remove_qdisc(&ns, to),
+        }
+        self.lab
+            .lock()
+            .unwrap()
+            .core
+            .set_device_default_via(self.id, to)?;
+        Ok(())
+    }
+
+    /// Applies or removes a link-layer impairment on the named interface.
+    ///
+    /// If `ifname` is `None`, applies to the default interface.
+    pub fn set_impair(&self, ifname: &str, impair: Option<Impair>) -> Result<()> {
+        let mut inner = self.lab.lock().unwrap();
+        let (ns, resolved_ifname) = {
+            let dev = inner
+                .core
+                .device(self.id)
+                .ok_or_else(|| anyhow!("unknown device id"))?;
+            let iname = ifname.to_string();
+            if dev.iface(&iname).is_none() {
+                bail!("interface '{}' not found", iname);
+            }
+            (dev.ns.clone(), iname)
+        };
+        match impair {
+            Some(imp) => apply_impair_in(&ns, &resolved_ifname, imp),
+            None => crate::qdisc::remove_qdisc(&ns, &resolved_ifname),
+        }
+        if let Some(dev) = inner.core.device_mut(self.id) {
+            if let Some(iface) = dev.iface_mut(&resolved_ifname) {
+                iface.impair = impair;
+            }
+        }
+        Ok(())
+    }
+
+    // ── Spawn ───────────────────────────────────────────────────────────
+
+    /// Spawns an async task in this device's network namespace.
+    ///
+    /// The closure receives a cloned [`Device`] handle. Returns a
+    /// `TaskHandle` that resolves to the task's output.
+    pub fn spawn<F, Fut, T>(&self, f: F) -> crate::netns::TaskHandle<T>
+    where
+        F: FnOnce(Device) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = T> + 'static,
+        T: Send + 'static,
+    {
+        let ns = {
+            let inner = self.lab.lock().unwrap();
+            inner
+                .core
+                .device(self.id)
+                .expect("device handle has valid id")
+                .ns
+                .clone()
+        };
+        let handle = self.clone();
+        crate::netns::spawn_task_in_netns(&ns, move || f(handle))
+    }
+
+    /// Spawns a raw command in this device's network namespace.
+    pub fn spawn_command(&self, cmd: Command) -> Result<std::process::Child> {
+        let ns = {
+            let inner = self.lab.lock().unwrap();
+            inner
+                .core
+                .device(self.id)
+                .ok_or_else(|| anyhow!("unknown device id"))?
+                .ns
+                .clone()
+        };
+        spawn_command_in_namespace(&ns, cmd)
+    }
+
+    /// Moves one of this device's interfaces to a different router's downstream
+    /// network, simulating a WiFi handoff or network switch.
+    ///
+    /// The interface name is preserved but the IP address changes (allocated from
+    /// the new router's pool). The old veth pair is torn down and a fresh one is
+    /// created.
+    pub async fn switch_uplink(&self, ifname: &str, to_router: NodeId) -> Result<()> {
+        use crate::core::{self, IfaceBuild};
+
+        // Phase 1: Lock → extract data + allocate from new router's pool → unlock
+        let (iface_build, old_idx, netns, prefix, root_ns) = {
+            let mut inner = self.lab.lock().unwrap();
+            let dev = inner
+                .core
+                .device(self.id)
+                .ok_or_else(|| anyhow!("unknown device id"))?
+                .clone();
+            let iface = dev
+                .interfaces
+                .iter()
+                .find(|i| i.ifname == ifname)
+                .ok_or_else(|| anyhow!("device '{}' has no interface '{}'", dev.name, ifname))?;
+            let old_idx = iface.idx;
+
+            let target_router = inner
+                .core
+                .router(to_router)
+                .ok_or_else(|| anyhow!("unknown target router id"))?
+                .clone();
+            let downlink_sw = target_router.downlink.ok_or_else(|| {
+                anyhow!(
+                    "target router '{}' has no downstream switch",
+                    target_router.name
+                )
+            })?;
+            let sw = inner
+                .core
+                .switch(downlink_sw)
+                .ok_or_else(|| anyhow!("target router's downlink switch missing"))?
+                .clone();
+            let gw = sw
+                .gw
+                .ok_or_else(|| anyhow!("target switch missing gateway"))?;
+            let gw_br = sw.bridge.clone().unwrap_or_else(|| "br-lan".to_string());
+            let new_ip = inner.core.alloc_from_switch(downlink_sw)?;
+            let prefix_len = sw.cidr.unwrap().prefix_len();
+
+            let netns = Arc::clone(&inner.core.netns);
+            let prefix = inner.core.cfg.prefix.clone();
+            let root_ns = inner.core.cfg.root_ns.clone();
+
+            let build = IfaceBuild {
+                dev_ns: dev.ns.clone(),
+                gw_ns: target_router.ns.clone(),
+                gw_ip: gw,
+                gw_br,
+                dev_ip: new_ip,
+                prefix_len,
+                impair: iface.impair,
+                ifname: ifname.to_string(),
+                is_default: ifname == dev.default_via,
+                idx: old_idx,
+            };
+            (build, old_idx, netns, prefix, root_ns)
+        };
+
+        // Phase 2: Delete old veth pair (from root NS)
+        let old_root_gw = format!("{}g{}", prefix, old_idx);
+        let old_root_dev = format!("{}e{}", prefix, old_idx);
+        core::nl_run(&netns, &root_ns, {
+            let old_root_gw = old_root_gw.clone();
+            let old_root_dev = old_root_dev.clone();
+            async move |h| {
+                h.ensure_link_deleted(&old_root_gw).await.ok();
+                h.ensure_link_deleted(&old_root_dev).await.ok();
+                Ok(())
+            }
+        })
+        .await?;
+
+        // Phase 3: Wire new interface (reuses existing wiring logic)
+        let new_ip = iface_build.dev_ip;
+        let new_uplink = {
+            let inner = self.lab.lock().unwrap();
+            inner.core.router(to_router).unwrap().downlink.unwrap()
+        };
+        core::wire_iface_async(&netns, &prefix, &root_ns, iface_build).await?;
+
+        // Phase 4: Lock → update internal records → unlock
+        {
+            let mut inner = self.lab.lock().unwrap();
+            let dev = inner
+                .core
+                .device_mut(self.id)
+                .ok_or_else(|| anyhow!("device disappeared"))?;
+            if let Some(iface) = dev.interfaces.iter_mut().find(|i| i.ifname == ifname) {
+                iface.uplink = new_uplink;
+                iface.ip = Some(new_ip);
+            }
+        }
+
+        Ok(())
+    }
+}
+
+/// Cloneable handle to a router in the lab topology.
+///
+/// Same pattern as [`Device`]: holds `NodeId` + `Arc<Mutex<LabInner>>`.
+pub struct Router {
+    id: NodeId,
+    lab: Arc<Mutex<LabInner>>,
+}
+
+impl Clone for Router {
+    fn clone(&self) -> Self {
+        Self {
+            id: self.id,
+            lab: Arc::clone(&self.lab),
+        }
+    }
+}
+
+impl std::fmt::Debug for Router {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Router").field("id", &self.id).finish()
+    }
+}
+
+impl Router {
+    /// Returns the node identifier.
+    pub fn id(&self) -> NodeId {
+        self.id
+    }
+
+    /// Returns the router name.
+    pub fn name(&self) -> String {
+        let inner = self.lab.lock().unwrap();
+        inner
+            .core
+            .router(self.id)
+            .map(|r| r.name.clone())
+            .unwrap_or_default()
+    }
+
+    /// Returns the region label, if set.
+    pub fn region(&self) -> Option<String> {
+        let inner = self.lab.lock().unwrap();
+        inner.core.router(self.id).and_then(|r| r.region.clone())
+    }
+
+    /// Returns the NAT mode.
+    pub fn nat_mode(&self) -> NatMode {
+        let inner = self.lab.lock().unwrap();
+        inner
+            .core
+            .router(self.id)
+            .map(|r| r.cfg.nat)
+            .unwrap_or_default()
+    }
+
+    /// Returns the uplink (WAN-side) IP, if connected.
+    pub fn uplink_ip(&self) -> Option<Ipv4Addr> {
+        let inner = self.lab.lock().unwrap();
+        inner.core.router(self.id).and_then(|r| r.upstream_ip)
+    }
+
+    /// Returns the downstream subnet CIDR, if allocated.
+    pub fn downstream_cidr(&self) -> Option<Ipv4Net> {
+        let inner = self.lab.lock().unwrap();
+        inner.core.router(self.id).and_then(|r| r.downstream_cidr)
+    }
+
+    /// Returns the downstream gateway address, if allocated.
+    pub fn downstream_gw(&self) -> Option<Ipv4Addr> {
+        let inner = self.lab.lock().unwrap();
+        inner.core.router(self.id).and_then(|r| r.downstream_gw)
+    }
+
+    // ── Dynamic operations ──────────────────────────────────────────────
+
+    /// Replaces NAT rules on this router at runtime.
+    ///
+    /// Flushes the `ip nat` table then re-applies the new rules.
+    pub async fn set_nat_mode(&self, mode: NatMode) -> Result<()> {
+        let (ns, lan_if, wan_if, wan_ip) =
+            self.lab.lock().unwrap().core.router_nat_params(self.id)?;
+        run_nft_in(&ns, "flush table ip nat").await.ok();
+        apply_nat(&ns, mode, &lan_if, &wan_if, wan_ip).await?;
+        self.lab
+            .lock()
+            .unwrap()
+            .core
+            .set_router_nat_mode(self.id, mode)
+    }
+
+    /// Flushes the conntrack table, forcing all active NAT mappings to expire.
+    ///
+    /// Subsequent flows get new external port assignments. Requires `conntrack-tools`.
+    pub fn rebind_nats(&self) -> Result<()> {
+        let ns = self
+            .lab
+            .lock()
+            .unwrap()
+            .core
+            .router_ns(self.id)?
+            .to_string();
+        run_closure_in_namespace(&ns, || {
+            let st = std::process::Command::new("conntrack").arg("-F").status()?;
+            if !st.success() {
+                bail!("conntrack -F failed: {st}");
+            }
+            Ok(())
+        })
+    }
+
+    // ── Spawn ───────────────────────────────────────────────────────────
+
+    /// Spawns an async task in this router's network namespace.
+    ///
+    /// The closure receives a cloned [`Router`] handle.
+    pub fn spawn<F, Fut, T>(&self, f: F) -> crate::netns::TaskHandle<T>
+    where
+        F: FnOnce(Router) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = T> + 'static,
+        T: Send + 'static,
+    {
+        let ns = {
+            let inner = self.lab.lock().unwrap();
+            inner
+                .core
+                .router(self.id)
+                .expect("router handle has valid id")
+                .ns
+                .clone()
+        };
+        let handle = self.clone();
+        crate::netns::spawn_task_in_netns(&ns, move || f(handle))
+    }
+
+    /// Spawns a raw command in this router's network namespace.
+    pub fn spawn_command(&self, cmd: Command) -> Result<std::process::Child> {
+        let ns = {
+            let inner = self.lab.lock().unwrap();
+            inner
+                .core
+                .router(self.id)
+                .ok_or_else(|| anyhow!("unknown router id"))?
+                .ns
+                .clone()
+        };
+        spawn_command_in_namespace(&ns, cmd)
+    }
+}
+
+// ─────────────────────────────────────────────
+// Lab lookup methods
+// ─────────────────────────────────────────────
+
+impl Lab {
+    /// Returns a device handle by id, or `None` if the id is not a device.
+    pub fn device(&self, id: NodeId) -> Option<Device> {
+        let inner = self.inner.lock().unwrap();
+        inner.core.device(id).map(|_| Device {
+            id,
+            lab: Arc::clone(&self.inner),
+        })
+    }
+
+    /// Returns a router handle by id, or `None` if the id is not a router.
+    pub fn router(&self, id: NodeId) -> Option<Router> {
+        let inner = self.inner.lock().unwrap();
+        inner.core.router(id).map(|_| Router {
+            id,
+            lab: Arc::clone(&self.inner),
+        })
+    }
+
+    /// Looks up a device by name and returns a handle.
+    pub fn device_by_name(&self, name: &str) -> Option<Device> {
+        let inner = self.inner.lock().unwrap();
+        inner.core.device_id_by_name(name).map(|id| Device {
+            id,
+            lab: Arc::clone(&self.inner),
+        })
+    }
+
+    /// Looks up a router by name and returns a handle.
+    pub fn router_by_name(&self, name: &str) -> Option<Router> {
+        let inner = self.inner.lock().unwrap();
+        inner.core.router_id_by_name(name).map(|id| Router {
+            id,
+            lab: Arc::clone(&self.inner),
+        })
+    }
+
+    /// Returns handles for all devices.
+    pub fn devices(&self) -> Vec<Device> {
+        let inner = self.inner.lock().unwrap();
+        inner
+            .core
+            .all_device_ids()
+            .into_iter()
+            .map(|id| Device {
+                id,
+                lab: Arc::clone(&self.inner),
+            })
+            .collect()
+    }
+
+    /// Returns handles for all routers.
+    pub fn routers(&self) -> Vec<Router> {
+        let inner = self.inner.lock().unwrap();
+        inner
+            .core
+            .all_router_ids()
+            .into_iter()
+            .map(|id| Router {
+                id,
+                lab: Arc::clone(&self.inner),
+            })
+            .collect()
     }
 }
 
@@ -949,7 +1826,9 @@ mod tests {
     use super::*;
     use crate::check_caps;
     use crate::config;
-    use crate::core::{run_closure_in_namespace, run_command_in_namespace};
+    use crate::core::{
+        run_closure_in_namespace, run_command_in_namespace, spawn_closure_in_namespace_thread,
+    };
     use crate::netns::spawn_task_in_netns;
     use crate::test_utils::{udp_roundtrip_in_ns, udp_rtt_in_ns};
 
@@ -1091,9 +1970,7 @@ mod tests {
         let (stop_tx, stop_rx) = std::sync::mpsc::channel::<()>();
         let join = spawn_closure_in_namespace_thread(ns, move || {
             let listener = std::net::TcpListener::bind(bind).context("tcp reflector bind")?;
-            listener
-                .set_nonblocking(true)
-                .context("set nonblocking")?;
+            listener.set_nonblocking(true).context("set nonblocking")?;
             loop {
                 if stop_rx.try_recv().is_ok() {
                     break;
@@ -1104,9 +1981,7 @@ mod tests {
                         let msg = format!("OBSERVED {}", peer);
                         let _ = stream.write_all(msg.as_bytes());
                     }
-                    Err(e)
-                        if e.kind() == std::io::ErrorKind::WouldBlock =>
-                    {
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                         thread::sleep(Duration::from_millis(10));
                         continue;
                     }
@@ -1119,10 +1994,7 @@ mod tests {
     }
 
     /// TCP sink: accept one connection, drain all bytes, exit.
-    fn spawn_tcp_sink(
-        server_ns: &str,
-        addr: SocketAddr,
-    ) -> thread::JoinHandle<Result<()>> {
+    fn spawn_tcp_sink(server_ns: &str, addr: SocketAddr) -> thread::JoinHandle<Result<()>> {
         use std::io::Read as _;
         let ns = server_ns.to_string();
         spawn_closure_in_namespace_thread(ns, move || {
@@ -1148,16 +2020,14 @@ mod tests {
         server_addr: SocketAddr,
         bytes: usize,
     ) -> Result<(Duration, u32)> {
-        use std::io::Write as _;
         use std::io::Read as _;
+        use std::io::Write as _;
         use std::time::Instant;
         let ns = client_ns.to_string();
         run_closure_in_namespace(&ns, move || {
-            let mut stream = std::net::TcpStream::connect_timeout(
-                &server_addr,
-                Duration::from_secs(5),
-            )
-            .context("tcp connect")?;
+            let mut stream =
+                std::net::TcpStream::connect_timeout(&server_addr, Duration::from_secs(5))
+                    .context("tcp connect")?;
             stream
                 .set_write_timeout(Some(Duration::from_secs(60)))
                 .context("set write timeout")?;
@@ -1237,14 +2107,15 @@ mod tests {
                 Ok(listener) => {
                     let _ = ready_tx.send(Ok(()));
                     loop {
-                        let Ok((mut stream, peer)) = listener.accept().await else { break };
+                        let Ok((mut stream, peer)) = listener.accept().await else {
+                            break;
+                        };
                         let msg = format!("OBSERVED {}", peer);
                         let _ = stream.write_all(msg.as_bytes()).await;
                     }
                 }
                 Err(e) => {
-                    let _ = ready_tx
-                        .send(Err(anyhow!("tcp reflector bind {bind}: {e}")));
+                    let _ = ready_tx.send(Err(anyhow!("tcp reflector bind {bind}: {e}")));
                 }
             }
         });
@@ -1258,25 +2129,36 @@ mod tests {
         wiring: UplinkWiring,
         port_base: u16,
     ) -> Result<(Lab, NatTestCtx)> {
-        let mut lab = Lab::new();
-        let dc = lab.add_router("dc").region("eu").build()?;
+        let lab = Lab::new();
+        let dc = lab.add_router("dc").region("eu").build().await?;
         let upstream = match wiring {
             UplinkWiring::DirectIx => None,
-            UplinkWiring::ViaPublicIsp => {
-                Some(lab.add_router("isp").region("eu").build()?)
-            }
-            UplinkWiring::ViaCgnatIsp => {
-                Some(lab.add_router("isp").region("eu").nat(NatMode::Cgnat).build()?)
-            }
+            UplinkWiring::ViaPublicIsp => Some(lab.add_router("isp").region("eu").build().await?),
+            UplinkWiring::ViaCgnatIsp => Some(
+                lab.add_router("isp")
+                    .region("eu")
+                    .nat(NatMode::Cgnat)
+                    .build()
+                    .await?,
+            ),
         };
-        let nat = { let mut rb = lab.add_router("nat").nat(nat_mode); if let Some(u) = upstream { rb = rb.upstream(u); } rb.build()? };
-        let dev = lab.add_device("dev").iface("eth0", nat, None).build()?;
-        lab.build().await?;
+        let nat = {
+            let mut rb = lab.add_router("nat").nat(nat_mode);
+            if let Some(u) = &upstream {
+                rb = rb.upstream(u.id());
+            }
+            rb.build().await?
+        };
+        let dev = lab
+            .add_device("dev")
+            .iface("eth0", nat.id(), None)
+            .build()
+            .await?;
 
-        let dc_ip = lab.router_uplink_ip(dc)?;
+        let dc_ip = lab.router_uplink_ip(dc.id())?;
         let r_dc = SocketAddr::new(IpAddr::V4(dc_ip), port_base);
         let r_ix = SocketAddr::new(IpAddr::V4(lab.ix_gw()), port_base + 1);
-        let dc_ns = lab.node_ns(dc)?.to_string();
+        let dc_ns = lab.node_ns(dc.id())?.to_string();
 
         // UDP reflector (managed by lab).
         lab.spawn_reflector(&dc_ns, r_dc)?;
@@ -1287,15 +2169,15 @@ mod tests {
 
         tokio::time::sleep(Duration::from_millis(200)).await;
 
-        let dev_ns = lab.node_ns(dev)?.to_string();
-        let dev_ip = lab.device_ip(dev)?;
+        let dev_ns = lab.node_ns(dev.id())?.to_string();
+        let dev_ip = lab.device_ip(dev.id())?;
         let expected_ip = match (nat_mode, wiring) {
             (_, UplinkWiring::ViaCgnatIsp) => {
                 let isp = lab.router_id("isp").context("missing isp")?;
                 lab.router_uplink_ip(isp)?
             }
             (NatMode::None, _) => dev_ip,
-            _ => lab.router_uplink_ip(nat)?,
+            _ => lab.router_uplink_ip(nat.id())?,
         };
         Ok((
             lab,
@@ -1314,21 +2196,21 @@ mod tests {
         mode_b: NatMode,
         port_base: u16,
     ) -> Result<DualNatLab> {
-        let mut lab = Lab::new();
-        let dc = lab.add_router("dc").region("eu").build()?;
-        let nat_a = lab.add_router("nat-a").nat(mode_a).build()?;
-        let nat_b = lab.add_router("nat-b").nat(mode_b).build()?;
+        let lab = Lab::new();
+        let dc = lab.add_router("dc").region("eu").build().await?;
+        let nat_a = lab.add_router("nat-a").nat(mode_a).build().await?;
+        let nat_b = lab.add_router("nat-b").nat(mode_b).build().await?;
         let dev = lab
             .add_device("dev")
-            .iface("eth0", nat_a, None)
-            .iface("eth1", nat_b, None)
+            .iface("eth0", nat_a.id(), None)
+            .iface("eth1", nat_b.id(), None)
             .default_via("eth0")
-            .build()?;
-        lab.build().await?;
+            .build()
+            .await?;
 
-        let dc_ip = lab.router_uplink_ip(dc)?;
+        let dc_ip = lab.router_uplink_ip(dc.id())?;
         let reflector = SocketAddr::new(IpAddr::V4(dc_ip), port_base);
-        let dc_ns = lab.node_ns(dc)?.to_string();
+        let dc_ns = lab.node_ns(dc.id())?.to_string();
 
         lab.spawn_reflector(&dc_ns, reflector)?;
         spawn_tcp_reflector_in_ns(&dc_ns, reflector).await?;
@@ -1336,9 +2218,9 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(200)).await;
         Ok(DualNatLab {
             lab,
-            dev,
-            nat_a,
-            nat_b,
+            dev: dev.id(),
+            nat_a: nat_a.id(),
+            nat_b: nat_b.id(),
             reflector,
         })
     }
@@ -1348,37 +2230,48 @@ mod tests {
         wiring: UplinkWiring,
         port_base: u16,
     ) -> Result<(Lab, String, SocketAddr, SocketAddr, Ipv4Addr)> {
-        let mut lab = Lab::new();
-        let dc = lab.add_router("dc").region("eu").build()?;
+        let lab = Lab::new();
+        let dc = lab.add_router("dc").region("eu").build().await?;
         let upstream = match wiring {
             UplinkWiring::DirectIx => None,
-            UplinkWiring::ViaPublicIsp => {
-                Some(lab.add_router("isp").region("eu").build()?)
-            }
-            UplinkWiring::ViaCgnatIsp => {
-                Some(lab.add_router("isp").region("eu").nat(NatMode::Cgnat).build()?)
-            }
+            UplinkWiring::ViaPublicIsp => Some(lab.add_router("isp").region("eu").build().await?),
+            UplinkWiring::ViaCgnatIsp => Some(
+                lab.add_router("isp")
+                    .region("eu")
+                    .nat(NatMode::Cgnat)
+                    .build()
+                    .await?,
+            ),
         };
-        let nat = { let mut rb = lab.add_router("nat").nat(nat_mode); if let Some(u) = upstream { rb = rb.upstream(u); } rb.build()? };
-        let dev = lab.add_device("dev").iface("eth0", nat, None).build()?;
-        lab.build().await?;
+        let nat = {
+            let mut rb = lab.add_router("nat").nat(nat_mode);
+            if let Some(u) = &upstream {
+                rb = rb.upstream(u.id());
+            }
+            rb.build().await?
+        };
+        let dev = lab
+            .add_device("dev")
+            .iface("eth0", nat.id(), None)
+            .build()
+            .await?;
 
-        let dc_ip = lab.router_uplink_ip(dc)?;
+        let dc_ip = lab.router_uplink_ip(dc.id())?;
         let r_dc = SocketAddr::new(IpAddr::V4(dc_ip), port_base);
         let r_ix = SocketAddr::new(IpAddr::V4(lab.ix_gw()), port_base + 1);
-        let dc_ns = lab.node_ns(dc)?.to_string();
+        let dc_ns = lab.node_ns(dc.id())?.to_string();
         lab.spawn_reflector(&dc_ns, r_dc)?;
         lab.spawn_reflector_on_ix(r_ix)?;
         tokio::time::sleep(Duration::from_millis(200)).await;
 
-        let dev_ns = lab.node_ns(dev)?.to_string();
+        let dev_ns = lab.node_ns(dev.id())?.to_string();
         let expected_ip = match (nat_mode, wiring) {
             (_, UplinkWiring::ViaCgnatIsp) => {
                 let isp = lab.router_id("isp").context("missing isp")?;
                 lab.router_uplink_ip(isp)?
             }
-            (NatMode::None, _) => lab.device_ip(dev)?,
-            _ => lab.router_uplink_ip(nat)?,
+            (NatMode::None, _) => lab.device_ip(dev.id())?,
+            _ => lab.router_uplink_ip(nat.id())?,
         };
         Ok((lab, dev_ns, r_dc, r_ix, expected_ip))
     }
@@ -1395,7 +2288,9 @@ mod tests {
                 Ok(listener) => {
                     let _ = ready_tx.send(Ok(()));
                     loop {
-                        let Ok((mut stream, _)) = listener.accept().await else { break };
+                        let Ok((mut stream, _)) = listener.accept().await else {
+                            break;
+                        };
                         let mut buf = [0u8; 64];
                         if let Ok(n) = stream.read(&mut buf).await {
                             let _ = stream.write_all(&buf[..n]).await;
@@ -1444,11 +2339,10 @@ mod tests {
         let ns = ns.to_string();
         let timeout = Duration::from_millis(500);
         spawn_task_in_netns(&ns, move || async move {
-            let mut stream =
-                tokio::time::timeout(timeout, tokio::net::TcpStream::connect(target))
-                    .await
-                    .context("tcp connect timeout")?
-                    .context("tcp connect")?;
+            let mut stream = tokio::time::timeout(timeout, tokio::net::TcpStream::connect(target))
+                .await
+                .context("tcp connect timeout")?
+                .context("tcp connect")?;
             let payload = b"ping";
             tokio::time::timeout(timeout, stream.write_all(payload))
                 .await
@@ -1538,27 +2432,26 @@ mod tests {
         let host_inode_before = current_netns_inode()?;
         debug!(host_inode_before = %host_inode_before, "diag: host inode before build");
 
-        let mut lab = Lab::new();
-        let isp = lab.add_router("isp1").region("eu").build()?;
-        let home = lab.add_router("home1").upstream(isp).nat(NatMode::DestinationIndependent).build()?;
-        lab.add_device("dev1").iface("eth0", home, None).build()?;
+        let lab = Lab::new();
+        let isp = lab.add_router("isp1").region("eu").build().await?;
+        let home = lab
+            .add_router("home1")
+            .upstream(isp.id())
+            .nat(NatMode::DestinationIndependent)
+            .build()
+            .await?;
+        lab.add_device("dev1")
+            .iface("eth0", home.id(), None)
+            .build()
+            .await?;
 
-        let ns_plan = lab.core.all_ns_names();
+        let ns_plan = lab.inner.lock().unwrap().core.all_ns_names();
         eprintln!("diag[pre-build] host_inode={}", current_netns_inode()?);
         for ns in &ns_plan {
             dump_ns_state(ns, "pre-build");
         }
 
-        if let Err(err) = lab.build().await {
-            eprintln!("diag[build-error] host_inode={}", current_netns_inode()?);
-            eprintln!("diag[build-error] build_err={err:#}");
-            for ns in &ns_plan {
-                dump_ns_state(ns, "build-error");
-            }
-            return Err(err).context("smoke_debug_netns_exit_trace build failed");
-        }
-
-        let ns_after = lab.core.all_ns_names();
+        let ns_after = lab.inner.lock().unwrap().core.all_ns_names();
         eprintln!("diag[post-build] host_inode={}", current_netns_inode()?);
         for ns in &ns_after {
             dump_ns_state(ns, "post-build");
@@ -1566,7 +2459,7 @@ mod tests {
 
         let dev_id = lab.device_id("dev1").context("missing dev1")?;
         let dev_ns = lab.node_ns(dev_id)?.to_string();
-        let lan_gw = lab.router_downlink_gw(home)?;
+        let lan_gw = lab.router_downlink_gw(home.id())?;
         ping_in_ns(&dev_ns, &lan_gw.to_string())?;
 
         let host_inode_after = current_netns_inode()?;
@@ -1579,17 +2472,24 @@ mod tests {
     #[traced_test]
     async fn nat_dest_independent_keeps_port() -> Result<()> {
         check_caps()?;
-        let mut lab = Lab::new();
-        let isp = lab.add_router("isp1").region("eu").build()?;
-        let dc = lab.add_router("dc1").region("eu").build()?;
-        let home = lab.add_router("home1").upstream(isp).nat(NatMode::DestinationIndependent).build()?;
-        lab.add_device("dev1").iface("eth0", home, None).build()?;
-        lab.build().await?;
+        let lab = Lab::new();
+        let isp = lab.add_router("isp1").region("eu").build().await?;
+        let dc = lab.add_router("dc1").region("eu").build().await?;
+        let home = lab
+            .add_router("home1")
+            .upstream(isp.id())
+            .nat(NatMode::DestinationIndependent)
+            .build()
+            .await?;
+        lab.add_device("dev1")
+            .iface("eth0", home.id(), None)
+            .build()
+            .await?;
 
         // Reflector in DC namespace.
-        let dc_ip = lab.router_uplink_ip(dc)?;
+        let dc_ip = lab.router_uplink_ip(dc.id())?;
         let r1 = SocketAddr::new(IpAddr::V4(dc_ip), 3478);
-        let dc_ns = lab.node_ns(dc)?.to_string();
+        let dc_ns = lab.node_ns(dc.id())?.to_string();
         lab.spawn_reflector(&dc_ns, r1)?;
 
         // Reflector on IX bridge (lab-root ns).
@@ -1614,16 +2514,23 @@ mod tests {
     #[traced_test]
     async fn nat_dest_dependent_changes_port() -> Result<()> {
         check_caps()?;
-        let mut lab = Lab::new();
-        let isp = lab.add_router("isp1").region("eu").build()?;
-        let dc = lab.add_router("dc1").region("eu").build()?;
-        let home = lab.add_router("home1").upstream(isp).nat(NatMode::DestinationDependent).build()?;
-        lab.add_device("dev1").iface("eth0", home, None).build()?;
-        lab.build().await?;
+        let lab = Lab::new();
+        let isp = lab.add_router("isp1").region("eu").build().await?;
+        let dc = lab.add_router("dc1").region("eu").build().await?;
+        let home = lab
+            .add_router("home1")
+            .upstream(isp.id())
+            .nat(NatMode::DestinationDependent)
+            .build()
+            .await?;
+        lab.add_device("dev1")
+            .iface("eth0", home.id(), None)
+            .build()
+            .await?;
 
-        let dc_ip = lab.router_uplink_ip(dc)?;
+        let dc_ip = lab.router_uplink_ip(dc.id())?;
         let r1 = SocketAddr::new(IpAddr::V4(dc_ip), 4478);
-        let dc_ns = lab.node_ns(dc)?.to_string();
+        let dc_ns = lab.node_ns(dc.id())?.to_string();
         lab.spawn_reflector(&dc_ns, r1)?;
 
         let r2 = SocketAddr::new(IpAddr::V4(lab.ix_gw()), 4479);
@@ -1649,22 +2556,34 @@ mod tests {
     #[traced_test]
     async fn cgnat_hides_behind_isp_public_ip() -> Result<()> {
         check_caps()?;
-        let mut lab = Lab::new();
-        let isp = lab.add_router("isp1").region("eu").nat(NatMode::Cgnat).build()?;
-        let dc = lab.add_router("dc1").region("eu").build()?;
-        let home = lab.add_router("home1").upstream(isp).nat(NatMode::DestinationIndependent).build()?;
-        lab.add_device("dev1").iface("eth0", home, None).build()?;
-        lab.build().await?;
+        let lab = Lab::new();
+        let isp = lab
+            .add_router("isp1")
+            .region("eu")
+            .nat(NatMode::Cgnat)
+            .build()
+            .await?;
+        let dc = lab.add_router("dc1").region("eu").build().await?;
+        let home = lab
+            .add_router("home1")
+            .upstream(isp.id())
+            .nat(NatMode::DestinationIndependent)
+            .build()
+            .await?;
+        lab.add_device("dev1")
+            .iface("eth0", home.id(), None)
+            .build()
+            .await?;
 
-        let dc_ip = lab.router_uplink_ip(dc)?;
+        let dc_ip = lab.router_uplink_ip(dc.id())?;
         let r = SocketAddr::new(IpAddr::V4(dc_ip), 5478);
-        let dc_ns = lab.node_ns(dc)?.to_string();
+        let dc_ns = lab.node_ns(dc.id())?.to_string();
         lab.spawn_reflector(&dc_ns, r)?;
 
         tokio::time::sleep(Duration::from_millis(250)).await;
 
         let o = lab.probe_udp_mapping("dev1", r)?;
-        let isp_public = IpAddr::V4(lab.router_uplink_ip(isp)?);
+        let isp_public = IpAddr::V4(lab.router_uplink_ip(isp.id())?);
 
         assert_eq!(
             o.observed.ip(),
@@ -1678,28 +2597,44 @@ mod tests {
     #[traced_test]
     async fn iroh_nat_like_nodes_report_public_203_mapped_addrs() -> Result<()> {
         check_caps()?;
-        let mut lab = Lab::new();
-        let dc = lab.add_router("dc").region("eu").build()?;
-        let isp = lab.add_router("isp").region("eu").nat(NatMode::Cgnat).build()?;
-        let lan_provider = lab.add_router("lan-provider").upstream(isp).nat(NatMode::DestinationIndependent).build()?;
-        let lan_fetcher = lab.add_router("lan-fetcher").upstream(isp).nat(NatMode::DestinationIndependent).build()?;
+        let lab = Lab::new();
+        let dc = lab.add_router("dc").region("eu").build().await?;
+        let isp = lab
+            .add_router("isp")
+            .region("eu")
+            .nat(NatMode::Cgnat)
+            .build()
+            .await?;
+        let lan_provider = lab
+            .add_router("lan-provider")
+            .upstream(isp.id())
+            .nat(NatMode::DestinationIndependent)
+            .build()
+            .await?;
+        let lan_fetcher = lab
+            .add_router("lan-fetcher")
+            .upstream(isp.id())
+            .nat(NatMode::DestinationIndependent)
+            .build()
+            .await?;
         lab.add_device("provider")
-            .iface("eth0", lan_provider, None)
-            .build()?;
+            .iface("eth0", lan_provider.id(), None)
+            .build()
+            .await?;
         lab.add_device("fetcher")
-            .iface("eth0", lan_fetcher, None)
-            .build()?;
-        lab.build().await?;
+            .iface("eth0", lan_fetcher.id(), None)
+            .build()
+            .await?;
 
-        let dc_ip = lab.router_uplink_ip(dc)?;
+        let dc_ip = lab.router_uplink_ip(dc.id())?;
         let reflector = SocketAddr::new(IpAddr::V4(dc_ip), 6478);
-        let dc_ns = lab.node_ns(dc)?.to_string();
+        let dc_ns = lab.node_ns(dc.id())?.to_string();
         lab.spawn_reflector(&dc_ns, reflector)?;
         tokio::time::sleep(Duration::from_millis(250)).await;
 
         let provider_obs = lab.probe_udp_mapping("provider", reflector)?;
         let fetcher_obs = lab.probe_udp_mapping("fetcher", reflector)?;
-        let isp_public = lab.router_uplink_ip(isp)?;
+        let isp_public = lab.router_uplink_ip(isp.id())?;
 
         let provider_ip = match provider_obs.observed.ip() {
             IpAddr::V4(ip) => ip,
@@ -1775,15 +2710,22 @@ gateway = "lan1"
     #[traced_test]
     async fn smoke_ping_gateway() -> Result<()> {
         check_caps()?;
-        let mut lab = Lab::new();
-        let isp = lab.add_router("isp1").region("eu").build()?;
-        let home = lab.add_router("home1").upstream(isp).nat(NatMode::DestinationIndependent).build()?;
-        lab.add_device("dev1").iface("eth0", home, None).build()?;
-        lab.build().await?;
+        let lab = Lab::new();
+        let isp = lab.add_router("isp1").region("eu").build().await?;
+        let home = lab
+            .add_router("home1")
+            .upstream(isp.id())
+            .nat(NatMode::DestinationIndependent)
+            .build()
+            .await?;
+        lab.add_device("dev1")
+            .iface("eth0", home.id(), None)
+            .build()
+            .await?;
 
         let dev_id = lab.device_id("dev1").expect("dev1 exists");
         let dev_ns = lab.node_ns(dev_id)?.to_string();
-        let lan_gw = lab.router_downlink_gw(home)?;
+        let lan_gw = lab.router_downlink_gw(home.id())?;
         ping_in_ns(&dev_ns, &lan_gw.to_string())?;
         Ok(())
     }
@@ -1792,16 +2734,23 @@ gateway = "lan1"
     #[traced_test]
     async fn smoke_udp_dc_roundtrip() -> Result<()> {
         check_caps()?;
-        let mut lab = Lab::new();
-        let isp = lab.add_router("isp1").region("eu").build()?;
-        let dc = lab.add_router("dc1").region("eu").build()?;
-        let home = lab.add_router("home1").upstream(isp).nat(NatMode::DestinationIndependent).build()?;
-        lab.add_device("dev1").iface("eth0", home, None).build()?;
-        lab.build().await?;
+        let lab = Lab::new();
+        let isp = lab.add_router("isp1").region("eu").build().await?;
+        let dc = lab.add_router("dc1").region("eu").build().await?;
+        let home = lab
+            .add_router("home1")
+            .upstream(isp.id())
+            .nat(NatMode::DestinationIndependent)
+            .build()
+            .await?;
+        lab.add_device("dev1")
+            .iface("eth0", home.id(), None)
+            .build()
+            .await?;
 
-        let dc_ip = lab.router_uplink_ip(dc)?;
+        let dc_ip = lab.router_uplink_ip(dc.id())?;
         let r = SocketAddr::new(IpAddr::V4(dc_ip), 3478);
-        let dc_ns = lab.node_ns(dc)?.to_string();
+        let dc_ns = lab.node_ns(dc.id())?.to_string();
         lab.spawn_reflector(&dc_ns, r)?;
 
         tokio::time::sleep(Duration::from_millis(250)).await;
@@ -1816,16 +2765,23 @@ gateway = "lan1"
     #[traced_test]
     async fn smoke_tcp_dc_roundtrip() -> Result<()> {
         check_caps()?;
-        let mut lab = Lab::new();
-        let isp = lab.add_router("isp1").region("eu").build()?;
-        let dc = lab.add_router("dc1").region("eu").build()?;
-        let home = lab.add_router("home1").upstream(isp).nat(NatMode::DestinationIndependent).build()?;
-        lab.add_device("dev1").iface("eth0", home, None).build()?;
-        lab.build().await?;
+        let lab = Lab::new();
+        let isp = lab.add_router("isp1").region("eu").build().await?;
+        let dc = lab.add_router("dc1").region("eu").build().await?;
+        let home = lab
+            .add_router("home1")
+            .upstream(isp.id())
+            .nat(NatMode::DestinationIndependent)
+            .build()
+            .await?;
+        lab.add_device("dev1")
+            .iface("eth0", home.id(), None)
+            .build()
+            .await?;
 
-        let dc_ip = lab.router_uplink_ip(dc)?;
+        let dc_ip = lab.router_uplink_ip(dc.id())?;
         let bind = SocketAddr::new(IpAddr::V4(dc_ip), 9000);
-        let dc_ns = lab.node_ns(dc)?.to_string();
+        let dc_ns = lab.node_ns(dc.id())?.to_string();
         spawn_tcp_echo_in(&dc_ns, bind).await?;
 
         tokio::time::sleep(Duration::from_millis(250)).await;
@@ -1840,13 +2796,17 @@ gateway = "lan1"
     #[traced_test]
     async fn smoke_ping_home_to_isp() -> Result<()> {
         check_caps()?;
-        let mut lab = Lab::new();
-        let isp = lab.add_router("isp1").region("eu").build()?;
-        let home = lab.add_router("home1").upstream(isp).nat(NatMode::DestinationIndependent).build()?;
-        lab.build().await?;
+        let lab = Lab::new();
+        let isp = lab.add_router("isp1").region("eu").build().await?;
+        let home = lab
+            .add_router("home1")
+            .upstream(isp.id())
+            .nat(NatMode::DestinationIndependent)
+            .build()
+            .await?;
 
-        let home_ns = lab.node_ns(home)?.to_string();
-        let isp_wan_ip = lab.router_downlink_gw(isp)?;
+        let home_ns = lab.node_ns(home.id())?.to_string();
+        let isp_wan_ip = lab.router_downlink_gw(isp.id())?;
         ping_in_ns(&home_ns, &isp_wan_ip.to_string())?;
         Ok(())
     }
@@ -1855,14 +2815,13 @@ gateway = "lan1"
     #[traced_test]
     async fn smoke_ping_isp_to_ix_and_dc() -> Result<()> {
         check_caps()?;
-        let mut lab = Lab::new();
-        let isp = lab.add_router("isp1").region("eu").build()?;
-        let dc = lab.add_router("dc1").region("eu").build()?;
-        lab.build().await?;
+        let lab = Lab::new();
+        let isp = lab.add_router("isp1").region("eu").build().await?;
+        let dc = lab.add_router("dc1").region("eu").build().await?;
 
-        let isp_ns = lab.node_ns(isp)?.to_string();
+        let isp_ns = lab.node_ns(isp.id())?.to_string();
         ping_in_ns(&isp_ns, &lab.ix_gw().to_string())?;
-        let dc_ip = lab.router_uplink_ip(dc)?;
+        let dc_ip = lab.router_uplink_ip(dc.id())?;
         ping_in_ns(&isp_ns, &dc_ip.to_string())?;
         Ok(())
     }
@@ -1871,29 +2830,39 @@ gateway = "lan1"
     #[traced_test]
     async fn smoke_nat_homes_can_ping_public_relay_device() -> Result<()> {
         check_caps()?;
-        let mut lab = Lab::new();
+        let lab = Lab::new();
 
-        let dc = lab.add_router("dc").build()?;
-        let lan_provider =
-            lab.add_router("lan-provider").nat(NatMode::DestinationIndependent).build()?;
-        let lan_fetcher =
-            lab.add_router("lan-fetcher").nat(NatMode::DestinationIndependent).build()?;
+        let dc = lab.add_router("dc").build().await?;
+        let lan_provider = lab
+            .add_router("lan-provider")
+            .nat(NatMode::DestinationIndependent)
+            .build()
+            .await?;
+        let lan_fetcher = lab
+            .add_router("lan-fetcher")
+            .nat(NatMode::DestinationIndependent)
+            .build()
+            .await?;
 
-        let relay = lab.add_device("relay").iface("eth0", dc, None).build()?;
+        let relay = lab
+            .add_device("relay")
+            .iface("eth0", dc.id(), None)
+            .build()
+            .await?;
         let provider = lab
             .add_device("provider")
-            .iface("eth0", lan_provider, None)
-            .build()?;
+            .iface("eth0", lan_provider.id(), None)
+            .build()
+            .await?;
         let fetcher = lab
             .add_device("fetcher")
-            .iface("eth0", lan_fetcher, None)
-            .build()?;
+            .iface("eth0", lan_fetcher.id(), None)
+            .build()
+            .await?;
 
-        lab.build().await?;
-
-        let relay_ip = lab.device_ip(relay)?;
-        let provider_ns = lab.node_ns(provider)?.to_string();
-        let fetcher_ns = lab.node_ns(fetcher)?.to_string();
+        let relay_ip = lab.device_ip(relay.id())?;
+        let provider_ns = lab.node_ns(provider.id())?.to_string();
+        let fetcher_ns = lab.node_ns(fetcher.id())?.to_string();
 
         ping_in_ns(&provider_ns, &relay_ip.to_string())?;
         ping_in_ns(&fetcher_ns, &relay_ip.to_string())?;
@@ -1996,23 +2965,46 @@ gateway = "lan1"
     #[traced_test]
     async fn nat_private_reachability_isolated_public_reachable() -> Result<()> {
         check_caps()?;
-        let mut lab = Lab::new();
-        let dc = lab.add_router("dc").region("eu").build()?;
-        let nat_a = lab.add_router("nat-a").nat(NatMode::DestinationIndependent).build()?;
-        let nat_b = lab.add_router("nat-b").nat(NatMode::DestinationIndependent).build()?;
+        let lab = Lab::new();
+        let dc = lab.add_router("dc").region("eu").build().await?;
+        let nat_a = lab
+            .add_router("nat-a")
+            .nat(NatMode::DestinationIndependent)
+            .build()
+            .await?;
+        let nat_b = lab
+            .add_router("nat-b")
+            .nat(NatMode::DestinationIndependent)
+            .build()
+            .await?;
 
-        let relay = lab.add_device("relay").iface("eth0", dc, None).build()?;
-        let a1 = lab.add_device("a1").iface("eth0", nat_a, None).build()?;
-        let a2 = lab.add_device("a2").iface("eth0", nat_a, None).build()?;
-        let b1 = lab.add_device("b1").iface("eth0", nat_b, None).build()?;
-        lab.build().await?;
+        let relay = lab
+            .add_device("relay")
+            .iface("eth0", dc.id(), None)
+            .build()
+            .await?;
+        let a1 = lab
+            .add_device("a1")
+            .iface("eth0", nat_a.id(), None)
+            .build()
+            .await?;
+        let a2 = lab
+            .add_device("a2")
+            .iface("eth0", nat_a.id(), None)
+            .build()
+            .await?;
+        let b1 = lab
+            .add_device("b1")
+            .iface("eth0", nat_b.id(), None)
+            .build()
+            .await?;
 
-        let a1_ns = lab.node_ns(a1)?.to_string();
-        let b1_ns = lab.node_ns(b1)?.to_string();
-        let a2_ip = lab.device_ip(a2)?;
-        let b1_ip = lab.device_ip(b1)?;
-        let a1_ip = lab.device_ip(a1)?;
-        let relay_ip = lab.device_ip(relay)?;
+        let a1_ns = lab.node_ns(a1.id())?.to_string();
+        let b1_ns = lab.node_ns(b1.id())?.to_string();
+        let a2_ip = lab.device_ip(a2.id())?;
+        let b1_ip = lab.device_ip(b1.id())?;
+        let a1_ip = lab.device_ip(a1.id())?;
+        let relay_ip = lab.device_ip(relay.id())?;
 
         ping_in_ns(&a1_ns, &a2_ip.to_string())?;
         ping_fails_in_ns(&a1_ns, &b1_ip.to_string())?;
@@ -2021,14 +3013,14 @@ gateway = "lan1"
         ping_in_ns(&a1_ns, &relay_ip.to_string())?;
         ping_in_ns(&b1_ns, &relay_ip.to_string())?;
 
-        let nat_a_public = lab.router_uplink_ip(nat_a)?;
-        let nat_b_public = lab.router_uplink_ip(nat_b)?;
+        let nat_a_public = lab.router_uplink_ip(nat_a.id())?;
+        let nat_b_public = lab.router_uplink_ip(nat_b.id())?;
         ping_in_ns(&a1_ns, &nat_b_public.to_string())?;
         ping_in_ns(&b1_ns, &nat_a_public.to_string())?;
 
-        let dc_ip = lab.router_uplink_ip(dc)?;
+        let dc_ip = lab.router_uplink_ip(dc.id())?;
         let reflector = SocketAddr::new(IpAddr::V4(dc_ip), 12000);
-        let dc_ns = lab.node_ns(dc)?.to_string();
+        let dc_ns = lab.node_ns(dc.id())?.to_string();
         lab.spawn_reflector(&dc_ns, reflector)?;
         tokio::time::sleep(Duration::from_millis(200)).await;
 
@@ -2045,15 +3037,27 @@ gateway = "lan1"
     #[traced_test]
     async fn smoke_device_to_device_same_lan() -> Result<()> {
         check_caps()?;
-        let mut lab = Lab::new();
-        let isp = lab.add_router("isp1").region("eu").build()?;
-        let home = lab.add_router("home1").upstream(isp).nat(NatMode::DestinationIndependent).build()?;
-        let dev1 = lab.add_device("dev1").iface("eth0", home, None).build()?;
-        let dev2 = lab.add_device("dev2").iface("eth0", home, None).build()?;
-        lab.build().await?;
+        let lab = Lab::new();
+        let isp = lab.add_router("isp1").region("eu").build().await?;
+        let home = lab
+            .add_router("home1")
+            .upstream(isp.id())
+            .nat(NatMode::DestinationIndependent)
+            .build()
+            .await?;
+        let dev1 = lab
+            .add_device("dev1")
+            .iface("eth0", home.id(), None)
+            .build()
+            .await?;
+        let dev2 = lab
+            .add_device("dev2")
+            .iface("eth0", home.id(), None)
+            .build()
+            .await?;
 
-        let dev1_ns = lab.node_ns(dev1)?.to_string();
-        let dev2_ip = lab.device_ip(dev2)?;
+        let dev1_ns = lab.node_ns(dev1.id())?.to_string();
+        let dev2_ip = lab.device_ip(dev2.id())?;
         ping_in_ns(&dev1_ns, &dev2_ip.to_string())?;
         Ok(())
     }
@@ -2062,35 +3066,36 @@ gateway = "lan1"
     #[traced_test]
     async fn latency_directional_between_regions() -> Result<()> {
         check_caps()?;
-        let mut lab = Lab::new();
+        let lab = Lab::new();
         lab.add_region_latency("eu", "us", 30);
         lab.add_region_latency("us", "eu", 70);
-        let dc_eu = lab.add_router("dc-eu").region("eu").build()?;
-        let dc_us = lab.add_router("dc-us").region("us").build()?;
+        let dc_eu = lab.add_router("dc-eu").region("eu").build().await?;
+        let dc_us = lab.add_router("dc-us").region("us").build().await?;
         let dev_eu = lab
             .add_device("dev-eu")
-            .iface("eth0", dc_eu, None)
-            .build()?;
+            .iface("eth0", dc_eu.id(), None)
+            .build()
+            .await?;
         let dev_us = lab
             .add_device("dev-us")
-            .iface("eth0", dc_us, None)
-            .build()?;
-        lab.build().await?;
+            .iface("eth0", dc_us.id(), None)
+            .build()
+            .await?;
 
-        let dc_us_ip = lab.router_uplink_ip(dc_us)?;
+        let dc_us_ip = lab.router_uplink_ip(dc_us.id())?;
         let r_us = SocketAddr::new(IpAddr::V4(dc_us_ip), 9010);
-        let dc_us_ns = lab.node_ns(dc_us)?.to_string();
+        let dc_us_ns = lab.node_ns(dc_us.id())?.to_string();
         lab.spawn_reflector(&dc_us_ns, r_us)?;
 
-        let dc_eu_ip = lab.router_uplink_ip(dc_eu)?;
+        let dc_eu_ip = lab.router_uplink_ip(dc_eu.id())?;
         let r_eu = SocketAddr::new(IpAddr::V4(dc_eu_ip), 9011);
-        let dc_eu_ns = lab.node_ns(dc_eu)?.to_string();
+        let dc_eu_ns = lab.node_ns(dc_eu.id())?.to_string();
         lab.spawn_reflector(&dc_eu_ns, r_eu)?;
 
         tokio::time::sleep(Duration::from_millis(250)).await;
 
-        let dev_eu_ns = lab.node_ns(dev_eu)?.to_string();
-        let dev_us_ns = lab.node_ns(dev_us)?.to_string();
+        let dev_eu_ns = lab.node_ns(dev_eu.id())?.to_string();
+        let dev_us_ns = lab.node_ns(dev_us.id())?.to_string();
         let rtt_eu_to_us = udp_rtt_in_ns(&dev_eu_ns, r_us)?;
         let rtt_us_to_eu = udp_rtt_in_ns(&dev_us_ns, r_eu)?;
         let expected = Duration::from_millis(100);
@@ -2115,17 +3120,19 @@ gateway = "lan1"
     #[traced_test]
     async fn latency_inter_region_dc_to_dc() -> Result<()> {
         check_caps()?;
-        let mut lab = Lab::new();
+        let lab = Lab::new();
         lab.add_region_latency("eu", "us", 50);
         lab.add_region_latency("us", "eu", 50);
-        let dc_eu = lab.add_router("dc-eu").region("eu").build()?;
-        let dc_us = lab.add_router("dc-us").region("us").build()?;
-        lab.add_device("dev1").iface("eth0", dc_eu, None).build()?;
-        lab.build().await?;
+        let dc_eu = lab.add_router("dc-eu").region("eu").build().await?;
+        let dc_us = lab.add_router("dc-us").region("us").build().await?;
+        lab.add_device("dev1")
+            .iface("eth0", dc_eu.id(), None)
+            .build()
+            .await?;
 
-        let dc_us_ip = lab.router_uplink_ip(dc_us)?;
+        let dc_us_ip = lab.router_uplink_ip(dc_us.id())?;
         let r = SocketAddr::new(IpAddr::V4(dc_us_ip), 9000);
-        let dc_us_ns = lab.node_ns(dc_us)?.to_string();
+        let dc_us_ns = lab.node_ns(dc_us.id())?.to_string();
         lab.spawn_reflector(&dc_us_ns, r)?;
         tokio::time::sleep(Duration::from_millis(250)).await;
 
@@ -2145,19 +3152,19 @@ gateway = "lan1"
         check_caps()?;
 
         async fn measure(impair: Option<Impair>) -> Result<Duration> {
-            let mut lab = Lab::new();
+            let lab = Lab::new();
             lab.add_region_latency("eu", "us", 40);
             lab.add_region_latency("us", "eu", 40);
-            let dc_eu = lab.add_router("dc-eu").region("eu").build()?;
-            let dc_us = lab.add_router("dc-us").region("us").build()?;
+            let dc_eu = lab.add_router("dc-eu").region("eu").build().await?;
+            let dc_us = lab.add_router("dc-us").region("us").build().await?;
             lab.add_device("dev1")
-                .iface("eth0", dc_eu, impair)
-                .build()?;
-            lab.build().await?;
+                .iface("eth0", dc_eu.id(), impair)
+                .build()
+                .await?;
 
-            let dc_us_ip = lab.router_uplink_ip(dc_us)?;
+            let dc_us_ip = lab.router_uplink_ip(dc_us.id())?;
             let r = SocketAddr::new(IpAddr::V4(dc_us_ip), 9001);
-            let dc_us_ns = lab.node_ns(dc_us)?.to_string();
+            let dc_us_ns = lab.node_ns(dc_us.id())?.to_string();
             lab.spawn_reflector(&dc_us_ns, r)?;
             tokio::time::sleep(Duration::from_millis(250)).await;
 
@@ -2179,32 +3186,32 @@ gateway = "lan1"
     #[traced_test]
     async fn latency_manual_impair_applies() -> Result<()> {
         check_caps()?;
-        let mut lab = Lab::new();
-        let dc_eu = lab.add_router("dc-eu").region("eu").build()?;
-        let dc_us = lab.add_router("dc-us").region("us").build()?;
+        let lab = Lab::new();
+        let dc_eu = lab.add_router("dc-eu").region("eu").build().await?;
+        let dc_us = lab.add_router("dc-us").region("us").build().await?;
         lab.add_region_latency("eu", "us", 20);
         lab.add_region_latency("us", "eu", 20);
         let dev = lab
             .add_device("dev1")
             .iface(
                 "eth0",
-                dc_eu,
+                dc_eu.id(),
                 Some(Impair::Manual {
                     rate: 10_000,
                     loss: 0.0,
                     latency: 60,
                 }),
             )
-            .build()?;
-        lab.build().await?;
+            .build()
+            .await?;
 
-        let dc_us_ip = lab.router_uplink_ip(dc_us)?;
+        let dc_us_ip = lab.router_uplink_ip(dc_us.id())?;
         let r = SocketAddr::new(IpAddr::V4(dc_us_ip), 9020);
-        let dc_us_ns = lab.node_ns(dc_us)?.to_string();
+        let dc_us_ns = lab.node_ns(dc_us.id())?.to_string();
         lab.spawn_reflector(&dc_us_ns, r)?;
         tokio::time::sleep(Duration::from_millis(250)).await;
 
-        let dev_ns = lab.node_ns(dev)?.to_string();
+        let dev_ns = lab.node_ns(dev.id())?.to_string();
         let rtt = udp_rtt_in_ns(&dev_ns, r)?;
         assert!(
             rtt >= Duration::from_millis(90),
@@ -2217,15 +3224,29 @@ gateway = "lan1"
     #[traced_test]
     async fn isp_home_wan_pool_selection() -> Result<()> {
         check_caps()?;
-        let mut lab = Lab::new();
-        let isp_public = lab.add_router("isp-public").region("eu").build()?;
-        let isp_cgnat = lab.add_router("isp-cgnat").region("eu").nat(NatMode::Cgnat).build()?;
-        let home_public = lab.add_router("home-public").upstream(isp_public).nat(NatMode::DestinationIndependent).build()?;
-        let home_cgnat = lab.add_router("home-cgnat").upstream(isp_cgnat).nat(NatMode::DestinationIndependent).build()?;
-        lab.build().await?;
+        let lab = Lab::new();
+        let isp_public = lab.add_router("isp-public").region("eu").build().await?;
+        let isp_cgnat = lab
+            .add_router("isp-cgnat")
+            .region("eu")
+            .nat(NatMode::Cgnat)
+            .build()
+            .await?;
+        let home_public = lab
+            .add_router("home-public")
+            .upstream(isp_public.id())
+            .nat(NatMode::DestinationIndependent)
+            .build()
+            .await?;
+        let home_cgnat = lab
+            .add_router("home-cgnat")
+            .upstream(isp_cgnat.id())
+            .nat(NatMode::DestinationIndependent)
+            .build()
+            .await?;
 
-        let wan_public = lab.router_uplink_ip(home_public)?;
-        let wan_cgnat = lab.router_uplink_ip(home_cgnat)?;
+        let wan_public = lab.router_uplink_ip(home_public.id())?;
+        let wan_cgnat = lab.router_uplink_ip(home_cgnat.id())?;
 
         let is_private_10 = |ip: Ipv4Addr| ip.octets()[0] == 10;
         assert!(
@@ -2243,28 +3264,33 @@ gateway = "lan1"
     #[traced_test]
     async fn dynamic_set_impair_changes_rtt() -> Result<()> {
         check_caps()?;
-        let mut lab = Lab::new();
-        let dc = lab.add_router("dc1").region("eu").build()?;
-        let dev = lab.add_device("dev1").iface("eth0", dc, None).build()?;
-        lab.build().await?;
+        let lab = Lab::new();
+        let dc = lab.add_router("dc1").region("eu").build().await?;
+        let dev = lab
+            .add_device("dev1")
+            .iface("eth0", dc.id(), None)
+            .build()
+            .await?;
 
-        let dc_ip = lab.router_uplink_ip(dc)?;
+        let dc_ip = lab.router_uplink_ip(dc.id())?;
         let r = SocketAddr::new(IpAddr::V4(dc_ip), 9100);
-        let dc_ns = lab.node_ns(dc)?.to_string();
+        let dc_ns = lab.node_ns(dc.id())?.to_string();
         lab.spawn_reflector(&dc_ns, r)?;
         tokio::time::sleep(Duration::from_millis(250)).await;
 
-        let dev_ns = lab.node_ns(dev)?.to_string();
+        let dev_ns = lab.node_ns(dev.id())?.to_string();
         let base_rtt = udp_rtt_in_ns(&dev_ns, r)?;
 
-        lab.set_impair("dev1", None, Some(Impair::Mobile))?;
+        let dev_handle = lab.device_by_name("dev1").unwrap();
+        let default_if = dev_handle.default_iface().name().to_string();
+        dev_handle.set_impair(&default_if, Some(Impair::Mobile))?;
         let impaired_rtt = udp_rtt_in_ns(&dev_ns, r)?;
         assert!(
             impaired_rtt >= base_rtt + Duration::from_millis(40),
             "expected impaired RTT >= base + 40ms, base={base_rtt:?} impaired={impaired_rtt:?}"
         );
 
-        lab.set_impair("dev1", None, None)?;
+        dev_handle.set_impair(&default_if, None)?;
         let recovered_rtt = udp_rtt_in_ns(&dev_ns, r)?;
         assert!(
             recovered_rtt < base_rtt + Duration::from_millis(30),
@@ -2277,21 +3303,27 @@ gateway = "lan1"
     #[traced_test]
     async fn dynamic_link_down_up_connectivity() -> Result<()> {
         check_caps()?;
-        let mut lab = Lab::new();
-        let dc = lab.add_router("dc1").region("eu").build()?;
-        let dev = lab.add_device("dev1").iface("eth0", dc, None).build()?;
-        lab.build().await?;
+        let lab = Lab::new();
+        let dc = lab.add_router("dc1").region("eu").build().await?;
+        let dev = lab
+            .add_device("dev1")
+            .iface("eth0", dc.id(), None)
+            .build()
+            .await?;
 
-        let gw = lab.router_downlink_gw(dc)?;
-        let dev_ns = lab.node_ns(dev)?.to_string();
+        let gw = lab.router_downlink_gw(dc.id())?;
+        let dev_ns = lab.node_ns(dev.id())?.to_string();
 
         ping_in_ns(&dev_ns, &gw.to_string())?;
 
-        lab.link_down("dev1", "eth0").await?;
+        lab.device_by_name("dev1")
+            .unwrap()
+            .link_down("eth0")
+            .await?;
         let result = ping_in_ns(&dev_ns, &gw.to_string());
         assert!(result.is_err(), "expected ping to fail after link_down");
 
-        lab.link_up("dev1", "eth0").await?;
+        lab.device_by_name("dev1").unwrap().link_up("eth0").await?;
         ping_in_ns(&dev_ns, &gw.to_string())?;
         Ok(())
     }
@@ -2300,27 +3332,30 @@ gateway = "lan1"
     #[traced_test]
     async fn dynamic_switch_route_changes_path() -> Result<()> {
         check_caps()?;
-        let mut lab = Lab::new();
-        let dc = lab.add_router("dc1").region("eu").build()?;
-        let isp = lab.add_router("isp1").region("eu").build()?;
+        let lab = Lab::new();
+        let dc = lab.add_router("dc1").region("eu").build().await?;
+        let isp = lab.add_router("isp1").region("eu").build().await?;
         let dev = lab
             .add_device("dev1")
-            .iface("eth0", dc, None)
-            .iface("eth1", isp, Some(Impair::Mobile))
+            .iface("eth0", dc.id(), None)
+            .iface("eth1", isp.id(), Some(Impair::Mobile))
             .default_via("eth0")
-            .build()?;
-        lab.build().await?;
+            .build()
+            .await?;
 
-        let dc_ip = lab.router_uplink_ip(dc)?;
+        let dc_ip = lab.router_uplink_ip(dc.id())?;
         let r = SocketAddr::new(IpAddr::V4(dc_ip), 9200);
-        let dc_ns = lab.node_ns(dc)?.to_string();
+        let dc_ns = lab.node_ns(dc.id())?.to_string();
         lab.spawn_reflector(&dc_ns, r)?;
         tokio::time::sleep(Duration::from_millis(250)).await;
 
-        let dev_ns = lab.node_ns(dev)?.to_string();
+        let dev_ns = lab.node_ns(dev.id())?.to_string();
         let fast_rtt = udp_rtt_in_ns(&dev_ns, r)?;
 
-        lab.switch_route("dev1", "eth1").await?;
+        lab.device_by_name("dev1")
+            .unwrap()
+            .switch_route("eth1")
+            .await?;
         let slow_rtt = udp_rtt_in_ns(&dev_ns, r)?;
 
         assert!(
@@ -2365,8 +3400,8 @@ impair = { rate = 5000, loss = 1.5, latency = 40 }
         Ok(())
     }
 
-    #[test]
-    fn from_config_expands_count_devices() -> Result<()> {
+    #[tokio::test(flavor = "current_thread")]
+    async fn from_config_expands_count_devices() -> Result<()> {
         let cfg = r#"
 [[router]]
 name = "dc1"
@@ -2379,7 +3414,7 @@ default_via = "eth0"
 gateway = "dc1"
 "#;
         let parsed: config::LabConfig = toml::from_str(cfg)?;
-        let lab = Lab::from_config(parsed)?;
+        let lab = Lab::from_config(parsed).await?;
         assert!(lab.device_id("fetcher-0").is_some());
         assert!(lab.device_id("fetcher-1").is_some());
         assert!(lab.device_id("fetcher").is_none());
@@ -2391,15 +3426,18 @@ gateway = "dc1"
     #[tokio::test(flavor = "current_thread")]
     #[traced_test]
     async fn tcp_reflector_basic() -> Result<()> {
-        let mut lab = Lab::new();
-        let dc = lab.add_router("dc").build()?;
-        let dev = lab.add_device("dev").iface("eth0", dc, None).build()?;
-        lab.build().await?;
+        let lab = Lab::new();
+        let dc = lab.add_router("dc").build().await?;
+        let dev = lab
+            .add_device("dev")
+            .iface("eth0", dc.id(), None)
+            .build()
+            .await?;
 
-        let dc_ip = lab.router_uplink_ip(dc)?;
+        let dc_ip = lab.router_uplink_ip(dc.id())?;
         let r = SocketAddr::new(IpAddr::V4(dc_ip), 13_000);
-        let dc_ns = lab.node_ns(dc)?.to_string();
-        let dev_ns = lab.node_ns(dev)?.to_string();
+        let dc_ns = lab.node_ns(dc.id())?.to_string();
+        let dev_ns = lab.node_ns(dev.id())?.to_string();
 
         let (_stop, _join) = spawn_tcp_reflector(&dc_ns, r);
         tokio::time::sleep(Duration::from_millis(200)).await;
@@ -2530,14 +3568,24 @@ gateway = "dc1"
     #[traced_test]
     async fn switch_route_reflexive_ip() -> Result<()> {
         use strum::IntoEnumIterator;
-        let DualNatLab { mut lab, dev, nat_a, nat_b, reflector } =
-            build_dual_nat_lab(NatMode::DestinationIndependent, NatMode::DestinationDependent, 16_200)
-                .await?;
+        let DualNatLab {
+            lab,
+            dev,
+            nat_a,
+            nat_b,
+            reflector,
+        } = build_dual_nat_lab(
+            NatMode::DestinationIndependent,
+            NatMode::DestinationDependent,
+            16_200,
+        )
+        .await?;
 
         let dev_ns = lab.node_ns(dev)?.to_string();
         let wan_a = lab.router_uplink_ip(nat_a)?;
         let wan_b = lab.router_uplink_ip(nat_b)?;
 
+        let dev_handle = lab.device_by_name("dev").unwrap();
         let mut failures = Vec::new();
         for proto in Proto::iter() {
             for bind in BindMode::iter() {
@@ -2554,7 +3602,7 @@ gateway = "dc1"
                     Err(e) => failures.push(format!("{proto}/{bind} before switch: {e:#}")),
                 }
 
-                lab.switch_route("dev", "eth1").await?;
+                dev_handle.switch_route("eth1").await?;
                 tokio::time::sleep(Duration::from_millis(50)).await;
 
                 let dev_ip = lab.device_ip(dev)?;
@@ -2568,7 +3616,7 @@ gateway = "dc1"
                     Err(e) => failures.push(format!("{proto}/{bind} after switch: {e:#}")),
                 }
 
-                lab.switch_route("dev", "eth0").await?;
+                dev_handle.switch_route("eth0").await?;
                 tokio::time::sleep(Duration::from_millis(50)).await;
             }
         }
@@ -2581,26 +3629,48 @@ gateway = "dc1"
     #[tokio::test(flavor = "current_thread")]
     #[traced_test]
     async fn switch_route_multiple() -> Result<()> {
-        let DualNatLab { mut lab, dev, nat_a, nat_b, reflector } =
-            build_dual_nat_lab(NatMode::DestinationIndependent, NatMode::DestinationIndependent, 16_300)
-                .await?;
+        let DualNatLab {
+            lab,
+            dev,
+            nat_a,
+            nat_b,
+            reflector,
+        } = build_dual_nat_lab(
+            NatMode::DestinationIndependent,
+            NatMode::DestinationIndependent,
+            16_300,
+        )
+        .await?;
 
         let dev_ns = lab.node_ns(dev)?.to_string();
         let wan_a = lab.router_uplink_ip(nat_a)?;
         let wan_b = lab.router_uplink_ip(nat_b)?;
 
+        let dev_handle = lab.device_by_name("dev").unwrap();
         let o = udp_roundtrip_in_ns(&dev_ns, reflector)?;
-        assert_eq!(o.observed.ip(), IpAddr::V4(wan_a), "expected nat_a WAN on eth0");
+        assert_eq!(
+            o.observed.ip(),
+            IpAddr::V4(wan_a),
+            "expected nat_a WAN on eth0"
+        );
 
-        lab.switch_route("dev", "eth1").await?;
+        dev_handle.switch_route("eth1").await?;
         tokio::time::sleep(Duration::from_millis(50)).await;
         let o = udp_roundtrip_in_ns(&dev_ns, reflector)?;
-        assert_eq!(o.observed.ip(), IpAddr::V4(wan_b), "expected nat_b WAN on eth1");
+        assert_eq!(
+            o.observed.ip(),
+            IpAddr::V4(wan_b),
+            "expected nat_b WAN on eth1"
+        );
 
-        lab.switch_route("dev", "eth0").await?;
+        dev_handle.switch_route("eth0").await?;
         tokio::time::sleep(Duration::from_millis(50)).await;
         let o = udp_roundtrip_in_ns(&dev_ns, reflector)?;
-        assert_eq!(o.observed.ip(), IpAddr::V4(wan_a), "expected nat_a WAN after switch back");
+        assert_eq!(
+            o.observed.ip(),
+            IpAddr::V4(wan_a),
+            "expected nat_a WAN after switch back"
+        );
 
         Ok(())
     }
@@ -2608,9 +3678,18 @@ gateway = "dc1"
     #[tokio::test(flavor = "current_thread")]
     #[traced_test]
     async fn switch_route_tcp_roundtrip() -> Result<()> {
-        let DualNatLab { mut lab, dev, nat_a: _, nat_b: _, reflector: _ } =
-            build_dual_nat_lab(NatMode::DestinationIndependent, NatMode::DestinationDependent, 16_400)
-                .await?;
+        let DualNatLab {
+            lab,
+            dev,
+            nat_a: _,
+            nat_b: _,
+            reflector: _,
+        } = build_dual_nat_lab(
+            NatMode::DestinationIndependent,
+            NatMode::DestinationDependent,
+            16_400,
+        )
+        .await?;
 
         let dc = lab.router_id("dc").context("missing dc")?;
         let dc_ip = lab.router_uplink_ip(dc)?;
@@ -2622,7 +3701,10 @@ gateway = "dc1"
         tokio::time::sleep(Duration::from_millis(200)).await;
         tcp_roundtrip_in_ns(&dev_ns, r).await?;
 
-        lab.switch_route("dev", "eth1").await?;
+        lab.device_by_name("dev")
+            .unwrap()
+            .switch_route("eth1")
+            .await?;
         tokio::time::sleep(Duration::from_millis(100)).await;
         tcp_roundtrip_in_ns(&dev_ns, r).await?;
 
@@ -2632,22 +3714,42 @@ gateway = "dc1"
     #[tokio::test(flavor = "current_thread")]
     #[traced_test]
     async fn switch_route_udp_reflexive_change() -> Result<()> {
-        let DualNatLab { mut lab, dev, nat_a, nat_b, reflector } =
-            build_dual_nat_lab(NatMode::DestinationIndependent, NatMode::DestinationIndependent, 16_500)
-                .await?;
+        let DualNatLab {
+            lab,
+            dev,
+            nat_a,
+            nat_b,
+            reflector,
+        } = build_dual_nat_lab(
+            NatMode::DestinationIndependent,
+            NatMode::DestinationIndependent,
+            16_500,
+        )
+        .await?;
 
         let dev_ns = lab.node_ns(dev)?.to_string();
         let wan_a = lab.router_uplink_ip(nat_a)?;
         let wan_b = lab.router_uplink_ip(nat_b)?;
 
         let before = udp_roundtrip_in_ns(&dev_ns, reflector)?;
-        assert_eq!(before.observed.ip(), IpAddr::V4(wan_a), "before switch: expected nat_a WAN");
+        assert_eq!(
+            before.observed.ip(),
+            IpAddr::V4(wan_a),
+            "before switch: expected nat_a WAN"
+        );
 
-        lab.switch_route("dev", "eth1").await?;
+        lab.device_by_name("dev")
+            .unwrap()
+            .switch_route("eth1")
+            .await?;
         tokio::time::sleep(Duration::from_millis(50)).await;
 
         let after = udp_roundtrip_in_ns(&dev_ns, reflector)?;
-        assert_eq!(after.observed.ip(), IpAddr::V4(wan_b), "after switch: expected nat_b WAN");
+        assert_eq!(
+            after.observed.ip(),
+            IpAddr::V4(wan_b),
+            "after switch: expected nat_b WAN"
+        );
         assert_ne!(
             before.observed.ip(),
             after.observed.ip(),
@@ -2666,27 +3768,31 @@ gateway = "dc1"
         let mut failures = Vec::new();
         for proto in Proto::iter() {
             let result: Result<()> = async {
-                let mut lab = Lab::new();
-                let dc = lab.add_router("dc").build()?;
-                let dev = lab.add_device("dev").iface("eth0", dc, None).build()?;
-                lab.build().await?;
+                let lab = Lab::new();
+                let dc = lab.add_router("dc").build().await?;
+                let dev = lab
+                    .add_device("dev")
+                    .iface("eth0", dc.id(), None)
+                    .build()
+                    .await?;
 
-                let dc_ip = lab.router_uplink_ip(dc)?;
+                let dc_ip = lab.router_uplink_ip(dc.id())?;
                 let r = SocketAddr::new(IpAddr::V4(dc_ip), port_base);
-                let dc_ns = lab.node_ns(dc)?.to_string();
-                let dev_ns = lab.node_ns(dev)?.to_string();
+                let dc_ns = lab.node_ns(dc.id())?.to_string();
+                let dev_ns = lab.node_ns(dev.id())?.to_string();
                 let bind = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0);
 
+                let dev_handle = lab.device_by_name("dev").unwrap();
                 match proto {
                     Proto::Udp => {
                         lab.spawn_reflector(&dc_ns, r)?;
                         tokio::time::sleep(Duration::from_millis(200)).await;
                         probe_udp(&dev_ns, r, bind).context("before link_down")?;
-                        lab.link_down("dev", "eth0").await?;
+                        dev_handle.link_down("eth0").await?;
                         if probe_udp(&dev_ns, r, bind).is_ok() {
                             bail!("probe should fail after link_down");
                         }
-                        lab.link_up("dev", "eth0").await?;
+                        dev_handle.link_up("eth0").await?;
                         tokio::time::sleep(Duration::from_millis(100)).await;
                         probe_udp(&dev_ns, r, bind).context("after link_up")?;
                     }
@@ -2694,14 +3800,18 @@ gateway = "dc1"
                         // Persistent echo server: handles all connections for the whole test.
                         spawn_tcp_echo_server(&dc_ns, r).await?;
                         tokio::time::sleep(Duration::from_millis(200)).await;
-                        tcp_roundtrip_in_ns(&dev_ns, r).await.context("before link_down")?;
-                        lab.link_down("dev", "eth0").await?;
+                        tcp_roundtrip_in_ns(&dev_ns, r)
+                            .await
+                            .context("before link_down")?;
+                        dev_handle.link_down("eth0").await?;
                         if tcp_roundtrip_in_ns(&dev_ns, r).await.is_ok() {
                             bail!("tcp should fail after link_down");
                         }
-                        lab.link_up("dev", "eth0").await?;
+                        dev_handle.link_up("eth0").await?;
                         tokio::time::sleep(Duration::from_millis(200)).await;
-                        tcp_roundtrip_in_ns(&dev_ns, r).await.context("after link_up")?;
+                        tcp_roundtrip_in_ns(&dev_ns, r)
+                            .await
+                            .context("after link_up")?;
                     }
                 }
                 Ok(())
@@ -2725,16 +3835,24 @@ gateway = "dc1"
     async fn nat_rebind_mode_port() -> Result<()> {
         // DestIndep→DestDep: port changes; DestDep→DestIndep: port stabilises.
         let cases: &[(NatMode, NatMode, bool)] = &[
-            (NatMode::DestinationIndependent, NatMode::DestinationDependent, false),
-            (NatMode::DestinationDependent, NatMode::DestinationIndependent, true),
+            (
+                NatMode::DestinationIndependent,
+                NatMode::DestinationDependent,
+                false,
+            ),
+            (
+                NatMode::DestinationDependent,
+                NatMode::DestinationIndependent,
+                true,
+            ),
         ];
         let mut port_base = 16_800u16;
         let mut failures = Vec::new();
         for &(from, to, expect_stable) in cases {
             let result: Result<()> = async {
-                let (mut lab, ctx) = build_nat_case(from, UplinkWiring::DirectIx, port_base).await?;
-                let nat = lab.router_id("nat").context("missing nat")?;
-                lab.set_nat_mode(nat, to).await?;
+                let (lab, ctx) = build_nat_case(from, UplinkWiring::DirectIx, port_base).await?;
+                let nat_id = lab.router_id("nat").context("missing nat")?;
+                lab.router(nat_id).unwrap().set_nat_mode(to).await?;
                 tokio::time::sleep(Duration::from_millis(50)).await;
                 let o1 = lab.probe_udp_mapping("dev", ctx.r_dc)?;
                 let o2 = lab.probe_udp_mapping("dev", ctx.r_ix)?;
@@ -2767,18 +3885,15 @@ gateway = "dc1"
         // DestinationIndependent→None is omitted: with NAT=None, the device's
         // private IP appears as the packet source; the DC has no return route, so
         // the UDP probe times out rather than completing.
-        let cases: &[(NatMode, NatMode)] = &[
-            (NatMode::None, NatMode::DestinationIndependent),
-        ];
+        let cases: &[(NatMode, NatMode)] = &[(NatMode::None, NatMode::DestinationIndependent)];
         let mut port_base = 16_900u16;
         let mut failures = Vec::new();
         for &(from, to) in cases {
             let result: Result<()> = async {
-                let (mut lab, ctx) =
-                    build_nat_case(from, UplinkWiring::DirectIx, port_base).await?;
-                let nat = lab.router_id("nat").context("missing nat")?;
-                let wan_ip = lab.router_uplink_ip(nat)?;
-                lab.set_nat_mode(nat, to).await?;
+                let (lab, ctx) = build_nat_case(from, UplinkWiring::DirectIx, port_base).await?;
+                let nat_id = lab.router_id("nat").context("missing nat")?;
+                let wan_ip = lab.router_uplink_ip(nat_id)?;
+                lab.router(nat_id).unwrap().set_nat_mode(to).await?;
                 tokio::time::sleep(Duration::from_millis(50)).await;
                 let o = probe_udp(
                     &ctx.dev_ns,
@@ -2819,16 +3934,16 @@ gateway = "dc1"
             eprintln!("skipping nat_rebind_conntrack_flush: conntrack not found");
             return Ok(());
         }
-        let (mut lab, ctx) = build_nat_case(
+        let (lab, ctx) = build_nat_case(
             NatMode::DestinationDependent,
             UplinkWiring::DirectIx,
             17_000,
         )
         .await?;
-        let nat = lab.router_id("nat").context("missing nat")?;
+        let nat_id = lab.router_id("nat").context("missing nat")?;
         let bind = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0);
         let o1 = probe_udp(&ctx.dev_ns, ctx.r_dc, bind)?;
-        lab.rebind_nats(nat)?;
+        lab.router(nat_id).unwrap().rebind_nats()?;
         tokio::time::sleep(Duration::from_millis(50)).await;
         let o2 = probe_udp(&ctx.dev_ns, ctx.r_dc, bind)?;
         assert_ne!(
@@ -2844,21 +3959,32 @@ gateway = "dc1"
     #[tokio::test(flavor = "current_thread")]
     #[traced_test]
     async fn devices_same_nat_share_ip() -> Result<()> {
-        let mut lab = Lab::new();
-        let dc = lab.add_router("dc").build()?;
-        let nat = lab.add_router("nat").nat(NatMode::DestinationIndependent).build()?;
-        let dev_a = lab.add_device("dev-a").iface("eth0", nat, None).build()?;
-        let dev_b = lab.add_device("dev-b").iface("eth0", nat, None).build()?;
-        lab.build().await?;
+        let lab = Lab::new();
+        let dc = lab.add_router("dc").build().await?;
+        let nat = lab
+            .add_router("nat")
+            .nat(NatMode::DestinationIndependent)
+            .build()
+            .await?;
+        let dev_a = lab
+            .add_device("dev-a")
+            .iface("eth0", nat.id(), None)
+            .build()
+            .await?;
+        let dev_b = lab
+            .add_device("dev-b")
+            .iface("eth0", nat.id(), None)
+            .build()
+            .await?;
 
-        let dc_ip = lab.router_uplink_ip(dc)?;
+        let dc_ip = lab.router_uplink_ip(dc.id())?;
         let r = SocketAddr::new(IpAddr::V4(dc_ip), 17_100);
-        let dc_ns = lab.node_ns(dc)?.to_string();
+        let dc_ns = lab.node_ns(dc.id())?.to_string();
         lab.spawn_reflector(&dc_ns, r)?;
         tokio::time::sleep(Duration::from_millis(200)).await;
 
-        let ns_a = lab.node_ns(dev_a)?.to_string();
-        let ns_b = lab.node_ns(dev_b)?.to_string();
+        let ns_a = lab.node_ns(dev_a.id())?.to_string();
+        let ns_b = lab.node_ns(dev_b.id())?.to_string();
         let oa = udp_roundtrip_in_ns(&ns_a, r)?;
         let ob = udp_roundtrip_in_ns(&ns_b, r)?;
         assert_eq!(
@@ -2872,24 +3998,39 @@ gateway = "dc1"
     #[tokio::test(flavor = "current_thread")]
     #[traced_test]
     async fn devices_diff_nat_isolate() -> Result<()> {
-        let mut lab = Lab::new();
-        let dc = lab.add_router("dc").build()?;
-        let nat_a = lab.add_router("nat-a").nat(NatMode::DestinationIndependent).build()?;
-        let nat_b = lab.add_router("nat-b").nat(NatMode::DestinationIndependent).build()?;
-        let dev_a = lab.add_device("dev-a").iface("eth0", nat_a, None).build()?;
-        let dev_b = lab.add_device("dev-b").iface("eth0", nat_b, None).build()?;
-        lab.build().await?;
+        let lab = Lab::new();
+        let dc = lab.add_router("dc").build().await?;
+        let nat_a = lab
+            .add_router("nat-a")
+            .nat(NatMode::DestinationIndependent)
+            .build()
+            .await?;
+        let nat_b = lab
+            .add_router("nat-b")
+            .nat(NatMode::DestinationIndependent)
+            .build()
+            .await?;
+        let dev_a = lab
+            .add_device("dev-a")
+            .iface("eth0", nat_a.id(), None)
+            .build()
+            .await?;
+        let dev_b = lab
+            .add_device("dev-b")
+            .iface("eth0", nat_b.id(), None)
+            .build()
+            .await?;
 
-        let dc_ip = lab.router_uplink_ip(dc)?;
+        let dc_ip = lab.router_uplink_ip(dc.id())?;
         let r = SocketAddr::new(IpAddr::V4(dc_ip), 17_200);
-        let dc_ns = lab.node_ns(dc)?.to_string();
+        let dc_ns = lab.node_ns(dc.id())?.to_string();
         lab.spawn_reflector(&dc_ns, r)?;
         tokio::time::sleep(Duration::from_millis(200)).await;
 
-        let ns_a = lab.node_ns(dev_a)?.to_string();
-        let ns_b = lab.node_ns(dev_b)?.to_string();
-        let ip_a = lab.device_ip(dev_a)?;
-        let ip_b = lab.device_ip(dev_b)?;
+        let ns_a = lab.node_ns(dev_a.id())?.to_string();
+        let ns_b = lab.node_ns(dev_b.id())?.to_string();
+        let ip_a = lab.device_ip(dev_a.id())?;
+        let ip_b = lab.device_ip(dev_b.id())?;
 
         ping_fails_in_ns(&ns_a, &ip_b.to_string())?;
         ping_fails_in_ns(&ns_b, &ip_a.to_string())?;
@@ -2920,18 +4061,26 @@ gateway = "dc1"
     #[tokio::test(flavor = "current_thread")]
     #[traced_test]
     async fn rate_limit_tcp_upload() -> Result<()> {
-        let mut lab = Lab::new();
-        let dc = lab.add_router("dc").build()?;
+        let lab = Lab::new();
+        let dc = lab.add_router("dc").build().await?;
         let dev = lab
             .add_device("dev")
-            .iface("eth0", dc, Some(Impair::Manual { rate: 2000, loss: 0.0, latency: 0 }))
-            .build()?;
-        lab.build().await?;
+            .iface(
+                "eth0",
+                dc.id(),
+                Some(Impair::Manual {
+                    rate: 2000,
+                    loss: 0.0,
+                    latency: 0,
+                }),
+            )
+            .build()
+            .await?;
 
-        let dc_ip = lab.router_uplink_ip(dc)?;
+        let dc_ip = lab.router_uplink_ip(dc.id())?;
         let addr = SocketAddr::new(IpAddr::V4(dc_ip), 17_300);
-        let dc_ns = lab.node_ns(dc)?.to_string();
-        let dev_ns = lab.node_ns(dev)?.to_string();
+        let dc_ns = lab.node_ns(dc.id())?.to_string();
+        let dev_ns = lab.node_ns(dev.id())?.to_string();
 
         let sink = spawn_tcp_sink(&dc_ns, addr);
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -2946,18 +4095,27 @@ gateway = "dc1"
     #[tokio::test(flavor = "current_thread")]
     #[traced_test]
     async fn rate_limit_tcp_download() -> Result<()> {
-        let mut lab = Lab::new();
-        let dc = lab.add_router("dc").build()?;
-        let dev_id = lab.add_device("dev").iface("eth0", dc, None).build()?;
-        lab.build().await?;
+        let lab = Lab::new();
+        let dc = lab.add_router("dc").build().await?;
+        let dev_id = lab
+            .add_device("dev")
+            .iface("eth0", dc.id(), None)
+            .build()
+            .await?;
 
-        let bridge = lab.router_downlink_bridge(dc)?;
-        lab.set_router_impair(dc, &bridge, Some(Impair::Manual { rate: 2000, loss: 0.0, latency: 0 }))?;
+        lab.impair_router_downlink(
+            dc.id(),
+            Some(Impair::Manual {
+                rate: 2000,
+                loss: 0.0,
+                latency: 0,
+            }),
+        )?;
 
-        let dev_ip = lab.device_ip(dev_id)?;
+        let dev_ip = lab.device_ip(dev_id.id())?;
         let addr = SocketAddr::new(IpAddr::V4(dev_ip), 17_400);
-        let dev_ns = lab.node_ns(dev_id)?.to_string();
-        let dc_ns = lab.node_ns(dc)?.to_string();
+        let dev_ns = lab.node_ns(dev_id.id())?.to_string();
+        let dc_ns = lab.node_ns(dc.id())?.to_string();
 
         // Client (DC) writes to server (device) — bytes travel the download path.
         let sink = spawn_tcp_sink(&dev_ns, addr);
@@ -2974,18 +4132,26 @@ gateway = "dc1"
     #[traced_test]
     async fn rate_limit_udp_upload() -> Result<()> {
         use std::time::Instant;
-        let mut lab = Lab::new();
-        let dc = lab.add_router("dc").build()?;
+        let lab = Lab::new();
+        let dc = lab.add_router("dc").build().await?;
         let dev = lab
             .add_device("dev")
-            .iface("eth0", dc, Some(Impair::Manual { rate: 2000, loss: 0.0, latency: 0 }))
-            .build()?;
-        lab.build().await?;
+            .iface(
+                "eth0",
+                dc.id(),
+                Some(Impair::Manual {
+                    rate: 2000,
+                    loss: 0.0,
+                    latency: 0,
+                }),
+            )
+            .build()
+            .await?;
 
-        let dc_ip = lab.router_uplink_ip(dc)?;
+        let dc_ip = lab.router_uplink_ip(dc.id())?;
         let r = SocketAddr::new(IpAddr::V4(dc_ip), 17_500);
-        let dc_ns = lab.node_ns(dc)?.to_string();
-        let dev_ns = lab.node_ns(dev)?.to_string();
+        let dc_ns = lab.node_ns(dc.id())?.to_string();
+        let dev_ns = lab.node_ns(dev.id())?.to_string();
         lab.spawn_reflector(&dc_ns, r)?;
         tokio::time::sleep(Duration::from_millis(100)).await;
 
@@ -3004,18 +4170,27 @@ gateway = "dc1"
     #[traced_test]
     async fn rate_limit_udp_download() -> Result<()> {
         use std::time::Instant;
-        let mut lab = Lab::new();
-        let dc = lab.add_router("dc").build()?;
-        let dev_id = lab.add_device("dev").iface("eth0", dc, None).build()?;
-        lab.build().await?;
+        let lab = Lab::new();
+        let dc = lab.add_router("dc").build().await?;
+        let dev_id = lab
+            .add_device("dev")
+            .iface("eth0", dc.id(), None)
+            .build()
+            .await?;
 
-        let bridge = lab.router_downlink_bridge(dc)?;
-        lab.set_router_impair(dc, &bridge, Some(Impair::Manual { rate: 2000, loss: 0.0, latency: 0 }))?;
+        lab.impair_router_downlink(
+            dc.id(),
+            Some(Impair::Manual {
+                rate: 2000,
+                loss: 0.0,
+                latency: 0,
+            }),
+        )?;
 
-        let dc_ip = lab.router_uplink_ip(dc)?;
+        let dc_ip = lab.router_uplink_ip(dc.id())?;
         let r = SocketAddr::new(IpAddr::V4(dc_ip), 17_600);
-        let dc_ns = lab.node_ns(dc)?.to_string();
-        let dev_ns = lab.node_ns(dev_id)?.to_string();
+        let dc_ns = lab.node_ns(dc.id())?.to_string();
+        let dev_ns = lab.node_ns(dev_id.id())?.to_string();
         lab.spawn_reflector(&dc_ns, r)?;
         tokio::time::sleep(Duration::from_millis(100)).await;
 
@@ -3033,23 +4208,37 @@ gateway = "dc1"
     #[tokio::test(flavor = "current_thread")]
     #[traced_test]
     async fn rate_limit_asymmetric() -> Result<()> {
-        let mut lab = Lab::new();
-        let dc = lab.add_router("dc").build()?;
+        let lab = Lab::new();
+        let dc = lab.add_router("dc").build().await?;
         let dev_id = lab
             .add_device("dev")
-            .iface("eth0", dc, Some(Impair::Manual { rate: 1000, loss: 0.0, latency: 0 }))
-            .build()?;
-        lab.build().await?;
+            .iface(
+                "eth0",
+                dc.id(),
+                Some(Impair::Manual {
+                    rate: 1000,
+                    loss: 0.0,
+                    latency: 0,
+                }),
+            )
+            .build()
+            .await?;
 
-        let bridge = lab.router_downlink_bridge(dc)?;
-        lab.set_router_impair(dc, &bridge, Some(Impair::Manual { rate: 4000, loss: 0.0, latency: 0 }))?;
+        lab.impair_router_downlink(
+            dc.id(),
+            Some(Impair::Manual {
+                rate: 4000,
+                loss: 0.0,
+                latency: 0,
+            }),
+        )?;
 
-        let dc_ip = lab.router_uplink_ip(dc)?;
+        let dc_ip = lab.router_uplink_ip(dc.id())?;
         let up_addr = SocketAddr::new(IpAddr::V4(dc_ip), 17_700);
-        let dev_ip = lab.device_ip(dev_id)?;
+        let dev_ip = lab.device_ip(dev_id.id())?;
         let down_addr = SocketAddr::new(IpAddr::V4(dev_ip), 17_710);
-        let dc_ns = lab.node_ns(dc)?.to_string();
-        let dev_ns = lab.node_ns(dev_id)?.to_string();
+        let dc_ns = lab.node_ns(dc.id())?.to_string();
+        let dev_ns = lab.node_ns(dev_id.id())?.to_string();
 
         let sink_up = spawn_tcp_sink(&dc_ns, up_addr);
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -3061,55 +4250,94 @@ gateway = "dc1"
         let (_e, kbps_down) = tcp_measure_throughput(&dc_ns, down_addr, 128 * 1024)?;
         join_sink(sink_down)?;
 
-        assert!(kbps_up <= 1500, "expected upload ≤ 1500 kbit/s, got {kbps_up}");
-        assert!(kbps_down >= 2000, "expected download ≥ 2000 kbit/s, got {kbps_down}");
+        assert!(
+            kbps_up <= 1500,
+            "expected upload ≤ 1500 kbit/s, got {kbps_up}"
+        );
+        assert!(
+            kbps_down >= 2000,
+            "expected download ≥ 2000 kbit/s, got {kbps_down}"
+        );
         Ok(())
     }
 
     #[tokio::test(flavor = "current_thread")]
     #[traced_test]
     async fn rate_limit_multihop_bottleneck() -> Result<()> {
-        let mut lab = Lab::new();
-        let dc = lab.add_router("dc").build()?;
-        let isp = lab.add_router("isp").build()?;
-        let nat = lab.add_router("nat").upstream(isp).nat(NatMode::DestinationIndependent).build()?;
-        let dev = lab.add_device("dev").iface("eth0", nat, None).build()?;
-        lab.build().await?;
+        let lab = Lab::new();
+        let dc = lab.add_router("dc").build().await?;
+        let isp = lab.add_router("isp").build().await?;
+        let nat = lab
+            .add_router("nat")
+            .upstream(isp.id())
+            .nat(NatMode::DestinationIndependent)
+            .build()
+            .await?;
+        let dev = lab
+            .add_device("dev")
+            .iface("eth0", nat.id(), None)
+            .build()
+            .await?;
 
-        lab.set_router_impair(nat, "wan", Some(Impair::Manual { rate: 1000, loss: 0.0, latency: 0 }))?;
+        lab.impair_link(
+            nat.id(),
+            isp.id(),
+            Some(Impair::Manual {
+                rate: 1000,
+                loss: 0.0,
+                latency: 0,
+            }),
+        )?;
 
-        let dc_ip = lab.router_uplink_ip(dc)?;
+        let dc_ip = lab.router_uplink_ip(dc.id())?;
         let addr = SocketAddr::new(IpAddr::V4(dc_ip), 17_800);
-        let dc_ns = lab.node_ns(dc)?.to_string();
-        let dev_ns = lab.node_ns(dev)?.to_string();
+        let dc_ns = lab.node_ns(dc.id())?.to_string();
+        let dev_ns = lab.node_ns(dev.id())?.to_string();
 
         let sink = spawn_tcp_sink(&dc_ns, addr);
         tokio::time::sleep(Duration::from_millis(100)).await;
         let (_e, kbps) = tcp_measure_throughput(&dev_ns, addr, 128 * 1024)?;
         join_sink(sink)?;
 
-        assert!(kbps <= 1500, "NAT WAN bottleneck: expected ≤ 1500 kbit/s, got {kbps}");
+        assert!(
+            kbps <= 1500,
+            "NAT WAN bottleneck: expected ≤ 1500 kbit/s, got {kbps}"
+        );
         Ok(())
     }
 
     #[tokio::test(flavor = "current_thread")]
     #[traced_test]
     async fn rate_limit_two_hops_stack() -> Result<()> {
-        let mut lab = Lab::new();
-        let dc = lab.add_router("dc").build()?;
+        let lab = Lab::new();
+        let dc = lab.add_router("dc").build().await?;
         let dev = lab
             .add_device("dev")
-            .iface("eth0", dc, Some(Impair::Manual { rate: 2000, loss: 0.0, latency: 0 }))
-            .build()?;
-        lab.build().await?;
+            .iface(
+                "eth0",
+                dc.id(),
+                Some(Impair::Manual {
+                    rate: 2000,
+                    loss: 0.0,
+                    latency: 0,
+                }),
+            )
+            .build()
+            .await?;
 
-        let bridge = lab.router_downlink_bridge(dc)?;
-        lab.set_router_impair(dc, &bridge, Some(Impair::Manual { rate: 2000, loss: 0.0, latency: 0 }))?;
+        lab.impair_router_downlink(
+            dc.id(),
+            Some(Impair::Manual {
+                rate: 2000,
+                loss: 0.0,
+                latency: 0,
+            }),
+        )?;
 
-        let dc_ip = lab.router_uplink_ip(dc)?;
+        let dc_ip = lab.router_uplink_ip(dc.id())?;
         let addr = SocketAddr::new(IpAddr::V4(dc_ip), 17_900);
-        let dc_ns = lab.node_ns(dc)?.to_string();
-        let dev_ns = lab.node_ns(dev)?.to_string();
+        let dc_ns = lab.node_ns(dc.id())?.to_string();
+        let dev_ns = lab.node_ns(dev.id())?.to_string();
 
         let sink = spawn_tcp_sink(&dc_ns, addr);
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -3126,66 +4354,99 @@ gateway = "dc1"
     #[tokio::test(flavor = "current_thread")]
     #[traced_test]
     async fn loss_udp_moderate() -> Result<()> {
-        let mut lab = Lab::new();
-        let dc = lab.add_router("dc").build()?;
+        let lab = Lab::new();
+        let dc = lab.add_router("dc").build().await?;
         let dev = lab
             .add_device("dev")
-            .iface("eth0", dc, Some(Impair::Manual { rate: 0, loss: 50.0, latency: 0 }))
-            .build()?;
-        lab.build().await?;
+            .iface(
+                "eth0",
+                dc.id(),
+                Some(Impair::Manual {
+                    rate: 0,
+                    loss: 50.0,
+                    latency: 0,
+                }),
+            )
+            .build()
+            .await?;
 
-        let dc_ip = lab.router_uplink_ip(dc)?;
+        let dc_ip = lab.router_uplink_ip(dc.id())?;
         let r = SocketAddr::new(IpAddr::V4(dc_ip), 18_000);
-        let dc_ns = lab.node_ns(dc)?.to_string();
-        let dev_ns = lab.node_ns(dev)?.to_string();
+        let dc_ns = lab.node_ns(dc.id())?.to_string();
+        let dev_ns = lab.node_ns(dev.id())?.to_string();
         lab.spawn_reflector(&dc_ns, r)?;
         tokio::time::sleep(Duration::from_millis(100)).await;
 
         let (_, received) = udp_send_recv_count(&dev_ns, r, 100, 64, Duration::from_secs(3))?;
-        assert!(received >= 20, "expected ≥ 20 received at 50% loss, got {received}");
-        assert!(received <= 80, "expected ≤ 80 received at 50% loss, got {received}");
+        assert!(
+            received >= 20,
+            "expected ≥ 20 received at 50% loss, got {received}"
+        );
+        assert!(
+            received <= 80,
+            "expected ≤ 80 received at 50% loss, got {received}"
+        );
         Ok(())
     }
 
     #[tokio::test(flavor = "current_thread")]
     #[traced_test]
     async fn loss_udp_high() -> Result<()> {
-        let mut lab = Lab::new();
-        let dc = lab.add_router("dc").build()?;
+        let lab = Lab::new();
+        let dc = lab.add_router("dc").build().await?;
         let dev = lab
             .add_device("dev")
-            .iface("eth0", dc, Some(Impair::Manual { rate: 0, loss: 90.0, latency: 0 }))
-            .build()?;
-        lab.build().await?;
+            .iface(
+                "eth0",
+                dc.id(),
+                Some(Impair::Manual {
+                    rate: 0,
+                    loss: 90.0,
+                    latency: 0,
+                }),
+            )
+            .build()
+            .await?;
 
-        let dc_ip = lab.router_uplink_ip(dc)?;
+        let dc_ip = lab.router_uplink_ip(dc.id())?;
         let r = SocketAddr::new(IpAddr::V4(dc_ip), 18_100);
-        let dc_ns = lab.node_ns(dc)?.to_string();
-        let dev_ns = lab.node_ns(dev)?.to_string();
+        let dc_ns = lab.node_ns(dc.id())?.to_string();
+        let dev_ns = lab.node_ns(dev.id())?.to_string();
         lab.spawn_reflector(&dc_ns, r)?;
         tokio::time::sleep(Duration::from_millis(100)).await;
 
         let (_, received) = udp_send_recv_count(&dev_ns, r, 100, 64, Duration::from_secs(3))?;
-        assert!(received <= 30, "expected ≤ 30 received at 90% loss, got {received}");
+        assert!(
+            received <= 30,
+            "expected ≤ 30 received at 90% loss, got {received}"
+        );
         Ok(())
     }
 
     #[tokio::test(flavor = "current_thread")]
     #[traced_test]
     async fn loss_tcp_integrity() -> Result<()> {
-        let mut lab = Lab::new();
-        let dc = lab.add_router("dc").build()?;
+        let lab = Lab::new();
+        let dc = lab.add_router("dc").build().await?;
         let dev = lab
             .add_device("dev")
-            .iface("eth0", dc, Some(Impair::Manual { rate: 0, loss: 5.0, latency: 0 }))
-            .build()?;
-        lab.build().await?;
+            .iface(
+                "eth0",
+                dc.id(),
+                Some(Impair::Manual {
+                    rate: 0,
+                    loss: 5.0,
+                    latency: 0,
+                }),
+            )
+            .build()
+            .await?;
 
         const BYTES: usize = 200 * 1024;
-        let dc_ip = lab.router_uplink_ip(dc)?;
+        let dc_ip = lab.router_uplink_ip(dc.id())?;
         let addr = SocketAddr::new(IpAddr::V4(dc_ip), 18_200);
-        let dc_ns = lab.node_ns(dc)?.to_string();
-        let dev_ns = lab.node_ns(dev)?.to_string();
+        let dc_ns = lab.node_ns(dc.id())?.to_string();
+        let dev_ns = lab.node_ns(dev.id())?.to_string();
 
         // Server in DC writes BYTES to client; client counts received bytes.
         let server = spawn_closure_in_namespace_thread(dc_ns, move || {
@@ -3198,8 +4459,7 @@ gateway = "dc1"
         tokio::time::sleep(Duration::from_millis(100)).await;
 
         let n = run_closure_in_namespace(&dev_ns, move || {
-            let mut stream =
-                std::net::TcpStream::connect_timeout(&addr, Duration::from_secs(5))?;
+            let mut stream = std::net::TcpStream::connect_timeout(&addr, Duration::from_secs(5))?;
             stream.set_read_timeout(Some(Duration::from_secs(30)))?;
             let mut buf = Vec::with_capacity(BYTES);
             stream.read_to_end(&mut buf)?;
@@ -3216,27 +4476,44 @@ gateway = "dc1"
     #[tokio::test(flavor = "current_thread")]
     #[traced_test]
     async fn loss_udp_both_directions() -> Result<()> {
-        let mut lab = Lab::new();
-        let dc = lab.add_router("dc").build()?;
+        let lab = Lab::new();
+        let dc = lab.add_router("dc").build().await?;
         let dev = lab
             .add_device("dev")
-            .iface("eth0", dc, Some(Impair::Manual { rate: 0, loss: 30.0, latency: 0 }))
-            .build()?;
-        lab.build().await?;
+            .iface(
+                "eth0",
+                dc.id(),
+                Some(Impair::Manual {
+                    rate: 0,
+                    loss: 30.0,
+                    latency: 0,
+                }),
+            )
+            .build()
+            .await?;
 
-        let bridge = lab.router_downlink_bridge(dc)?;
-        lab.set_router_impair(dc, &bridge, Some(Impair::Manual { rate: 0, loss: 30.0, latency: 0 }))?;
+        lab.impair_router_downlink(
+            dc.id(),
+            Some(Impair::Manual {
+                rate: 0,
+                loss: 30.0,
+                latency: 0,
+            }),
+        )?;
 
-        let dc_ip = lab.router_uplink_ip(dc)?;
+        let dc_ip = lab.router_uplink_ip(dc.id())?;
         let r = SocketAddr::new(IpAddr::V4(dc_ip), 18_300);
-        let dc_ns = lab.node_ns(dc)?.to_string();
-        let dev_ns = lab.node_ns(dev)?.to_string();
+        let dc_ns = lab.node_ns(dc.id())?.to_string();
+        let dev_ns = lab.node_ns(dev.id())?.to_string();
         lab.spawn_reflector(&dc_ns, r)?;
         tokio::time::sleep(Duration::from_millis(100)).await;
 
         // Round-trip delivery ≈ (1-0.3)×(1-0.3) = 49 %; expect < 80.
         let (_, received) = udp_send_recv_count(&dev_ns, r, 100, 64, Duration::from_secs(3))?;
-        assert!(received <= 80, "expected < 80 echoes with bidirectional loss, got {received}");
+        assert!(
+            received <= 80,
+            "expected < 80 echoes with bidirectional loss, got {received}"
+        );
         Ok(())
     }
 
@@ -3246,22 +4523,31 @@ gateway = "dc1"
     #[traced_test]
     #[ignore = "hangs — download-direction impair path needs async worker fix"]
     async fn latency_download_direction() -> Result<()> {
-        let mut lab = Lab::new();
-        let dc = lab.add_router("dc").build()?;
-        let dev = lab.add_device("dev").iface("eth0", dc, None).build()?;
-        lab.build().await?;
+        let lab = Lab::new();
+        let dc = lab.add_router("dc").build().await?;
+        let dev = lab
+            .add_device("dev")
+            .iface("eth0", dc.id(), None)
+            .build()
+            .await?;
 
-        let dc_ip = lab.router_uplink_ip(dc)?;
+        let dc_ip = lab.router_uplink_ip(dc.id())?;
         let r = SocketAddr::new(IpAddr::V4(dc_ip), 18_400);
-        let dc_ns = lab.node_ns(dc)?.to_string();
-        let dev_ns = lab.node_ns(dev)?.to_string();
+        let dc_ns = lab.node_ns(dc.id())?.to_string();
+        let dev_ns = lab.node_ns(dev.id())?.to_string();
         lab.spawn_reflector(&dc_ns, r)?;
         tokio::time::sleep(Duration::from_millis(100)).await;
 
         let base = udp_rtt_in_ns(&dev_ns, r)?;
 
-        let bridge = lab.router_downlink_bridge(dc)?;
-        lab.set_router_impair(dc, &bridge, Some(Impair::Manual { rate: 0, loss: 0.0, latency: 50 }))?;
+        lab.impair_router_downlink(
+            dc.id(),
+            Some(Impair::Manual {
+                rate: 0,
+                loss: 0.0,
+                latency: 50,
+            }),
+        )?;
 
         let impaired = udp_rtt_in_ns(&dev_ns, r)?;
         assert!(
@@ -3274,21 +4560,35 @@ gateway = "dc1"
     #[tokio::test(flavor = "current_thread")]
     #[traced_test]
     async fn latency_upload_and_download() -> Result<()> {
-        let mut lab = Lab::new();
-        let dc = lab.add_router("dc").build()?;
+        let lab = Lab::new();
+        let dc = lab.add_router("dc").build().await?;
         let dev = lab
             .add_device("dev")
-            .iface("eth0", dc, Some(Impair::Manual { rate: 0, loss: 0.0, latency: 20 }))
-            .build()?;
-        lab.build().await?;
+            .iface(
+                "eth0",
+                dc.id(),
+                Some(Impair::Manual {
+                    rate: 0,
+                    loss: 0.0,
+                    latency: 20,
+                }),
+            )
+            .build()
+            .await?;
 
-        let bridge = lab.router_downlink_bridge(dc)?;
-        lab.set_router_impair(dc, &bridge, Some(Impair::Manual { rate: 0, loss: 0.0, latency: 30 }))?;
+        lab.impair_router_downlink(
+            dc.id(),
+            Some(Impair::Manual {
+                rate: 0,
+                loss: 0.0,
+                latency: 30,
+            }),
+        )?;
 
-        let dc_ip = lab.router_uplink_ip(dc)?;
+        let dc_ip = lab.router_uplink_ip(dc.id())?;
         let r = SocketAddr::new(IpAddr::V4(dc_ip), 18_500);
-        let dc_ns = lab.node_ns(dc)?.to_string();
-        let dev_ns = lab.node_ns(dev)?.to_string();
+        let dc_ns = lab.node_ns(dc.id())?.to_string();
+        let dev_ns = lab.node_ns(dev.id())?.to_string();
         lab.spawn_reflector(&dc_ns, r)?;
         tokio::time::sleep(Duration::from_millis(200)).await;
 
@@ -3304,22 +4604,30 @@ gateway = "dc1"
     #[tokio::test(flavor = "current_thread")]
     #[traced_test]
     async fn latency_device_plus_region() -> Result<()> {
-        let mut lab = Lab::new();
+        let lab = Lab::new();
         lab.add_region_latency("eu", "us", 40);
         lab.add_region_latency("us", "eu", 40);
-        let dc_eu = lab.add_router("dc-eu").region("eu").build()?;
-        let dc_us = lab.add_router("dc-us").region("us").build()?;
+        let dc_eu = lab.add_router("dc-eu").region("eu").build().await?;
+        let dc_us = lab.add_router("dc-us").region("us").build().await?;
         let dev = lab
             .add_device("dev")
-            .iface("eth0", dc_eu, Some(Impair::Manual { rate: 0, loss: 0.0, latency: 30 }))
-            .build()?;
-        lab.build().await?;
+            .iface(
+                "eth0",
+                dc_eu.id(),
+                Some(Impair::Manual {
+                    rate: 0,
+                    loss: 0.0,
+                    latency: 30,
+                }),
+            )
+            .build()
+            .await?;
 
-        let r_us = SocketAddr::new(IpAddr::V4(lab.router_uplink_ip(dc_us)?), 18_600);
-        let r_eu = SocketAddr::new(IpAddr::V4(lab.router_uplink_ip(dc_eu)?), 18_601);
-        let dc_us_ns = lab.node_ns(dc_us)?.to_string();
-        let dc_eu_ns = lab.node_ns(dc_eu)?.to_string();
-        let dev_ns = lab.node_ns(dev)?.to_string();
+        let r_us = SocketAddr::new(IpAddr::V4(lab.router_uplink_ip(dc_us.id())?), 18_600);
+        let r_eu = SocketAddr::new(IpAddr::V4(lab.router_uplink_ip(dc_eu.id())?), 18_601);
+        let dc_us_ns = lab.node_ns(dc_us.id())?.to_string();
+        let dc_eu_ns = lab.node_ns(dc_eu.id())?.to_string();
+        let dev_ns = lab.node_ns(dev.id())?.to_string();
         lab.spawn_reflector(&dc_us_ns, r_us)?;
         lab.spawn_reflector(&dc_eu_ns, r_eu)?;
         tokio::time::sleep(Duration::from_millis(250)).await;
@@ -3344,22 +4652,43 @@ gateway = "dc1"
     #[tokio::test(flavor = "current_thread")]
     #[traced_test]
     async fn latency_multihop_chain() -> Result<()> {
-        let mut lab = Lab::new();
-        let dc = lab.add_router("dc").build()?;
-        let isp = lab.add_router("isp").build()?;
-        let nat = lab.add_router("nat").upstream(isp).nat(NatMode::DestinationIndependent).build()?;
+        let lab = Lab::new();
+        let dc = lab.add_router("dc").build().await?;
+        let isp = lab.add_router("isp").build().await?;
+        let nat = lab
+            .add_router("nat")
+            .upstream(isp.id())
+            .nat(NatMode::DestinationIndependent)
+            .build()
+            .await?;
         let dev = lab
             .add_device("dev")
-            .iface("eth0", nat, Some(Impair::Manual { rate: 0, loss: 0.0, latency: 20 }))
-            .build()?;
-        lab.build().await?;
+            .iface(
+                "eth0",
+                nat.id(),
+                Some(Impair::Manual {
+                    rate: 0,
+                    loss: 0.0,
+                    latency: 20,
+                }),
+            )
+            .build()
+            .await?;
 
-        lab.set_router_impair(nat, "wan", Some(Impair::Manual { rate: 0, loss: 0.0, latency: 30 }))?;
+        lab.impair_link(
+            nat.id(),
+            isp.id(),
+            Some(Impair::Manual {
+                rate: 0,
+                loss: 0.0,
+                latency: 30,
+            }),
+        )?;
 
-        let dc_ip = lab.router_uplink_ip(dc)?;
+        let dc_ip = lab.router_uplink_ip(dc.id())?;
         let r = SocketAddr::new(IpAddr::V4(dc_ip), 18_700);
-        let dc_ns = lab.node_ns(dc)?.to_string();
-        let dev_ns = lab.node_ns(dev)?.to_string();
+        let dc_ns = lab.node_ns(dc.id())?.to_string();
+        let dev_ns = lab.node_ns(dev.id())?.to_string();
         lab.spawn_reflector(&dc_ns, r)?;
         tokio::time::sleep(Duration::from_millis(200)).await;
 
@@ -3377,34 +4706,63 @@ gateway = "dc1"
     #[tokio::test(flavor = "current_thread")]
     #[traced_test]
     async fn rate_dynamic_decrease() -> Result<()> {
-        let mut lab = Lab::new();
-        let dc = lab.add_router("dc").build()?;
+        let lab = Lab::new();
+        let dc = lab.add_router("dc").build().await?;
         let dev = lab
             .add_device("dev")
-            .iface("eth0", dc, Some(Impair::Manual { rate: 5000, loss: 0.0, latency: 0 }))
-            .build()?;
-        lab.build().await?;
+            .iface(
+                "eth0",
+                dc.id(),
+                Some(Impair::Manual {
+                    rate: 5000,
+                    loss: 0.0,
+                    latency: 0,
+                }),
+            )
+            .build()
+            .await?;
 
-        let dc_ip = lab.router_uplink_ip(dc)?;
-        let dc_ns = lab.node_ns(dc)?.to_string();
-        let dev_ns = lab.node_ns(dev)?.to_string();
+        let dc_ip = lab.router_uplink_ip(dc.id())?;
+        let dc_ns = lab.node_ns(dc.id())?.to_string();
+        let dev_ns = lab.node_ns(dev.id())?.to_string();
 
         let sink = spawn_tcp_sink(&dc_ns, SocketAddr::new(IpAddr::V4(dc_ip), 18_800));
         tokio::time::sleep(Duration::from_millis(100)).await;
-        let (_e, kbps_fast) =
-            tcp_measure_throughput(&dev_ns, SocketAddr::new(IpAddr::V4(dc_ip), 18_800), 256 * 1024)?;
+        let (_e, kbps_fast) = tcp_measure_throughput(
+            &dev_ns,
+            SocketAddr::new(IpAddr::V4(dc_ip), 18_800),
+            256 * 1024,
+        )?;
         join_sink(sink)?;
 
-        lab.set_impair("dev", None, Some(Impair::Manual { rate: 500, loss: 0.0, latency: 0 }))?;
+        let dev_handle = lab.device_by_name("dev").unwrap();
+        let default_if = dev_handle.default_iface().name().to_string();
+        dev_handle.set_impair(
+            &default_if,
+            Some(Impair::Manual {
+                rate: 500,
+                loss: 0.0,
+                latency: 0,
+            }),
+        )?;
 
         let sink = spawn_tcp_sink(&dc_ns, SocketAddr::new(IpAddr::V4(dc_ip), 18_801));
         tokio::time::sleep(Duration::from_millis(100)).await;
-        let (_e, kbps_slow) =
-            tcp_measure_throughput(&dev_ns, SocketAddr::new(IpAddr::V4(dc_ip), 18_801), 64 * 1024)?;
+        let (_e, kbps_slow) = tcp_measure_throughput(
+            &dev_ns,
+            SocketAddr::new(IpAddr::V4(dc_ip), 18_801),
+            64 * 1024,
+        )?;
         join_sink(sink)?;
 
-        assert!(kbps_fast >= 3000, "expected fast ≥ 3000 kbit/s, got {kbps_fast}");
-        assert!(kbps_slow <= 700, "expected slow ≤ 700 kbit/s, got {kbps_slow}");
+        assert!(
+            kbps_fast >= 3000,
+            "expected fast ≥ 3000 kbit/s, got {kbps_fast}"
+        );
+        assert!(
+            kbps_slow <= 700,
+            "expected slow ≤ 700 kbit/s, got {kbps_slow}"
+        );
         assert!(
             kbps_slow <= kbps_fast / 4,
             "expected slow ≤ fast/4: slow={kbps_slow} fast={kbps_fast}"
@@ -3415,30 +4773,46 @@ gateway = "dc1"
     #[tokio::test(flavor = "current_thread")]
     #[traced_test]
     async fn rate_dynamic_remove() -> Result<()> {
-        let mut lab = Lab::new();
-        let dc = lab.add_router("dc").build()?;
+        let lab = Lab::new();
+        let dc = lab.add_router("dc").build().await?;
         let dev = lab
             .add_device("dev")
-            .iface("eth0", dc, Some(Impair::Manual { rate: 1000, loss: 0.0, latency: 0 }))
-            .build()?;
-        lab.build().await?;
+            .iface(
+                "eth0",
+                dc.id(),
+                Some(Impair::Manual {
+                    rate: 1000,
+                    loss: 0.0,
+                    latency: 0,
+                }),
+            )
+            .build()
+            .await?;
 
-        let dc_ip = lab.router_uplink_ip(dc)?;
-        let dc_ns = lab.node_ns(dc)?.to_string();
-        let dev_ns = lab.node_ns(dev)?.to_string();
+        let dc_ip = lab.router_uplink_ip(dc.id())?;
+        let dc_ns = lab.node_ns(dc.id())?.to_string();
+        let dev_ns = lab.node_ns(dev.id())?.to_string();
 
         let sink = spawn_tcp_sink(&dc_ns, SocketAddr::new(IpAddr::V4(dc_ip), 18_900));
         tokio::time::sleep(Duration::from_millis(100)).await;
-        let (_e, kbps_throttled) =
-            tcp_measure_throughput(&dev_ns, SocketAddr::new(IpAddr::V4(dc_ip), 18_900), 128 * 1024)?;
+        let (_e, kbps_throttled) = tcp_measure_throughput(
+            &dev_ns,
+            SocketAddr::new(IpAddr::V4(dc_ip), 18_900),
+            128 * 1024,
+        )?;
         join_sink(sink)?;
 
-        lab.set_impair("dev", None, None)?;
+        let dev_handle = lab.device_by_name("dev").unwrap();
+        let default_if = dev_handle.default_iface().name().to_string();
+        dev_handle.set_impair(&default_if, None)?;
 
         let sink = spawn_tcp_sink(&dc_ns, SocketAddr::new(IpAddr::V4(dc_ip), 18_901));
         tokio::time::sleep(Duration::from_millis(100)).await;
-        let (_e, kbps_free) =
-            tcp_measure_throughput(&dev_ns, SocketAddr::new(IpAddr::V4(dc_ip), 18_901), 256 * 1024)?;
+        let (_e, kbps_free) = tcp_measure_throughput(
+            &dev_ns,
+            SocketAddr::new(IpAddr::V4(dc_ip), 18_901),
+            256 * 1024,
+        )?;
         join_sink(sink)?;
 
         assert!(
@@ -3451,28 +4825,40 @@ gateway = "dc1"
     #[tokio::test(flavor = "current_thread")]
     #[traced_test]
     async fn latency_dynamic_add_remove() -> Result<()> {
-        let mut lab = Lab::new();
-        let dc = lab.add_router("dc").build()?;
-        let dev = lab.add_device("dev").iface("eth0", dc, None).build()?;
-        lab.build().await?;
+        let lab = Lab::new();
+        let dc = lab.add_router("dc").build().await?;
+        let dev = lab
+            .add_device("dev")
+            .iface("eth0", dc.id(), None)
+            .build()
+            .await?;
 
-        let dc_ip = lab.router_uplink_ip(dc)?;
+        let dc_ip = lab.router_uplink_ip(dc.id())?;
         let r = SocketAddr::new(IpAddr::V4(dc_ip), 19_000);
-        let dc_ns = lab.node_ns(dc)?.to_string();
-        let dev_ns = lab.node_ns(dev)?.to_string();
+        let dc_ns = lab.node_ns(dc.id())?.to_string();
+        let dev_ns = lab.node_ns(dev.id())?.to_string();
         lab.spawn_reflector(&dc_ns, r)?;
         tokio::time::sleep(Duration::from_millis(200)).await;
 
         let baseline = udp_rtt_in_ns(&dev_ns, r)?;
 
-        lab.set_impair("dev", None, Some(Impair::Manual { rate: 0, loss: 0.0, latency: 100 }))?;
+        let dev_handle = lab.device_by_name("dev").unwrap();
+        let default_if = dev_handle.default_iface().name().to_string();
+        dev_handle.set_impair(
+            &default_if,
+            Some(Impair::Manual {
+                rate: 0,
+                loss: 0.0,
+                latency: 100,
+            }),
+        )?;
         let high = udp_rtt_in_ns(&dev_ns, r)?;
         assert!(
             high >= baseline + Duration::from_millis(90),
             "expected RTT +90ms after 100ms impair, baseline={baseline:?} high={high:?}"
         );
 
-        lab.set_impair("dev", None, None)?;
+        dev_handle.set_impair(&default_if, None)?;
         let recovered = udp_rtt_in_ns(&dev_ns, r)?;
         assert!(
             recovered < baseline + Duration::from_millis(30),
@@ -3492,15 +4878,14 @@ gateway = "dc1"
         let mut failures = Vec::new();
         for (preset, min_latency_ms, loss_pct) in cases {
             let result: Result<()> = async {
-                let mut lab = Lab::new();
-                let dc = lab.add_router("dc").build()?;
-                let dev = lab.add_device("dev").iface("eth0", dc, Some(preset)).build()?;
-                lab.build().await?;
+                let lab = Lab::new();
+                let dc = lab.add_router("dc").build().await?;
+                let dev = lab.add_device("dev").iface("eth0", dc.id(), Some(preset)).build().await?;
 
-                let dc_ip = lab.router_uplink_ip(dc)?;
+                let dc_ip = lab.router_uplink_ip(dc.id())?;
                 let r = SocketAddr::new(IpAddr::V4(dc_ip), port_base);
-                let dc_ns = lab.node_ns(dc)?.to_string();
-                let dev_ns = lab.node_ns(dev)?.to_string();
+                let dc_ns = lab.node_ns(dc.id())?.to_string();
+                let dev_ns = lab.node_ns(dev.id())?.to_string();
                 lab.spawn_reflector(&dc_ns, r)?;
                 tokio::time::sleep(Duration::from_millis(200)).await;
 

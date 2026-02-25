@@ -16,7 +16,10 @@ pub(crate) struct Netlink {
 impl Netlink {
     /// Creates a handle that registers every created link into `tracker`.
     pub(crate) fn new_tracked(handle: Handle, tracker: Arc<Mutex<Vec<String>>>) -> Self {
-        Self { handle, tracker: Some(tracker) }
+        Self {
+            handle,
+            tracker: Some(tracker),
+        }
     }
 
     fn register_link(&self, name: &str) {

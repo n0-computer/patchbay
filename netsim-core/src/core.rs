@@ -62,7 +62,7 @@ pub struct RouterConfig {
 
 /// One network interface on a device, connected to a router's downstream switch.
 #[derive(Clone, Debug)]
-pub struct DeviceIface {
+pub struct DeviceIfaceData {
     /// Interface name inside the device namespace (e.g. `"eth0"`).
     pub ifname: String,
     /// Stores the switch this interface is attached to.
@@ -77,27 +77,25 @@ pub struct DeviceIface {
 
 /// A network endpoint with one or more interfaces.
 #[derive(Clone, Debug)]
-pub struct Device {
-    /// Identifies the device.
-    pub id: NodeId,
+pub struct DeviceData {
     /// Stores the device name.
     pub name: String,
     /// Stores the device namespace name.
     pub ns: String,
     /// Interfaces in declaration order.
-    pub interfaces: Vec<DeviceIface>,
+    pub interfaces: Vec<DeviceIfaceData>,
     /// `ifname` of the interface that carries the default route.
     pub default_via: String,
 }
 
-impl Device {
+impl DeviceData {
     /// Looks up an interface by name.
-    pub fn iface(&self, name: &str) -> Option<&DeviceIface> {
+    pub fn iface(&self, name: &str) -> Option<&DeviceIfaceData> {
         self.interfaces.iter().find(|i| i.ifname == name)
     }
 
     /// Looks up an interface mutably by name.
-    pub fn iface_mut(&mut self, name: &str) -> Option<&mut DeviceIface> {
+    pub fn iface_mut(&mut self, name: &str) -> Option<&mut DeviceIfaceData> {
         self.interfaces.iter_mut().find(|i| i.ifname == name)
     }
 
@@ -106,7 +104,7 @@ impl Device {
     /// # Panics
     /// Panics if `default_via` does not name a known interface (invariant
     /// maintained by `add_device_iface` / `set_device_default_via`).
-    pub fn default_iface(&self) -> &DeviceIface {
+    pub fn default_iface(&self) -> &DeviceIfaceData {
         self.iface(&self.default_via)
             .expect("default_via names a valid interface")
     }
@@ -114,7 +112,7 @@ impl Device {
 
 /// Represents a router and its L3 connectivity state.
 #[derive(Clone, Debug)]
-pub struct Router {
+pub struct RouterData {
     /// Identifies the router.
     pub id: NodeId,
     /// Stores the router name.
@@ -142,8 +140,6 @@ pub struct Router {
 /// Represents an L2 switch/bridge attachment point.
 #[derive(Clone, Debug)]
 pub struct Switch {
-    /// Identifies the switch.
-    pub id: NodeId,
     /// Stores the switch name.
     pub name: String,
     /// Stores the switch subnet if assigned.
@@ -158,42 +154,40 @@ pub struct Switch {
 }
 
 /// Per-interface wiring job collected by `build()`.
-struct IfaceBuild {
-    dev_ns: String,
-    gw_ns: String,
-    gw_ip: Ipv4Addr,
-    gw_br: String,
-    dev_ip: Ipv4Addr,
-    prefix_len: u8,
-    impair: Option<Impair>,
-    /// Interface name inside the device namespace.
-    ifname: String,
-    /// Only this interface gets `ip route add default`.
-    is_default: bool,
-    /// Unique index drives veth naming in the lab-root namespace.
-    idx: u64,
+pub(crate) struct IfaceBuild {
+    pub(crate) dev_ns: String,
+    pub(crate) gw_ns: String,
+    pub(crate) gw_ip: Ipv4Addr,
+    pub(crate) gw_br: String,
+    pub(crate) dev_ip: Ipv4Addr,
+    pub(crate) prefix_len: u8,
+    pub(crate) impair: Option<Impair>,
+    pub(crate) ifname: String,
+    pub(crate) is_default: bool,
+    pub(crate) idx: u64,
 }
 
 /// Stores mutable topology state and build-time allocators.
 pub struct NetworkCore {
-    cfg: CoreConfig,
-    netns: netns::NetnsManager,
+    pub(crate) cfg: CoreConfig,
+    pub(crate) netns: Arc<netns::NetnsManager>,
     next_id: u64,
     next_private_subnet: u16,
     next_public_subnet: u16,
     next_ix_low: u8,
-    next_ix_high: u8,
     bridge_counter: u32,
     ns_counter: u32,
     ix_sw: NodeId,
-    devices: HashMap<NodeId, Device>,
-    routers: HashMap<NodeId, Router>,
+    devices: HashMap<NodeId, DeviceData>,
+    routers: HashMap<NodeId, RouterData>,
     switches: HashMap<NodeId, Switch>,
     nodes_by_name: HashMap<String, NodeId>,
     /// Links created by this instance; cleaned up on drop.
     own_links: Arc<Mutex<Vec<String>>>,
     /// Namespaces created by this instance; cleaned up on drop.
-    own_netns: Vec<String>,
+    pub(crate) own_netns: Vec<String>,
+    /// Whether root namespace and IX bridge have been set up.
+    pub(crate) root_ns_initialized: bool,
 }
 
 // ─────────────────────────────────────────────
@@ -354,12 +348,11 @@ impl NetworkCore {
         let own_links = Arc::new(Mutex::new(Vec::new()));
         let mut core = Self {
             cfg,
-            netns: netns::NetnsManager::new_with_tracker(own_links.clone()),
+            netns: Arc::new(netns::NetnsManager::new_with_tracker(own_links.clone())),
             next_id: 1,
             next_private_subnet: 1,
             next_public_subnet: 1,
             next_ix_low: 10,
-            next_ix_high: 250,
             bridge_counter: 2,
             ns_counter: 1,
             ix_sw: NodeId(0),
@@ -369,6 +362,7 @@ impl NetworkCore {
             nodes_by_name: HashMap::new(),
             own_links,
             own_netns: Vec::new(),
+            root_ns_initialized: false,
         };
         let ix_sw = core.add_switch("ix", Some(core.cfg.ix_cidr), Some(core.cfg.ix_gw));
         core.ix_sw = ix_sw;
@@ -387,27 +381,9 @@ impl NetworkCore {
         format!("{}-{}", self.cfg.prefix, id)
     }
 
-    async fn netlink<F>(&self, ns: &str, f: F) -> Result<()>
-    where
-        F: AsyncFnOnce(&mut Netlink) -> Result<()> + Send + 'static,
-    {
-        self.netns
-            .spawn_netlink_task_in(ns, move |nl_arc| async move {
-                let mut nl = nl_arc.lock().await;
-                f(&mut *nl).await
-            })
-            .await
-            .map_err(|_| anyhow!("netns task cancelled"))?
-    }
-
     /// Returns the IX gateway address.
     pub fn ix_gw(&self) -> Ipv4Addr {
         self.cfg.ix_gw
-    }
-
-    /// Returns the IX bridge name.
-    pub fn ix_br(&self) -> &str {
-        &self.cfg.ix_br
     }
 
     /// Allocates the next low-end IX host address.
@@ -415,14 +391,6 @@ impl NetworkCore {
         let o = self.cfg.ix_gw.octets();
         let ip = Ipv4Addr::new(o[0], o[1], o[2], self.next_ix_low);
         self.next_ix_low = self.next_ix_low.saturating_add(1);
-        ip
-    }
-
-    /// Allocates the next high-end IX host address.
-    pub fn alloc_ix_ip_high(&mut self) -> Ipv4Addr {
-        let o = self.cfg.ix_gw.octets();
-        let ip = Ipv4Addr::new(o[0], o[1], o[2], self.next_ix_high);
-        self.next_ix_high = self.next_ix_high.saturating_sub(1);
         ip
     }
 
@@ -453,28 +421,23 @@ impl NetworkCore {
     }
 
     /// Returns router data for `id`.
-    pub fn router(&self, id: NodeId) -> Option<&Router> {
+    pub fn router(&self, id: NodeId) -> Option<&RouterData> {
         self.routers.get(&id)
     }
 
     /// Returns device data for `id`.
-    pub fn device(&self, id: NodeId) -> Option<&Device> {
+    pub fn device(&self, id: NodeId) -> Option<&DeviceData> {
         self.devices.get(&id)
     }
 
     /// Returns mutable device data for `id`.
-    pub fn device_mut(&mut self, id: NodeId) -> Option<&mut Device> {
+    pub fn device_mut(&mut self, id: NodeId) -> Option<&mut DeviceData> {
         self.devices.get_mut(&id)
     }
 
     /// Returns switch data for `id`.
     pub fn switch(&self, id: NodeId) -> Option<&Switch> {
         self.switches.get(&id)
-    }
-
-    /// Returns the node identifier mapped from `name`.
-    pub fn node_id_by_name(&self, name: &str) -> Option<NodeId> {
-        self.nodes_by_name.get(name).copied()
     }
 
     /// Returns the router identifier for `name`, or `None` if not a router.
@@ -515,14 +478,6 @@ impl NetworkCore {
         Ok(())
     }
 
-    /// Returns the current NAT mode for a router.
-    pub fn router_nat_mode(&self, id: NodeId) -> Result<NatMode> {
-        self.routers
-            .get(&id)
-            .map(|r| r.cfg.nat)
-            .context("unknown router id")
-    }
-
     /// Adds a router node and returns its identifier.
     ///
     /// The namespace name and downstream bridge name are generated internally.
@@ -539,7 +494,7 @@ impl NetworkCore {
         self.nodes_by_name.insert(name.to_string(), id);
         self.routers.insert(
             id,
-            Router {
+            RouterData {
                 id,
                 name: name.to_string(),
                 ns,
@@ -571,8 +526,7 @@ impl NetworkCore {
         self.nodes_by_name.insert(name.to_string(), id);
         self.devices.insert(
             id,
-            Device {
-                id,
+            DeviceData {
                 name: name.to_string(),
                 ns,
                 interfaces: vec![],
@@ -611,7 +565,7 @@ impl NetworkCore {
         if dev.default_via.is_empty() {
             dev.default_via = ifname.to_string();
         }
-        dev.interfaces.push(DeviceIface {
+        dev.interfaces.push(DeviceIfaceData {
             ifname: ifname.to_string(),
             uplink: downlink,
             ip: Some(assigned),
@@ -644,36 +598,6 @@ impl NetworkCore {
             .ok_or_else(|| anyhow!("switch missing gateway ip"))
     }
 
-    /// Sets interface admin state in `ns` using rtnetlink.
-    pub async fn set_link_state_in_namespace(
-        &self,
-        ns: &str,
-        ifname: &str,
-        up: bool,
-    ) -> Result<()> {
-        let ifname = ifname.to_string();
-        self.netlink(ns, async move |nl| {
-            if up {
-                nl.set_link_up(&ifname).await
-            } else {
-                nl.set_link_down(&ifname).await
-            }
-        })
-        .await
-    }
-
-    /// Replaces default route in `ns` with `default via <via> dev <ifname>`.
-    pub async fn replace_default_route_in_namespace(
-        &self,
-        ns: &str,
-        ifname: &str,
-        via: Ipv4Addr,
-    ) -> Result<()> {
-        let ifname = ifname.to_string();
-        self.netlink(ns, async move |nl| nl.replace_default_route_v4(&ifname, via).await)
-            .await
-    }
-
     /// Adds a switch node and returns its identifier.
     pub fn add_switch(
         &mut self,
@@ -686,7 +610,6 @@ impl NetworkCore {
         self.switches.insert(
             id,
             Switch {
-                id,
                 name: name.to_string(),
                 cidr,
                 gw,
@@ -776,404 +699,10 @@ impl NetworkCore {
         Ok((cidr, gw))
     }
 
-    /// Builds all namespaces, links, addressing, routing, and NAT state.
-    pub async fn build(&mut self, region_latencies: &[(String, String, u32)]) -> Result<()> {
-        debug!("build: ensure /var/run/netns exists");
-        ensure_netns_dir()?;
-        let root_ns = self.cfg.root_ns.clone();
-
-        for ns in self.all_ns_names() {
-            debug!(ns = %ns, "build: create named netns");
-            create_named_netns(&ns).await?;
-            self.own_netns.push(ns.clone());
-        }
-
-        // Namespaces may inherit host nftables rules (including drop policies).
-        // Start from a clean ruleset so lab behavior is deterministic.
-        for ns in self.all_ns_names() {
-            if let Err(err) = run_nft_in(&ns, "flush ruleset").await {
-                debug!(ns = %ns, error = %err, "build: nft flush failed; continuing");
-            }
-        }
-
-        // IX bridge in the lab root namespace.
-        let ix_br = self.cfg.ix_br.clone();
-        let ix_ip = self.cfg.ix_gw;
-        let ix_prefix = self.cfg.ix_cidr.prefix_len();
-        self.netlink(&root_ns, {
-            let root_ns = root_ns.clone();
-            let ix_br = ix_br.clone();
-            async move |h| {
-                debug!(bridge = %ix_br, root_ns = %root_ns, "build: ensure lab-root IX bridge");
-                h.set_link_up("lo").await?;
-                h.ensure_link_deleted(&ix_br).await.ok();
-                h.add_bridge(&ix_br).await?;
-                h.set_link_up(&ix_br).await?;
-                h.add_addr4(&ix_br, ix_ip, ix_prefix).await?;
-                Ok(())
-            }
-        })
-        .await?;
-        set_sysctl_in(&root_ns, "net/ipv4/ip_forward", "1")?;
-
-        // Routers attached to IX.
-        for (id, router) in self.routers.clone() {
-            if router.uplink != Some(self.ix_sw) {
-                continue;
-            }
-            let root_if = self.root_if("i", id.0);
-            let ns_if = "ix".to_string();
-            let ix_br = self.cfg.ix_br.clone();
-            let ix_gw = self.cfg.ix_gw;
-            self.netlink(&root_ns, {
-                let root_if = root_if.clone();
-                let ns_if = ns_if.clone();
-                let ix_br = ix_br.clone();
-                let router_ns = router.ns.clone();
-                async move |h| {
-                    h.ensure_link_deleted(&root_if).await.ok();
-                    h.ensure_link_deleted(&ns_if).await.ok();
-                    h.add_veth(&root_if, &ns_if).await?;
-                    h.set_master(&root_if, &ix_br).await?;
-                    h.set_link_up(&root_if).await?;
-                    h.move_link_to_netns(&ns_if, &open_netns_fd(&router_ns)?)
-                        .await?;
-                    Ok(())
-                }
-            })
-            .await?;
-
-            let ix_ip = router.upstream_ip.unwrap();
-            let ix_prefix = self.cfg.ix_cidr.prefix_len();
-            self.netlink(&router.ns, {
-                let ns_if = ns_if.clone();
-                async move |h| {
-                    h.set_link_up("lo").await?;
-                    h.set_link_up(&ns_if).await?;
-                    h.add_addr4(&ns_if, ix_ip, ix_prefix).await?;
-                    h.add_default_route_v4(ix_gw).await?;
-                    Ok(())
-                }
-            })
-            .await?;
-            set_sysctl_in(&router.ns, "net/ipv4/ip_forward", "1")?;
-
-            apply_nat(
-                &router.ns,
-                router.cfg.nat,
-                &router.downlink_bridge,
-                &ns_if,
-                router.upstream_ip.unwrap(),
-            )
-            .await?;
-        }
-
-        // Inter-region latency (per-destination netem on IX links).
-        if !region_latencies.is_empty() {
-            let mut region_targets: HashMap<String, Vec<Ipv4Net>> = HashMap::new();
-            for router in self.routers.values() {
-                if router.uplink != Some(self.ix_sw) {
-                    continue;
-                }
-                let Some(region) = router.region.as_ref() else {
-                    continue;
-                };
-                if let Some(ix_ip) = router.upstream_ip {
-                    if let Ok(cidr) = Ipv4Net::new(ix_ip, 32) {
-                        region_targets.entry(region.clone()).or_default().push(cidr);
-                    }
-                }
-                if router.cfg.downstream_pool == DownstreamPool::Public {
-                    if let Some(cidr) = router.downstream_cidr {
-                        region_targets.entry(region.clone()).or_default().push(cidr);
-                    }
-                }
-            }
-
-            for router in self.routers.values() {
-                if router.uplink != Some(self.ix_sw) {
-                    continue;
-                }
-                let Some(region) = router.region.as_ref() else {
-                    continue;
-                };
-                let mut filters = Vec::new();
-                for (from, to, latency) in region_latencies {
-                    if from != region {
-                        continue;
-                    }
-                    if let Some(targets) = region_targets.get(to) {
-                        for cidr in targets {
-                            filters.push((*cidr, *latency));
-                        }
-                    }
-                }
-                if !filters.is_empty() {
-                    debug!(
-                        ns = %router.ns,
-                        ifname = "ix",
-                        filters = filters.len(),
-                        "build: apply inter-region latency filters"
-                    );
-                    apply_region_latency(&router.ns, "ix", &filters)?;
-                }
-            }
-        }
-
-        // Ensure router downlink bridges before attaching subscriber links/devices.
-        for router in self.routers.values() {
-            if let Some(sw) = router.downlink {
-                let sw = self.switches.get(&sw).unwrap();
-                let br = sw.bridge.clone().unwrap_or_else(|| "br-lan".to_string());
-                let lan_ip = sw.gw.unwrap();
-                let lan_prefix = sw.cidr.unwrap().prefix_len();
-                self.netlink(&router.ns, async move |h| {
-                    h.set_link_up("lo").await?;
-                    h.ensure_link_deleted(&br).await.ok();
-                    h.add_bridge(&br).await?;
-                    h.set_link_up(&br).await?;
-                    h.add_addr4(&br, lan_ip, lan_prefix).await?;
-                    Ok(())
-                })
-                .await?;
-            }
-        }
-
-        // Routers attached to another router (subscriber links).
-        for (id, router) in self.routers.clone() {
-            let Some(uplink) = router.uplink else {
-                continue;
-            };
-            if uplink == self.ix_sw {
-                continue;
-            }
-            let sw = self
-                .switches
-                .get(&uplink)
-                .ok_or_else(|| anyhow!("router uplink switch missing"))?;
-            let owner = sw
-                .owner_router
-                .ok_or_else(|| anyhow!("uplink switch missing owner"))?;
-            let owner_ns = self.routers.get(&owner).unwrap().ns.clone();
-            let bridge = sw.bridge.clone().unwrap_or_else(|| "br-lan".to_string());
-            let gw_ip = sw.gw.ok_or_else(|| anyhow!("uplink switch missing gw"))?;
-
-            let root_a = self.root_if("a", id.0);
-            let root_b = self.root_if("b", id.0);
-            self.netlink(&root_ns, {
-                let root_a = root_a.clone();
-                let root_b = root_b.clone();
-                let owner_ns = owner_ns.clone();
-                let router_ns = router.ns.clone();
-                async move |h| {
-                    h.ensure_link_deleted(&root_a).await.ok();
-                    h.ensure_link_deleted(&root_b).await.ok();
-                    h.add_veth(&root_a, &root_b).await?;
-                    h.move_link_to_netns(&root_a, &open_netns_fd(&owner_ns)?)
-                        .await?;
-                    h.move_link_to_netns(&root_b, &open_netns_fd(&router_ns)?)
-                        .await?;
-                    Ok(())
-                }
-            })
-            .await?;
-
-            let owner_if = format!("h{}", id.0);
-            self.netlink(&owner_ns, {
-                let root_a = root_a.clone();
-                let owner_if = owner_if.clone();
-                let bridge = bridge.clone();
-                async move |h| {
-                    h.rename_link(&root_a, &owner_if).await?;
-                    h.set_link_up(&owner_if).await?;
-                    h.set_master(&owner_if, &bridge).await?;
-                    Ok(())
-                }
-            })
-            .await?;
-
-            let wan_if = "wan".to_string();
-            let wan_ip = router.upstream_ip.unwrap();
-            let wan_prefix = sw.cidr.unwrap().prefix_len();
-            self.netlink(&router.ns, {
-                let root_b = root_b.clone();
-                let wan_if = wan_if.clone();
-                async move |h| {
-                    h.set_link_up("lo").await?;
-                    h.rename_link(&root_b, &wan_if).await?;
-                    h.set_link_up(&wan_if).await?;
-                    h.add_addr4(&wan_if, wan_ip, wan_prefix).await?;
-                    h.add_default_route_v4(gw_ip).await?;
-                    Ok(())
-                }
-            })
-            .await?;
-            set_sysctl_in(&router.ns, "net/ipv4/ip_forward", "1")?;
-
-            apply_nat(
-                &router.ns,
-                router.cfg.nat,
-                &router.downlink_bridge,
-                &wan_if,
-                router.upstream_ip.unwrap(),
-            )
-            .await?;
-        }
-
-        // Devices — one IfaceBuild per (device, interface) pair.
-        let mut iface_data = Vec::new();
-        for dev in self.devices.values() {
-            for iface in &dev.interfaces {
-                let sw = self.switches.get(&iface.uplink).ok_or_else(|| {
-                    anyhow!(
-                        "device '{}' iface '{}' switch missing",
-                        dev.name,
-                        iface.ifname
-                    )
-                })?;
-                let gw_router = sw.owner_router.ok_or_else(|| {
-                    anyhow!(
-                        "device '{}' iface '{}' switch missing owner",
-                        dev.name,
-                        iface.ifname
-                    )
-                })?;
-                let gw = sw.gw.ok_or_else(|| anyhow!("device switch missing gw"))?;
-                let gw_br = sw.bridge.clone().unwrap_or_else(|| "br-lan".to_string());
-                let gw_ns = self.routers.get(&gw_router).unwrap().ns.clone();
-                iface_data.push(IfaceBuild {
-                    dev_ns: dev.ns.clone(),
-                    gw_ns,
-                    gw_ip: gw,
-                    gw_br,
-                    dev_ip: iface.ip.unwrap(),
-                    prefix_len: sw.cidr.unwrap().prefix_len(),
-                    impair: iface.impair,
-                    ifname: iface.ifname.clone(),
-                    is_default: iface.ifname == dev.default_via,
-                    idx: iface.idx,
-                });
-            }
-        }
-
-        for iface in iface_data {
-            self.wire_iface(iface).await?;
-        }
-
-        // Lab-root return routes to public downstreams behind IX routers.
-        let return_routes: Vec<(Ipv4Addr, u8, Ipv4Addr)> = self
-            .routers
-            .values()
-            .filter(|router| {
-                router.uplink == Some(self.ix_sw)
-                    && router.cfg.downstream_pool == DownstreamPool::Public
-                    && router.downstream_cidr.is_some()
-            })
-            .map(|router| {
-                let cidr = router.downstream_cidr.expect("checked above");
-                (
-                    cidr.addr(),
-                    cidr.prefix_len(),
-                    router.upstream_ip.expect("ix uplink ip"),
-                )
-            })
-            .collect();
-        self.netlink(&root_ns, async move |h| {
-            for (net, prefix_len, via) in return_routes {
-                debug!(
-                    dst = %format!("{}/{}", net, prefix_len),
-                    via = %via,
-                    "build: add lab-root return route"
-                );
-                h.add_route_v4(net, prefix_len, via).await.ok();
-            }
-            Ok(())
-        })
-        .await
-        .ok();
-
-        Ok(())
-    }
-
     fn alloc_id(&mut self) -> u64 {
         let id = self.next_id;
         self.next_id += 1;
         id
-    }
-
-    /// Wire one device interface: create veth pair, move ends to correct
-    /// namespaces, assign IP, and optionally add a default route and impairment.
-    async fn wire_iface(&self, dev: IfaceBuild) -> Result<()> {
-        debug!(
-            dev_ns = %dev.dev_ns,
-            gw_ns = %dev.gw_ns,
-            gw_ip = %dev.gw_ip,
-            gw_br = %dev.gw_br,
-            dev_ip = %dev.dev_ip,
-            ifname = %dev.ifname,
-            impair = ?dev.impair,
-            is_default = dev.is_default,
-            "build: connect device interface to gateway"
-        );
-        let root_gw = self.root_if("g", dev.idx);
-        let root_dev = self.root_if("e", dev.idx);
-        let root_ns = self.cfg.root_ns.clone();
-        self.netlink(&root_ns, {
-            let root_gw = root_gw.clone();
-            let root_dev = root_dev.clone();
-            let dev_ns = dev.dev_ns.clone();
-            let gw_ns = dev.gw_ns.clone();
-            async move |h| {
-                h.ensure_link_deleted(&root_gw).await.ok();
-                h.ensure_link_deleted(&root_dev).await.ok();
-                h.add_veth(&root_gw, &root_dev).await?;
-                h.move_link_to_netns(&root_gw, &open_netns_fd(&gw_ns)?)
-                    .await?;
-                h.move_link_to_netns(&root_dev, &open_netns_fd(&dev_ns)?)
-                    .await?;
-                Ok(())
-            }
-        })
-        .await?;
-
-        let dev_ip = dev.dev_ip;
-        let dev_prefix = dev.prefix_len;
-        let ifname = dev.ifname.clone();
-        let is_default = dev.is_default;
-        let gw_ip = dev.gw_ip;
-        self.netlink(&dev.dev_ns, {
-            let root_dev = root_dev.clone();
-            let ifname = ifname.clone();
-            async move |h| {
-                h.set_link_up("lo").await?;
-                h.rename_link(&root_dev, &ifname).await?;
-                h.set_link_up(&ifname).await?;
-                h.add_addr4(&ifname, dev_ip, dev_prefix).await?;
-                if is_default {
-                    h.add_default_route_v4(gw_ip).await?;
-                }
-                Ok(())
-            }
-        })
-        .await?;
-
-        self.netlink(&dev.gw_ns, {
-            let root_gw = root_gw.clone();
-            let gw_if = format!("v{}", dev.idx);
-            let gw_br = dev.gw_br.clone();
-            async move |h| {
-                h.rename_link(&root_gw, &gw_if).await?;
-                h.set_link_up(&gw_if).await?;
-                h.set_master(&gw_if, &gw_br).await?;
-                Ok(())
-            }
-        })
-        .await?;
-
-        if let Some(imp) = dev.impair {
-            apply_impair_in(&dev.dev_ns, &dev.ifname, imp);
-        }
-        Ok(())
     }
 
     fn alloc_private_cidr(&mut self) -> Result<Ipv4Net> {
@@ -1200,7 +729,7 @@ impl NetworkCore {
         Ok(cidr)
     }
 
-    fn alloc_from_switch(&mut self, sw: NodeId) -> Result<Ipv4Addr> {
+    pub(crate) fn alloc_from_switch(&mut self, sw: NodeId) -> Result<Ipv4Addr> {
         let sw_entry = self
             .switches
             .get_mut(&sw)
@@ -1213,13 +742,24 @@ impl NetworkCore {
         Ok(ip)
     }
 
-    fn root_if(&self, tag: &str, id: u64) -> String {
-        format!("{}{}{}", self.cfg.prefix, tag, id)
+    /// Returns an iterator over all devices in the topology.
+    pub fn all_devices(&self) -> impl Iterator<Item = &DeviceData> {
+        self.devices.values()
     }
 
-    /// Returns an iterator over all devices in the topology.
-    pub fn all_devices(&self) -> impl Iterator<Item = &Device> {
-        self.devices.values()
+    /// Returns an iterator over all routers in the topology.
+    pub fn all_routers(&self) -> impl Iterator<Item = &RouterData> {
+        self.routers.values()
+    }
+
+    /// Returns all device node ids.
+    pub fn all_device_ids(&self) -> Vec<NodeId> {
+        self.devices.keys().copied().collect()
+    }
+
+    /// Returns all router node ids.
+    pub fn all_router_ids(&self) -> Vec<NodeId> {
+        self.routers.keys().copied().collect()
     }
 
     /// Returns all namespace names owned by the lab.
@@ -1233,6 +773,334 @@ impl NetworkCore {
         }
         v
     }
+}
+
+// ─────────────────────────────────────────────
+// Free async setup functions (used by builders; no lock held)
+// ─────────────────────────────────────────────
+
+/// Helper: run a netlink operation in a namespace via the shared NetnsManager.
+pub(crate) async fn nl_run<F>(netns: &Arc<netns::NetnsManager>, ns: &str, f: F) -> Result<()>
+where
+    F: AsyncFnOnce(&mut Netlink) -> Result<()> + Send + 'static,
+{
+    netns
+        .spawn_netlink_task_in(ns, move |nl_arc| async move {
+            let mut nl = nl_arc.lock().await;
+            f(&mut *nl).await
+        })
+        .await
+        .map_err(|_| anyhow!("netns task cancelled"))?
+}
+
+/// Creates root namespace, IX bridge, and enables forwarding. Idempotent-safe at caller level.
+pub(crate) async fn setup_root_ns_async(
+    cfg: &CoreConfig,
+    netns: &Arc<netns::NetnsManager>,
+) -> Result<()> {
+    ensure_netns_dir()?;
+    let root_ns = cfg.root_ns.clone();
+    create_named_netns(&root_ns).await?;
+
+    if let Err(err) = run_nft_in(&root_ns, "flush ruleset").await {
+        debug!(ns = %root_ns, error = %err, "setup_root_ns: nft flush failed; continuing");
+    }
+
+    let ix_br = cfg.ix_br.clone();
+    let ix_ip = cfg.ix_gw;
+    let ix_prefix = cfg.ix_cidr.prefix_len();
+    nl_run(netns, &root_ns, {
+        let ix_br = ix_br.clone();
+        async move |h| {
+            h.set_link_up("lo").await?;
+            h.ensure_link_deleted(&ix_br).await.ok();
+            h.add_bridge(&ix_br).await?;
+            h.set_link_up(&ix_br).await?;
+            h.add_addr4(&ix_br, ix_ip, ix_prefix).await?;
+            Ok(())
+        }
+    })
+    .await?;
+    set_sysctl_in(&root_ns, "net/ipv4/ip_forward", "1")?;
+    Ok(())
+}
+
+/// Data snapshot needed to set up a single router.
+pub(crate) struct RouterSetupData {
+    pub router: RouterData,
+    pub root_ns: String,
+    pub prefix: String,
+    pub ix_sw: NodeId,
+    pub ix_br: String,
+    pub ix_gw: Ipv4Addr,
+    pub ix_cidr_prefix: u8,
+    /// For sub-routers: upstream switch info.
+    pub upstream_owner_ns: Option<String>,
+    pub upstream_bridge: Option<String>,
+    pub upstream_gw: Option<Ipv4Addr>,
+    pub upstream_cidr_prefix: Option<u8>,
+    /// For IX-level public routers: downstream CIDR for return route.
+    pub return_route: Option<(Ipv4Addr, u8, Ipv4Addr)>,
+    /// Downlink bridge info (if router has downstream switch).
+    pub downlink_bridge: Option<(String, Ipv4Addr, u8)>,
+}
+
+/// Sets up a single router's namespaces, links, and NAT. No lock held.
+pub(crate) async fn setup_router_async(
+    netns: &Arc<netns::NetnsManager>,
+    data: &RouterSetupData,
+) -> Result<()> {
+    let router = &data.router;
+    let id = router.id;
+
+    // Create router namespace.
+    create_named_netns(&router.ns).await?;
+    if let Err(err) = run_nft_in(&router.ns, "flush ruleset").await {
+        debug!(ns = %router.ns, error = %err, "setup_router: nft flush failed; continuing");
+    }
+
+    let uplink = router
+        .uplink
+        .ok_or_else(|| anyhow!("router missing uplink"))?;
+
+    if uplink == data.ix_sw {
+        // IX-level router.
+        let root_if = format!("{}i{}", data.prefix, id.0);
+        let ns_if = "ix".to_string();
+
+        nl_run(netns, &data.root_ns, {
+            let root_if = root_if.clone();
+            let ns_if = ns_if.clone();
+            let ix_br = data.ix_br.clone();
+            let router_ns = router.ns.clone();
+            async move |h| {
+                h.ensure_link_deleted(&root_if).await.ok();
+                h.ensure_link_deleted(&ns_if).await.ok();
+                h.add_veth(&root_if, &ns_if).await?;
+                h.set_master(&root_if, &ix_br).await?;
+                h.set_link_up(&root_if).await?;
+                h.move_link_to_netns(&ns_if, &open_netns_fd(&router_ns)?)
+                    .await?;
+                Ok(())
+            }
+        })
+        .await?;
+
+        let ix_ip = router.upstream_ip.unwrap();
+        let ix_prefix = data.ix_cidr_prefix;
+        let ix_gw = data.ix_gw;
+        nl_run(netns, &router.ns, {
+            let ns_if = ns_if.clone();
+            async move |h| {
+                h.set_link_up("lo").await?;
+                h.set_link_up(&ns_if).await?;
+                h.add_addr4(&ns_if, ix_ip, ix_prefix).await?;
+                h.add_default_route_v4(ix_gw).await?;
+                Ok(())
+            }
+        })
+        .await?;
+        set_sysctl_in(&router.ns, "net/ipv4/ip_forward", "1")?;
+
+        apply_nat(
+            &router.ns,
+            router.cfg.nat,
+            &router.downlink_bridge,
+            &ns_if,
+            router.upstream_ip.unwrap(),
+        )
+        .await?;
+    } else {
+        // Sub-router.
+        let owner_ns = data
+            .upstream_owner_ns
+            .as_ref()
+            .ok_or_else(|| anyhow!("sub-router missing upstream owner ns"))?;
+        let bridge = data
+            .upstream_bridge
+            .as_ref()
+            .ok_or_else(|| anyhow!("sub-router missing upstream bridge"))?;
+        let gw_ip = data
+            .upstream_gw
+            .ok_or_else(|| anyhow!("sub-router missing upstream gw"))?;
+
+        let root_a = format!("{}a{}", data.prefix, id.0);
+        let root_b = format!("{}b{}", data.prefix, id.0);
+        nl_run(netns, &data.root_ns, {
+            let root_a = root_a.clone();
+            let root_b = root_b.clone();
+            let owner_ns = owner_ns.clone();
+            let router_ns = router.ns.clone();
+            async move |h| {
+                h.ensure_link_deleted(&root_a).await.ok();
+                h.ensure_link_deleted(&root_b).await.ok();
+                h.add_veth(&root_a, &root_b).await?;
+                h.move_link_to_netns(&root_a, &open_netns_fd(&owner_ns)?)
+                    .await?;
+                h.move_link_to_netns(&root_b, &open_netns_fd(&router_ns)?)
+                    .await?;
+                Ok(())
+            }
+        })
+        .await?;
+
+        let owner_if = format!("h{}", id.0);
+        nl_run(netns, owner_ns, {
+            let root_a = root_a.clone();
+            let bridge = bridge.clone();
+            async move |h| {
+                h.rename_link(&root_a, &owner_if).await?;
+                h.set_link_up(&owner_if).await?;
+                h.set_master(&owner_if, &bridge).await?;
+                Ok(())
+            }
+        })
+        .await?;
+
+        let wan_if = "wan".to_string();
+        let wan_ip = router.upstream_ip.unwrap();
+        let wan_prefix = data.upstream_cidr_prefix.unwrap();
+        nl_run(netns, &router.ns, {
+            let root_b = root_b.clone();
+            let wan_if = wan_if.clone();
+            async move |h| {
+                h.set_link_up("lo").await?;
+                h.rename_link(&root_b, &wan_if).await?;
+                h.set_link_up(&wan_if).await?;
+                h.add_addr4(&wan_if, wan_ip, wan_prefix).await?;
+                h.add_default_route_v4(gw_ip).await?;
+                Ok(())
+            }
+        })
+        .await?;
+        set_sysctl_in(&router.ns, "net/ipv4/ip_forward", "1")?;
+
+        apply_nat(
+            &router.ns,
+            router.cfg.nat,
+            &router.downlink_bridge,
+            &wan_if,
+            router.upstream_ip.unwrap(),
+        )
+        .await?;
+    }
+
+    // Create downlink bridge.
+    if let Some((br, lan_ip, lan_prefix)) = &data.downlink_bridge {
+        nl_run(netns, &router.ns, {
+            let br = br.clone();
+            let lan_ip = *lan_ip;
+            let lan_prefix = *lan_prefix;
+            async move |h| {
+                h.set_link_up("lo").await?;
+                h.ensure_link_deleted(&br).await.ok();
+                h.add_bridge(&br).await?;
+                h.set_link_up(&br).await?;
+                h.add_addr4(&br, lan_ip, lan_prefix).await?;
+                Ok(())
+            }
+        })
+        .await?;
+    }
+
+    // Return route in lab root for public downstreams.
+    if let Some((net, prefix_len, via)) = data.return_route {
+        nl_run(netns, &data.root_ns, async move |h| {
+            h.add_route_v4(net, prefix_len, via).await.ok();
+            Ok(())
+        })
+        .await
+        .ok();
+    }
+
+    Ok(())
+}
+
+/// Sets up a single device's namespace and wires all interfaces. No lock held.
+pub(crate) async fn setup_device_async(
+    netns: &Arc<netns::NetnsManager>,
+    prefix: &str,
+    root_ns: &str,
+    dev: &DeviceData,
+    ifaces: Vec<IfaceBuild>,
+) -> Result<()> {
+    create_named_netns(&dev.ns).await?;
+    if let Err(err) = run_nft_in(&dev.ns, "flush ruleset").await {
+        debug!(ns = %dev.ns, error = %err, "setup_device: nft flush failed; continuing");
+    }
+
+    for iface in ifaces {
+        wire_iface_async(netns, prefix, root_ns, iface).await?;
+    }
+    Ok(())
+}
+
+/// Wire one device interface: veth pair, move, IP, route, impairment.
+pub(crate) async fn wire_iface_async(
+    netns: &Arc<netns::NetnsManager>,
+    prefix: &str,
+    root_ns: &str,
+    dev: IfaceBuild,
+) -> Result<()> {
+    let root_gw = format!("{}g{}", prefix, dev.idx);
+    let root_dev = format!("{}e{}", prefix, dev.idx);
+
+    nl_run(netns, root_ns, {
+        let root_gw = root_gw.clone();
+        let root_dev = root_dev.clone();
+        let dev_ns = dev.dev_ns.clone();
+        let gw_ns = dev.gw_ns.clone();
+        async move |h| {
+            h.ensure_link_deleted(&root_gw).await.ok();
+            h.ensure_link_deleted(&root_dev).await.ok();
+            h.add_veth(&root_gw, &root_dev).await?;
+            h.move_link_to_netns(&root_gw, &open_netns_fd(&gw_ns)?)
+                .await?;
+            h.move_link_to_netns(&root_dev, &open_netns_fd(&dev_ns)?)
+                .await?;
+            Ok(())
+        }
+    })
+    .await?;
+
+    let dev_ip = dev.dev_ip;
+    let dev_prefix = dev.prefix_len;
+    let ifname = dev.ifname.clone();
+    let is_default = dev.is_default;
+    let gw_ip = dev.gw_ip;
+    nl_run(netns, &dev.dev_ns, {
+        let root_dev = root_dev.clone();
+        let ifname = ifname.clone();
+        async move |h| {
+            h.set_link_up("lo").await?;
+            h.rename_link(&root_dev, &ifname).await?;
+            h.set_link_up(&ifname).await?;
+            h.add_addr4(&ifname, dev_ip, dev_prefix).await?;
+            if is_default {
+                h.add_default_route_v4(gw_ip).await?;
+            }
+            Ok(())
+        }
+    })
+    .await?;
+
+    nl_run(netns, &dev.gw_ns, {
+        let root_gw = root_gw.clone();
+        let gw_if = format!("v{}", dev.idx);
+        let gw_br = dev.gw_br.clone();
+        async move |h| {
+            h.rename_link(&root_gw, &gw_if).await?;
+            h.set_link_up(&gw_if).await?;
+            h.set_master(&gw_if, &gw_br).await?;
+            Ok(())
+        }
+    })
+    .await?;
+
+    if let Some(imp) = dev.impair {
+        apply_impair_in(&dev.dev_ns, &dev.ifname, imp);
+    }
+    Ok(())
 }
 
 fn add_host(cidr: Ipv4Net, host: u8) -> Result<Ipv4Addr> {

@@ -726,8 +726,7 @@ async fn execute_single_sim(
     let setup = setup_topology_summary(&setup_base, Some(&topo));
 
     // ── Build lab ────────────────────────────────────────────────────────
-    let mut lab = Lab::from_config(topo).context("step=configure-lab")?;
-    lab.build().await.context("step=build-lab-network")?;
+    let lab = Lab::from_config(topo).await.context("step=configure-lab")?;
 
     // ── Build env vars ───────────────────────────────────────────────────
     let bin_strs: HashMap<String, String> = assembled_binary_paths

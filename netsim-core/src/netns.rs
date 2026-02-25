@@ -236,19 +236,18 @@ fn async_worker_main(
     rt.block_on(local.run_until(async move {
         // Create one rtnetlink connection per namespace worker and wrap it in a
         // persistent Netlink.  All netlink tasks share this instance via an Arc.
-        let netlink: Option<Arc<tokio::sync::Mutex<Netlink>>> =
-            match rtnetlink::new_connection() {
-                Ok((conn, handle, _)) => {
-                    tokio::task::spawn_local(conn);
-                    Some(Arc::new(tokio::sync::Mutex::new(
-                        Netlink::new_tracked(handle, own_links),
-                    )))
-                }
-                Err(err) => {
-                    error!(ns = %ns, error = %err, "async netns worker: rtnetlink connection failed");
-                    None
-                }
-            };
+        let netlink: Option<Arc<tokio::sync::Mutex<Netlink>>> = match rtnetlink::new_connection() {
+            Ok((conn, handle, _)) => {
+                tokio::task::spawn_local(conn);
+                Some(Arc::new(tokio::sync::Mutex::new(Netlink::new_tracked(
+                    handle, own_links,
+                ))))
+            }
+            Err(err) => {
+                error!(ns = %ns, error = %err, "async netns worker: rtnetlink connection failed");
+                None
+            }
+        };
 
         while let Some(msg) = rx.recv().await {
             match msg {

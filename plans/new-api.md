@@ -473,60 +473,61 @@ pub mod test_utils {
 The new public `Device` and `Router` handle types will conflict with the existing
 `core::Device` and `core::Router` data structs. Rename the internal ones first.
 
-- [ ] Rename `core::Device` → `core::DeviceData` (or `DeviceRecord`)
-- [ ] Rename `core::Router` → `core::RouterData` (or `RouterRecord`)
-- [ ] Rename `core::DeviceIface` → `core::DeviceIfaceData`
-- [ ] Update all internal references in `core.rs`, `lab.rs`, `netns.rs`
-- [ ] Run tests to verify rename is complete
+- [x] Rename `core::Device` → `core::DeviceData` (or `DeviceRecord`)
+- [x] Rename `core::Router` → `core::RouterData` (or `RouterRecord`)
+- [x] Rename `core::DeviceIface` → `core::DeviceIfaceData`
+- [x] Update all internal references in `core.rs`, `lab.rs`, `netns.rs`
+- [x] Run tests to verify rename is complete
 
 ### Phase 2: `Arc<Mutex<LabInner>>` restructuring
 
-- [ ] Create `LabInner` struct, move all `Lab` fields into it
-- [ ] Wrap `Lab` around `Arc<Mutex<LabInner>>`, derive `Clone`
-- [ ] Change all `Lab` methods from `&mut self` to `&self`, use `self.inner.lock()` internally
-- [ ] Change all `Lab` methods that returned `&str`/`&T` to return owned types
-- [ ] Audit every async method: ensure lock is never held across `.await`
-- [ ] Run existing tests — everything should pass with no API changes yet
+- [x] Create `LabInner` struct, move all `Lab` fields into it
+- [x] Wrap `Lab` around `Arc<Mutex<LabInner>>`, derive `Clone`
+- [x] Change all `Lab` methods from `&mut self` to `&self`, use `self.inner.lock()` internally
+- [x] Change all `Lab` methods that returned `&str`/`&T` to return owned types
+- [x] Audit every async method: ensure lock is never held across `.await`
+- [x] Run existing tests — everything should pass with no API changes yet
 
 ### Phase 3: `Device` and `Router` handles + lookup methods
 
-- [ ] Create public `Device` handle struct: `{ id: NodeId, lab: Arc<Mutex<LabInner>> }`, implement `Clone`
-- [ ] Create public `Router` handle struct: same pattern, implement `Clone`
-- [ ] Add accessor methods on `Device`: `id()`, `name()`, `ip()`, `iface()`, `default_iface()`, `interfaces()`
-- [ ] Add accessor methods on `Router`: `id()`, `name()`, `region()`, `nat_mode()`, `uplink_ip()`, `downstream_cidr()`, `downstream_gw()`
-- [ ] Create public `DeviceIface` as owned snapshot struct with `name()`, `ip()`, `impair()` accessors
-- [ ] Add lookup methods on `Lab`: `router(id)`, `device(id)`, `router_by_name(name)`, `device_by_name(name)` returning `Option<Router>` / `Option<Device>`
-- [ ] Add collection methods: `lab.routers()`, `lab.devices()` returning `Vec`
-- [ ] Keep old Lab methods temporarily for incremental migration
+- [x] Create public `Device` handle struct: `{ id: NodeId, lab: Arc<Mutex<LabInner>> }`, implement `Clone`
+- [x] Create public `Router` handle struct: same pattern, implement `Clone`
+- [x] Add accessor methods on `Device`: `id()`, `name()`, `ip()`, `iface()`, `default_iface()`, `interfaces()`
+- [x] Add accessor methods on `Router`: `id()`, `name()`, `region()`, `nat_mode()`, `uplink_ip()`, `downstream_cidr()`, `downstream_gw()`
+- [x] Create public `DeviceIface` as owned snapshot struct with `name()`, `ip()`, `impair()` accessors
+- [x] Add lookup methods on `Lab`: `router(id)`, `device(id)`, `router_by_name(name)`, `device_by_name(name)` returning `Option<Router>` / `Option<Device>`
+- [x] Add collection methods: `lab.routers()`, `lab.devices()` returning `Vec`
+- [x] Keep old Lab methods temporarily for incremental migration
 
 ### Phase 4: Move dynamic ops to `Device` / `Router`
 
-- [ ] Implement `Device::link_down(&self, ifname: &str)` with lock/read/unlock/await pattern
-- [ ] Implement `Device::link_up(&self, ifname: &str)`
-- [ ] Implement `Device::switch_route(&self, to_iface: &str)`
-- [ ] Implement `Device::set_impair(&self, ifname: &str, impair: Option<Impair>)`
-- [ ] Implement `Router::set_nat_mode(&self, mode: NatMode)`
-- [ ] Implement `Router::rebind_nats(&self)`
-- [ ] Update all test call sites to use new methods
-- [ ] Remove old Lab methods
+- [x] Implement `Device::link_down(&self, ifname: &str)` with lock/read/unlock/await pattern
+- [x] Implement `Device::link_up(&self, ifname: &str)`
+- [x] Implement `Device::switch_route(&self, to_iface: &str)`
+- [x] Implement `Device::set_impair(&self, ifname: &str, impair: Option<Impair>)`
+- [x] Implement `Router::set_nat_mode(&self, mode: NatMode)`
+- [x] Implement `Router::rebind_nats(&self)`
+- [x] Update all test call sites to use new methods
+- [x] Remove old Lab methods (except `set_router_impair` and `router_downlink_bridge` — deferred to Phase 7/10)
 
 ### Phase 5: Builders return `Device` / `Router`
 
-- [ ] Change `RouterBuilder::build()` to return `Result<Router>` instead of `Result<NodeId>`
-- [ ] Change `DeviceBuilder::build()` to return `Result<Device>` instead of `Result<NodeId>`
-- [ ] Remove lifetime parameter from builders — they hold `Arc<Mutex<LabInner>>`
-- [ ] Add `DeviceBuilder::uplink(router_id)` shorthand (auto-names eth0, eth1, ...)
-- [ ] Update all test call sites: `let dc = lab.add_router("dc").build().await?;` then use `dc.id()` where NodeId is needed
+- [x] Change `RouterBuilder::build()` to return `Result<Router>` instead of `Result<NodeId>`
+- [x] Change `DeviceBuilder::build()` to return `Result<Device>` instead of `Result<NodeId>`
+- [x] Remove lifetime parameter from builders — they hold `Arc<Mutex<LabInner>>` (done in Phase 2)
+- [x] Add `DeviceBuilder::uplink(router_id)` shorthand (auto-names eth0, eth1, ...)
+- [x] Update all test call sites: `let dc = lab.add_router("dc").build()?;` then use `dc.id()` where NodeId is needed
 
 ### Phase 6: `spawn` / `try_spawn` / `spawn_command`
 
-- [ ] Implement `Device::spawn(f: AsyncFnOnce(Device) -> T)` — clones handle, enters ns, runs closure
-- [ ] Implement `Device::try_spawn(f: AsyncFnOnce(Device) -> Result<T, E>)`
-- [ ] Implement `Device::spawn_command(cmd: Command) -> Result<Child>` — enters ns, spawns process
-- [ ] Implement same three methods on `Router` (spawn, try_spawn, spawn_command)
-- [ ] Migrate test helpers that use `run_closure_in_namespace` / `spawn_task_in_netns` to `Device::spawn`
-- [ ] Migrate netsim `steps.rs` from `lab.spawn_unmanaged_on` to `Device::spawn_command`
-- [ ] Migrate netsim `main.rs` inspect keeper from `spawn_command_in_namespace` to `Router/Device::spawn_command`
+- [x] Implement `Device::spawn(f: FnOnce(Device) -> Fut)` — clones handle, enters ns, runs closure
+- [ ] Implement `Device::try_spawn` — deferred (trivial wrapper, add when needed)
+- [x] Implement `Device::spawn_command(cmd: Command) -> Result<Child>` — enters ns, spawns process
+- [x] Implement same methods on `Router` (spawn, spawn_command)
+- [ ] Migrate test helpers that use `run_closure_in_namespace` / `spawn_task_in_netns` to `Device::spawn` — deferred to Phase 9
+- [x] Migrate netsim `steps.rs` from `lab.spawn_unmanaged_on` to `Device::spawn_command`
+- [ ] Migrate netsim `main.rs` inspect keeper from `spawn_command_in_namespace` to `Router/Device::spawn_command` — deferred to Phase 10
+- [x] Remove old Lab methods: `run_on`, `spawn_on`, `spawn_unmanaged_on`
 
 ### Phase 7: `impair_link`, `switch_uplink`, `set_uplink`
 
