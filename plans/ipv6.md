@@ -1,30 +1,24 @@
-# IPv6 Support Plan
+# IPv6 Support Plan (New API)
 
 ## TODO
 
 - [x] Write plan
-- [ ] Data model: v6 fields in `CoreConfig`, `Router` (`upstream_ip_v6`, `nat_v6`), `Switch` (`cidr_v6`, `gw_v6`), `DeviceIface` (`ip_v6`)
-- [ ] Netlink v6 methods: `add_addr6`, `add_default_route_v6`, `replace_default_route_v6`, `add_route_v6`, `set_sysctl_ipv6_fwd`
-- [ ] Allocators: `alloc_ix_ip_v6_low/high`, `alloc_private_cidr_v6`, `alloc_from_switch_v6`
-- [ ] `wire_iface` dual-stack provisioning (conditional v6 address + default route)
-- [ ] Config/TOML schema: `ip_version`, `nat_v6` fields + `Lab::from_config` routing
-- [ ] `apply_nat_v6` (NPTv6 prefix translation + masquerade nftables rules)
-- [ ] `qdisc.rs` dual-protocol filter (`IpNet` branching on `add_filter`)
-- [ ] Test helpers: `probe_v6_in_ns`, `udp_rtt_v6_in_ns`, dual-stack reflector
-- [ ] Test matrix: topology combos 1–5 + NAT × IP-version combos A–I (~14 tests)
-- [ ] Final review
+- [ ] Phase 1: Data model + netlink + allocators
+- [ ] Phase 2: Builder + async setup + handle accessors
+- [ ] Phase 3: NAT v6 + qdisc dual-protocol + config/TOML
+- [ ] Phase 4: Tests
 
-**Status:** ❌ not implemented
-**Effort:** ~8–10 dev-days for full dual-stack + all NAT combos + test matrix
+**Status:** in progress
 
 ---
 
 ## Goals
 
-- Add IPv6 (and dual-stack) support at every layer: IX bridge, router WAN/LAN, device interfaces.
-- Extend NAT to support IPv6 modes (NPTv6, masquerade) in addition to existing IPv4 modes.
-- Cover all meaningful (IP version) × (NAT mode) combos in the test matrix.
-- Keep the change backwards-compatible: existing IPv4-only topologies continue to work unchanged.
+- Dual-stack and v6-only at every layer: IX bridge, router WAN/LAN, device interfaces.
+- IPv6 NAT modes (NPTv6, masquerade) alongside existing IPv4 modes.
+- Backwards-compatible: existing v4-only topologies unchanged.
+- Handle-based API (`Device`, `Router`, `DeviceIface`) throughout; no namespace names in tests.
+- Test suite designed with parameterized helpers to avoid code duplication across v4/v6.
 
 ---
 
@@ -32,341 +26,457 @@
 
 | Role | IPv4 (existing) | IPv6 (new) |
 |---|---|---|
-| IX public pool | `203.0.113.0/24` | `2001:db8::/32` (documentation) |
+| IX public pool | `203.0.113.0/24` | `2001:db8::/32` (documentation prefix) |
 | IX gateway | `203.0.113.1` | `2001:db8::1` |
 | Private LAN pool | `10.0.0.0/16` | `fd10::/48` (ULA) |
 | Per-router /24 | `10.0.X.0/24` | `fd10:0:X::/64` |
-| Loopback | n/a | `::1` (kernel default) |
-
-The IX uses the IANA documentation prefix `2001:db8::/32` (analogous to `203.0.113.0/24`).
-Private LANs use a ULA prefix `fd10::/48` (analogous to `10.0.0.0/16`).
 
 ---
 
-## IP Version Model
+## New Public Types
 
-Each router and device interface can be in one of three modes:
-
-```
-IpVersion { V4Only, V6Only, DualStack }
-```
-
-This is set per-router and propagates to both its WAN link (IX-facing) and LAN switch.
-Devices inherit the version of the switch they attach to; if attached to multiple switches with
-different versions the device gets the union.
-
----
-
-## Affected Structs (`core.rs`)
-
-### `CoreConfig`
+### `IpSupport`
 
 ```rust
-// Add alongside existing v4 fields:
-pub ix_gw_v6: Ipv6Addr,          // 2001:db8::1
-pub ix_cidr_v6: Ipv6Net,         // 2001:db8::/32
-pub private_cidr_v6: Ipv6Net,    // fd10::/48
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug, Deserialize)]
+pub enum IpSupport {
+    #[default]
+    V4Only,
+    V6Only,
+    DualStack,
+}
 ```
 
-### `Switch`
-
-```rust
-pub cidr_v6: Option<Ipv6Net>,    // e.g. fd10:0:3::/64
-pub gw_v6: Option<Ipv6Addr>,     // fd10:0:3::1
-pub next_host_v6: u64,           // monotone allocator (start at 2)
-```
-
-### `Router`
-
-```rust
-pub upstream_ip_v6: Option<Ipv6Addr>,   // IX-facing address
-pub downstream_gw_v6: Option<Ipv6Addr>, // LAN gateway
-pub nat_v6: NatV6Mode,
-```
-
-### `DeviceIface`
-
-```rust
-pub ip_v6: Option<Ipv6Addr>,
-```
-
----
-
-## New Types
+Set per-router via `RouterBuilder::ip_support()`. Propagates to WAN link, LAN switch, and
+device interfaces (devices inherit from the switch they attach to).
 
 ### `NatV6Mode`
 
 ```rust
-#[derive(Default)]
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug, Deserialize)]
 pub enum NatV6Mode {
     #[default]
-    None,       // No translation; devices use global unicast directly
-    Nptv6,      // RFC 6296 network-prefix translation (stateless, 1:1 prefix mapping)
-    Masquerade, // Stateful masquerade (non-standard but useful for testing symmetric behaviour)
+    None,       // No translation; global unicast directly
+    Nptv6,      // RFC 6296 stateless prefix translation
+    Masquerade, // Stateful masquerade (useful for testing symmetric v6 behaviour)
 }
 ```
 
-`Nptv6` is the realistic "home with native IPv6" scenario: ULA addresses on LAN are mapped
-to the provider-assigned prefix on the WAN side in a stateless bijection.
-`Masquerade` is useful when you want to test reflexive address behaviour on IPv6 (analogous to
-`DestinationDependent` for IPv4).
+---
 
-### `RouterConfig` TOML extension
+## Phase 1: Data Model + Netlink + Allocators
 
-```toml
-[[router]]
-name = "isp"
-nat  = "cgnat"      # existing v4 nat field
-nat_v6 = "none"     # new: "none" | "nptv6" | "masquerade" (default "none")
-ip_version = "dual" # new: "v4" | "v6" | "dual" (default "v4")
+**Files:** `core.rs`, `netlink.rs`
+
+### Struct additions
+
+**`CoreConfig`** — add alongside existing v4 fields, initialize in `NetworkCore::new()`:
+```rust
+pub ix_gw_v6: Ipv6Addr,       // 2001:db8::1
+pub ix_cidr_v6: Ipv6Net,      // 2001:db8::/32
+pub private_cidr_v6: Ipv6Net, // fd10::/48
 ```
+
+**`Switch`** — add v6 pool alongside v4:
+```rust
+pub cidr_v6: Option<Ipv6Net>,     // e.g. fd10:0:3::/64
+pub gw_v6: Option<Ipv6Addr>,      // fd10:0:3::1
+next_host_v6: u8,                  // monotone allocator (start at 2)
+```
+
+**`RouterData`** — add v6 fields:
+```rust
+pub upstream_ip_v6: Option<Ipv6Addr>,
+pub downstream_gw_v6: Option<Ipv6Addr>,
+pub nat_v6: NatV6Mode,
+pub ip_support: IpSupport,
+```
+
+**`DeviceIfaceData`** — add:
+```rust
+pub ip_v6: Option<Ipv6Addr>,
+```
+
+**`RouterConfig`** (internal, not config.rs) — add:
+```rust
+pub nat_v6: NatV6Mode,
+pub ip_support: IpSupport,
+```
+
+**`IfaceBuild`** — add optional v6 fields:
+```rust
+pub(crate) gw_ip_v6: Option<Ipv6Addr>,
+pub(crate) dev_ip_v6: Option<Ipv6Addr>,
+pub(crate) prefix_len_v6: u8,        // typically 64
+```
+
+**`RouterSetupData`** — add v6 mirror of every v4 field:
+```rust
+pub ip_support: IpSupport,
+pub nat_v6: NatV6Mode,
+pub ix_gw_v6: Option<Ipv6Addr>,
+pub ix_cidr_v6_prefix: Option<u8>,
+pub upstream_gw_v6: Option<Ipv6Addr>,
+pub upstream_cidr_prefix_v6: Option<u8>,
+pub return_route_v6: Option<(Ipv6Addr, u8, Ipv6Addr)>,
+pub downlink_bridge_v6: Option<(Ipv6Addr, u8)>,
+pub downstream_cidr_v6: Option<Ipv6Net>,  // for NPTv6 LAN prefix
+```
+
+### Netlink v6 methods
+
+Add to `Netlink` in `netlink.rs` — direct analogues of v4 using `RouteMessageBuilder::<Ipv6Addr>`:
+
+```rust
+pub(crate) async fn add_addr6(&mut self, ifname: &str, ip: Ipv6Addr, prefix: u8) -> Result<()>
+// Pattern: identical to add_addr4 — `self.handle.address().add(idx, ip.into(), prefix)`
+
+pub(crate) async fn add_default_route_v6(&mut self, via: Ipv6Addr) -> Result<()>
+// Pattern: `RouteMessageBuilder::<Ipv6Addr>::new().gateway(via).build()`
+
+pub(crate) async fn replace_default_route_v6(&mut self, ifname: &str, via: Ipv6Addr) -> Result<()>
+// Pattern: iterate v6 routes, delete those with prefix_len==0, add new bound to ifindex
+
+pub(crate) async fn add_route_v6(&mut self, dst: Ipv6Addr, prefix: u8, via: Ipv6Addr) -> Result<()>
+// Pattern: `RouteMessageBuilder::<Ipv6Addr>::new().destination_prefix(dst, prefix).gateway(via).build()`
+```
+
+### Allocators
+
+New methods on `NetworkCore`:
+
+```rust
+// Parallel to alloc_ix_ip_low(). State: next_ix_low_v6: u16 starting at 0x10.
+// Returns 2001:db8::10, ::11, … by patching the last segment of ix_gw_v6.
+pub(crate) fn alloc_ix_ip_v6_low(&mut self) -> Ipv6Addr
+
+// Parallel to alloc_private_cidr(). State: next_private_slot_v6: u16 starting at 1.
+// Returns fd10:0:1::/64, fd10:0:2::/64, … by incrementing segment 3 of private_cidr_v6.
+pub(crate) fn alloc_private_cidr_v6(&mut self) -> Ipv6Net
+
+// Parallel to alloc_from_switch(). Uses switch.next_host_v6.
+// Patches the last segment of switch.cidr_v6 with the host counter.
+pub(crate) fn alloc_from_switch_v6(&mut self, sw: NodeId) -> Result<Ipv6Addr>
+```
+
+Update existing `add_device_iface` — after v4 allocation, if switch has `cidr_v6`, also call
+`alloc_from_switch_v6()` and store into `DeviceIfaceData.ip_v6`.
+
+**Verification:** `cargo check -p netsim-core --tests`
 
 ---
 
-## Allocators (`core.rs`)
+## Phase 2: Builder + Async Setup + Handle Accessors
 
-Four new functions, mirroring existing IPv4 ones:
+**Files:** `lab.rs`, `core.rs`
 
-```rust
-fn alloc_ix_ip_v6_low(&mut self)  -> Ipv6Addr  // 2001:db8::10, ::11, …
-fn alloc_ix_ip_v6_high(&mut self) -> Ipv6Addr  // 2001:db8::fa, ::f9, …
-fn alloc_private_cidr_v6(&mut self) -> Result<Ipv6Net>  // fd10:0:1::/64, fd10:0:2::/64, …
-fn alloc_from_switch_v6(&mut self, sw: SwitchId) -> Result<Ipv6Addr>
-    // Increments next_host_v6; calls add_host_v6(cidr, host)
-```
-
-`alloc_private_cidr_v6` increments a `/16` slot counter within `fd10::/48`, matching
-the existing IPv4 pattern of `/24` slots within `10.0.0.0/16`.
-
----
-
-## Netlink Additions (`netlink.rs`)
+### RouterBuilder additions
 
 ```rust
-pub async fn add_addr6(&mut self, ifname: &str, ip: Ipv6Addr, prefix: u8) -> Result<()>
-pub async fn add_default_route_v6(&mut self, via: Ipv6Addr) -> Result<()>
-pub async fn replace_default_route_v6(&mut self, ifname: &str, via: Ipv6Addr) -> Result<()>
-pub async fn add_route_v6(&mut self, dst: Ipv6Net, via: Ipv6Addr) -> Result<()>
-```
-
-These are direct analogues of the existing v4 methods, using
-`rtnetlink::RouteMessageBuilder::<Ipv6Addr>`.  The existing v4 methods are unchanged.
-
-Also need:
-```rust
-pub async fn set_sysctl_ipv6_fwd(&self, ns: &str) -> Result<()>
-    // writes "1" to /proc/sys/net/ipv6/conf/all/forwarding inside namespace
-```
-
----
-
-## Wire-Iface Changes (`core.rs: wire_iface`)
-
-After existing IPv4 address assignment, add a conditional block:
-
-```rust
-if let Some(ip6) = iface.ip_v6 {
-    h.add_addr6(&ifname, ip6, 64).await?;
+pub struct RouterBuilder {
+    // existing: inner, name, region, upstream, nat, result
+    ip_support: IpSupport,   // new, default V4Only
+    nat_v6: NatV6Mode,       // new, default None
 }
-if iface.is_default_via {
-    if let Some(gw6) = switch.gw_v6 {
+
+impl RouterBuilder {
+    pub fn ip_support(mut self, support: IpSupport) -> Self
+    pub fn nat_v6(mut self, mode: NatV6Mode) -> Self
+}
+```
+
+### RouterBuilder::build() phase 1 changes
+
+In the lock section, when `ip_support != V4Only`:
+1. `alloc_ix_ip_v6_low()` → store in `RouterData.upstream_ip_v6`
+2. `alloc_private_cidr_v6()` → pass to `add_switch()` as v6 CIDR
+3. `connect_router_uplink()` — also store v6 IP
+4. Populate all `RouterSetupData` v6 fields from cfg + router snapshot
+
+For sub-routers: read parent switch's `gw_v6` and `cidr_v6.prefix_len()` into
+`upstream_gw_v6` / `upstream_cidr_prefix_v6`.
+
+When `ip_support == V6Only`: skip v4 allocations entirely. Set `upstream_ip = None`,
+`downstream_cidr = None`, etc. V6-only routers still need a bridge (L2), but no v4 addresses.
+
+### setup_router_async changes
+
+**IX-level router** — after existing v4 block (`add_addr4` + `add_default_route_v4`):
+```rust
+if let Some(ip6) = router.upstream_ip_v6 {
+    h.add_addr6("ix", ip6, data.ix_cidr_v6_prefix.unwrap()).await?;
+    h.add_default_route_v6(data.ix_gw_v6.unwrap()).await?;
+}
+```
+
+After `set_sysctl_in(…, "net/ipv4/ip_forward", "1")`:
+```rust
+if data.ip_support != IpSupport::V4Only {
+    set_sysctl_in(&router.ns, "net/ipv6/conf/all/forwarding", "1")?;
+    set_sysctl_in(&router.ns, "net/ipv6/conf/all/accept_dad", "0")?;  // disable DAD
+}
+```
+
+**Sub-router** — same pattern on the `wan` interface.
+
+**Downlink bridge** — after `add_addr4(&br, lan_ip, lan_prefix)`:
+```rust
+if let Some((gw_v6, prefix)) = &data.downlink_bridge_v6 {
+    h.add_addr6(&br, *gw_v6, *prefix).await?;
+}
+```
+
+**Return route** — after v4 return route:
+```rust
+if let Some((net6, prefix6, via6)) = data.return_route_v6 {
+    nl_run(netns, &data.root_ns, async move |h| {
+        h.add_route_v6(net6, prefix6, via6).await.ok();
+        Ok(())
+    }).await.ok();
+}
+```
+
+**NAT v6** — after `apply_nat(…)`:
+```rust
+if data.nat_v6 != NatV6Mode::None {
+    apply_nat_v6(&router.ns, data.nat_v6, wan_if, lan_prefix_v6, wan_prefix_v6).await?;
+}
+```
+
+### wire_iface_async changes
+
+In the device-ns nl_run block, after `add_addr4` + `add_default_route_v4`:
+```rust
+if let Some(ip6) = dev_ip_v6 {
+    h.add_addr6(&ifname, ip6, prefix_len_v6).await?;
+    // Disable DAD on device interfaces too
+    set_sysctl_in(&dev_ns, "net/ipv6/conf/all/accept_dad", "0").ok();
+}
+if is_default {
+    if let Some(gw6) = gw_ip_v6 {
         h.add_default_route_v6(gw6).await?;
     }
 }
 ```
 
-Router namespaces additionally call `set_sysctl_ipv6_fwd`.
+### setup_root_ns_async changes
+
+The IX bridge needs a v6 address and v6 forwarding in the root namespace:
+```rust
+// After existing v4 setup of IX bridge:
+h.add_addr6(&cfg.ix_br, cfg.ix_gw_v6, cfg.ix_cidr_v6.prefix_len()).await?;
+set_sysctl_in(&cfg.root_ns, "net/ipv6/conf/all/forwarding", "1")?;
+set_sysctl_in(&cfg.root_ns, "net/ipv6/conf/all/accept_dad", "0")?;
+```
+
+### Handle accessors
+
+**Router:**
+```rust
+pub fn ip_support(&self) -> IpSupport
+pub fn uplink_ip_v6(&self) -> Option<Ipv6Addr>
+pub fn downstream_cidr_v6(&self) -> Option<Ipv6Net>
+pub fn downstream_gw_v6(&self) -> Option<Ipv6Addr>
+pub fn nat_v6_mode(&self) -> NatV6Mode
+```
+
+**Device:**
+```rust
+pub fn ip6(&self) -> Option<Ipv6Addr>  // default iface ip_v6
+```
+
+**DeviceIface:**
+```rust
+pub fn ip6(&self) -> Option<Ipv6Addr>
+```
+
+**Lab:**
+```rust
+pub fn router_uplink_ip_v6(&self, id: NodeId) -> Result<Option<Ipv6Addr>>
+```
+
+**lib.rs exports:** `IpSupport`, `NatV6Mode`
+
+**Verification:** `cargo check -p netsim-core --tests`, write `smoke_v6_dc_roundtrip` test
 
 ---
 
-## NAT v6 Implementation (`core.rs`)
+## Phase 3: NAT v6 + QDisc + Config/TOML
 
-### `apply_nat_v6`
+### apply_nat_v6
+
+Mirror of `apply_nat` / `apply_home_nat` / `apply_isp_cgnat` using `table ip6 nat`:
 
 ```rust
-pub async fn apply_nat_v6(
+pub(crate) async fn apply_nat_v6(
     ns: &str,
     mode: NatV6Mode,
-    lan_if: &str,
     wan_if: &str,
-    lan_prefix: Ipv6Net,   // ULA /64 (for NPTv6 mapping)
-    wan_prefix: Ipv6Net,   // Provider /64
-) -> Result<()>
-```
-
-**None**: no-op.
-
-**Nptv6** (stateless prefix translation, requires `nft` + kernel `nft_nat`):
-
-```
-nft add table ip6 nptv6_{ns}
-nft add chain ip6 nptv6_{ns} postrouting  { type nat hook postrouting priority 100; }
-nft add chain ip6 nptv6_{ns} prerouting   { type nat hook prerouting  priority -100; }
-nft add rule  ip6 nptv6_{ns} postrouting oif "{wan_if}" snat prefix to {wan_prefix}
-nft add rule  ip6 nptv6_{ns} prerouting  iif "{wan_if}" dnat prefix to {lan_prefix}
-```
-
-Kernel support: `nft_nat` + `ip6_tables` already available in ≥5.1 kernels.
-The `snat prefix to` syntax requires nftables ≥ 0.9.6.
-
-**Masquerade** (stateful):
-
-```
-nft add table ip6 nat6_{ns}
-nft add chain ip6 nat6_{ns} postrouting { type nat hook postrouting priority 100; }
-nft add rule  ip6 nat6_{ns} postrouting oif "{wan_if}" masquerade
-```
-
-Note: ICMPv6 (NDP, MLD) must not be masqueraded; the kernel handles this by default via
-`ip6tables -I FORWARD -p icmpv6 -j ACCEPT` (already implied by `RELATED,ESTABLISHED`
-tracking).  Add an explicit FORWARD accept rule for ICMPv6:
-
-```
-nft add chain ip6 nat6_{ns} forward { type filter hook forward priority 0; policy accept; }
-nft add rule  ip6 nat6_{ns} forward meta l4proto ipv6-icmp accept
-```
-
-### Dispatch in `apply_nat` / `apply_nat_v6`
-
-The existing `apply_nat` function for IPv4 is unchanged.  A new `apply_nat_v6` is called
-independently after it, during `Router::build`.
-
----
-
-## QDisc Changes (`qdisc.rs`)
-
-The `add_filter` function currently hardcodes `protocol ip` and `match ip dst`.  Add an
-`IpVersion` parameter:
-
-```rust
-pub async fn add_filter(
-    ns: &str, ifname: &str,
-    dst: IpNet,           // changed from Ipv4Net → IpNet (enum)
-    // … rest unchanged
-) -> Result<()>
-```
-
-Internally branch on `dst`:
-- `IpNet::V4(_)` → `protocol ip … match ip dst …` (existing behaviour)
-- `IpNet::V6(_)` → `protocol ipv6 … match ip6 dst …`
-
-`IpNet` is already a dependency via the `ipnet` crate.
-
----
-
-## Config Schema (TOML, `lib.rs`)
-
-```rust
-#[derive(Deserialize, Default)]
-pub struct RouterConfig {
-    // existing fields …
-    #[serde(default)]
-    pub ip_version: IpVersionConfig,  // "v4" | "v6" | "dual"
-    #[serde(default)]
-    pub nat_v6: NatV6Mode,
-}
-
-#[derive(Deserialize, Default)]
-pub enum IpVersionConfig {
-    #[default] V4,
-    V6,
-    Dual,
+    lan_prefix: Ipv6Net,
+    wan_prefix: Ipv6Net,
+) -> Result<()> {
+    match mode {
+        NatV6Mode::None => Ok(()),
+        NatV6Mode::Nptv6 => {
+            let rules = format!(r#"
+table ip6 nat {{
+    chain postrouting {{
+        type nat hook postrouting priority 100; policy accept;
+        oif "{wan}" snat prefix to {wan_pfx}
+    }}
+    chain prerouting {{
+        type nat hook prerouting priority -100; policy accept;
+        iif "{wan}" dnat prefix to {lan_pfx}
+    }}
+}}
+"#, wan=wan_if, wan_pfx=wan_prefix, lan_pfx=lan_prefix);
+            run_nft_in(ns, &rules).await
+        }
+        NatV6Mode::Masquerade => {
+            let rules = format!(r#"
+table ip6 nat {{
+    chain postrouting {{
+        type nat hook postrouting priority 100; policy accept;
+        oif "{wan}" masquerade
+    }}
+    chain forward {{
+        type filter hook forward priority 0; policy accept;
+        meta l4proto ipv6-icmp accept
+    }}
+}}
+"#, wan=wan_if);
+            run_nft_in(ns, &rules).await
+        }
+    }
 }
 ```
 
-`Lab::from_config` maps `IpVersionConfig` to the allocator calls:
-- `V4`: existing path (no change)
-- `V6`: only allocate v6 addresses; skip v4 address assignment in `wire_iface`
-- `Dual`: allocate both; both address assignments run in `wire_iface`
+Also add `Router::set_nat_v6_mode` (flush `table ip6 nat` + re-apply).
+
+### QDisc dual-protocol
+
+Change `apply_region_latency` signature from `&[(Ipv4Net, u32)]` to `&[(IpNet, u32)]`.
+
+The `Qdisc::add_filter` method currently hardcodes `"protocol", "ip"` and `"match", "ip"`.
+Add `add_filter_v6` with `"protocol", "ipv6"` and `"match", "ip6"`, using `prio 2` so both
+v4 and v6 filters coexist on the same HTB tree.
+
+In the `apply_region_latency` loop, branch on `IpNet::V4` / `IpNet::V6` to call the right filter method.
+Both share the same HTB class + netem qdisc.
+
+Update `apply_region_latencies` in `lab.rs` — for dual-stack routers, emit both v4 CIDRs and
+v6 CIDRs (IX IPs + downstream CIDRs) into the filter list.
+
+### Config/TOML
+
+`config.rs` — add to `RouterConfig`:
+```rust
+#[serde(default)]
+pub ip_support: IpSupport,
+#[serde(default)]
+pub nat_v6: NatV6Mode,
+```
+
+`lab.rs` `from_config` — chain `.ip_support(rcfg.ip_support).nat_v6(rcfg.nat_v6)`.
+
+TOML example:
+```toml
+[[router]]
+name = "isp"
+nat = "cgnat"
+nat_v6 = "masquerade"
+ip_support = "dual"
+```
+
+**Verification:** `cargo check --workspace --tests`, existing tests still pass
 
 ---
 
-## Test Matrix
+## Phase 4: Tests
 
-Each test row is a `#[tokio::test]` in `lib.rs` (following existing NAT test patterns).
+### Test design: parameterized helpers to avoid duplication
 
-### Topology/Version combinations
-
-| # | IX mode | Router WAN | Router LAN | Device | Expected |
-|---|---------|------------|------------|--------|----------|
-| 1 | v4 | v4-only | v4-only | v4 | Baseline (existing) |
-| 2 | v6 | v6-only | v6-only | v6 | IPv6-only end-to-end |
-| 3 | dual | dual | dual | dual | Both stacks reachable |
-| 4 | dual | dual | v4-only | v4 | v6 termination at router |
-| 5 | dual | dual | v6-only | v6 | v4 termination at router |
-
-Tests 2–5 verify basic `udp_rtt_in_ns` reachability.
-
-### NAT × IP-version combos (all use dual-stack IX)
-
-| # | v4 nat | v6 nat | Test assertion |
-|---|--------|--------|---------------|
-| A | None | None | Device sees own public address on both stacks |
-| B | EI | None | v4 reflexive = router WAN IP; v6 = device ULA mapped to… wait, none means global |
-| C | DD | None | v4 changes per-destination; v6 stable |
-| D | Cgnat | None | v4 double-NAT; v6 direct |
-| E | EI | NPTv6 | v4 EI mapping; v6 NPTv6 prefix translated |
-| F | DD | NPTv6 | v4 symmetric; v6 prefix translated |
-| G | EI | Masquerade | v4 EI; v6 masquerade (source changes per-flow) |
-| H | None | NPTv6 | v4 direct; v6 NPTv6 |
-| I | None | Masquerade | v4 direct; v6 masquerade |
-
-(Cgnat × v6-nat combos omitted — CGNAT is ISP-only, not home-router level; covered by D.)
-
-### Test helpers to add
+Instead of duplicating each test for v4/v6, define reusable topology builders and assertion helpers:
 
 ```rust
-// Dual-stack reflexive address probe
-async fn probe_v6_in_ns(ns: &str, dst: Ipv6Addr, port: u16) -> Result<SocketAddrV6>
-async fn udp_rtt_v6_in_ns(ns: &str, dst: SocketAddrV6) -> Result<Duration>
+/// Address family for test parameterization.
+enum Af { V4, V6 }
 
-// Dual-stack reflector (listens on ::0 and 0.0.0.0)
-fn spawn_dual_reflector(ns: &str, port: u16) -> JoinHandle<()>
+/// Build a simple DC + device topology, optionally dual-stack.
+async fn build_dc_dev(ip: IpSupport, nat: NatMode, nat_v6: NatV6Mode) -> Result<(Lab, Router, Device)>
+
+/// Build an ISP + home-router + device topology.
+async fn build_isp_home_dev(
+    ip: IpSupport, isp_nat: NatMode, home_nat: NatMode, nat_v6: NatV6Mode
+) -> Result<(Lab, Router, Router, Device)>
+
+/// Spawn a reflector on the given address family in a router's namespace.
+async fn spawn_reflector(lab: &Lab, router: &Router, af: Af, port: u16) -> Result<SocketAddr>
+
+/// Probe a reflector from a device and return the observed external address.
+fn probe_reflexive(lab: &Lab, dev: &Device, reflector: SocketAddr, af: Af) -> Result<ObservedAddr>
+
+/// Assert UDP roundtrip succeeds within timeout.
+fn assert_roundtrip(lab: &Lab, dev: &Device, reflector: SocketAddr, af: Af) -> Result<()>
+
+/// Assert UDP roundtrip fails (timeout).
+fn assert_no_roundtrip(lab: &Lab, dev: &Device, reflector: SocketAddr, af: Af) -> Result<()>
+
+/// Measure UDP RTT.
+fn measure_rtt(lab: &Lab, dev: &Device, reflector: SocketAddr, af: Af) -> Result<Duration>
 ```
 
-The existing `probe_in_ns` / `udp_rtt_in_ns` bind explicitly to `0.0.0.0`; the new v6
-variants bind to `[::]:port`.  A dual-stack variant binding to `[::]:port` with
-`IPV6_V6ONLY=0` can cover both if the test host kernel supports it (true on Linux).
+This lets tests like `nat_matrix` iterate over `[Af::V4, Af::V6]` instead of duplicating entire test bodies.
+
+### Test list
+
+**Smoke tests (basic connectivity):**
+
+| Test | Setup | Assertion |
+|------|-------|-----------|
+| `smoke_v6_dc_roundtrip` | DC (v6-only) + device | v6 UDP roundtrip succeeds |
+| `smoke_dual_stack_roundtrip` | DC (dual) + device | both v4 and v6 roundtrips succeed |
+| `smoke_v6_ping_gateway` | v6-only router + device | `ping6 <gateway>` succeeds |
+| `v6_device_to_device_same_lan` | 2 devices on v6-only router | `ping6` between devices |
+| `v6_only_no_v4` | v6-only router + device | v4 probe fails, v6 succeeds |
+| `dual_stack_public_addrs` | DC (dual, no NAT) + device | v4 reflexive = public, v6 reflexive = global |
+
+**NAT v6 tests (all dual-stack IX):**
+
+| Test | v4 NAT | v6 NAT | Assertion |
+|------|--------|--------|-----------|
+| `nat_v6_none_global` | None | None | v6 reflexive = device global addr |
+| `nat_v6_nptv6_prefix` | None | NPTv6 | v6 reflexive has router's WAN /64 prefix |
+| `nat_v6_masquerade` | None | Masquerade | v6 reflexive = router WAN addr |
+| `nat_v6_dual_ei_none` | EI | None | v4 = router WAN IP; v6 = global |
+| `nat_v6_dual_dd_none` | DD | None | v4 changes per-dest; v6 stable |
+| `nat_v6_dual_ei_nptv6` | EI | NPTv6 | both translated, both reachable |
+
+**Latency/impairment over v6:**
+
+| Test | Assertion |
+|------|-----------|
+| `latency_v6_region` | v6 inter-region RTT includes region latency |
+| `impair_v6_device` | v6 device impair adds expected delay |
+| `latency_dual_stack_region` | both v4 and v6 see region latency |
+
+**Verification:** `cargo test -p netsim-core -- --test-threads=1` (all pass)
 
 ---
 
 ## Backwards Compatibility
 
-- Default `ip_version = "v4"` and `nat_v6 = "none"` for all routers → existing topologies
-  and tests are unaffected.
-- All new fields are `#[serde(default)]` with the IPv4-only default.
-- `wire_iface` only calls IPv6 netlink methods when `ip_v6.is_some()`.
+- Default `IpSupport::V4Only` and `NatV6Mode::None` → existing topologies unchanged.
+- All new fields are `Option<_>` or have v4-only defaults.
+- `wire_iface_async` only calls v6 methods when `dev_ip_v6.is_some()`.
+- `setup_router_async` only does v6 setup when `ip_support != V4Only`.
+- IX bridge always gets v6 address (cheap, harmless, simplifies dual-stack routers).
 
 ---
 
-## Effort Breakdown
+## Risks
 
-| Area | Estimate |
-|------|----------|
-| `CoreConfig` + struct fields (v6 address fields, allocators) | 0.5 d |
-| `netlink.rs` v6 methods (`add_addr6`, routes, fwd sysctl) | 0.5 d |
-| `wire_iface` dual-stack provisioning | 0.5 d |
-| Config/TOML schema + `Lab::from_config` routing | 0.5 d |
-| Allocators (`alloc_ix_v6_*`, `alloc_private_cidr_v6`, host alloc) | 0.5 d |
-| `apply_nat_v6` (NPTv6 + masquerade nftables rules) | 1.5 d |
-| `qdisc.rs` dual-protocol filter (`IpNet` branching) | 0.5 d |
-| Test helpers (`probe_v6_in_ns`, dual reflector) | 0.5 d |
-| Test matrix rows (combos 1–5 + A–I, ~14 tests) | 3.0 d |
-| **Total** | **~8 d** |
-
-The 3 days for tests is the dominant cost.  The implementation side is mostly additive
-(new methods alongside existing ones); no IPv4 code paths need to change.
-
-### What could blow up
-
-- **nftables `snat prefix to` availability**: requires nftables ≥ 0.9.6 and kernel
-  `nft_chain_nat` built with IPv6.  The VM kernel used by the test harness may need
-  a config check.
-- **NPTv6 checksum-neutral mapping**: the kernel's NPTv6 implementation (`nft`) handles
-  this transparently via the checksum-neutral algorithm; no application changes needed.
-- **ICMPv6 / NDP**: masquerade mode must not break Neighbor Discovery.  The `FORWARD`
-  accept rule for `ipv6-icmp` covers this, but needs careful testing on multi-hop
-  topologies.
-- **Dual-stack reflector bind**: `[::]:port` with `IPV6_V6ONLY=0` covers both families on
-  Linux; if any test runs in a netns where IPv4-mapped IPv6 is disabled (rare), separate
-  v4 and v6 reflectors are needed.
+- **nftables `snat prefix to`**: requires nftables >= 0.9.6. Check with `nft --version`.
+- **DAD delays**: disable via `accept_dad=0` sysctl in every namespace during setup.
+- **ICMPv6 / NDP under masquerade**: explicit `ipv6-icmp accept` in forward chain.
+- **V6Only mode**: must skip all v4 allocation paths cleanly; `ip: None` in `DeviceIfaceData`.

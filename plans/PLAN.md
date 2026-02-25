@@ -2,11 +2,11 @@
 
 ## In Progress
 
+- [ipv6.md](ipv6.md) — priority 5
+
 ## Open
 
-- [new-api.md](new-api.md) - priority 5
 - [dns.md](dns.md) — priority 2
-- [ipv6.md](ipv6.md) — priority 2
 - [testing.md](testing.md) — priority 2
 
 ## Partial
@@ -16,6 +16,8 @@
 - [ui.md](ui.md) — priority 2
 
 ## Completed
+
+- [new-api.md](new-api.md) — priority 5 — Arc\<Mutex\<LabInner\>\>, Device/Router handles, instant construction
 
 - [iroh-isolation.md](iroh-isolation.md) — priority 2
 - [initial.md](initial.md) — priority 2
