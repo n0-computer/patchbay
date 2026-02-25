@@ -13,9 +13,9 @@ const workRoot = path.resolve(process.env.NETSIMS ?? DEFAULT_WORK)
 const MIME: Record<string, string> = {
   '.json': 'application/json',
   '.qlog': 'application/json',
-  '.log':  'text/plain; charset=utf-8',
-  '.txt':  'text/plain; charset=utf-8',
-  '.md':   'text/plain; charset=utf-8',
+  '.log': 'text/plain; charset=utf-8',
+  '.txt': 'text/plain; charset=utf-8',
+  '.md': 'text/plain; charset=utf-8',
   '.html': 'text/html',
 }
 
