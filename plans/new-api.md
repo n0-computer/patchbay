@@ -552,25 +552,26 @@ The new public `Device` and `Router` handle types will conflict with the existin
 
 ### Phase 9: `test_utils` and `ResourceList` cleanup
 
-- [ ] Rewrite `test_utils` reflectors/echo servers as async tasks using `Device::spawn`, returning `JoinHandle`
-- [ ] Remove `TaskHandle` type entirely — callers use `JoinHandle::abort()`
-- [ ] Rewrite probe helpers (`udp_roundtrip`, `udp_rtt`, `probe_nat_mapping`) to take `&Device`
-- [ ] Promote `spawn_tcp_echo` and `tcp_roundtrip` from test-private into `test_utils`
-- [ ] Rename `resources()` → `ResourceList::global()`
-- [ ] Migrate all tests from raw ns names to `Device`/`Router` handles
+- [ ] Rewrite `test_utils` reflectors/echo servers as async tasks using `Device::spawn`, returning `JoinHandle` — deferred (current impl works, TaskHandle stop-channel pattern is fine for sync reflector threads)
+- [ ] Remove `TaskHandle` type entirely — deferred (still used by sync reflector threads in test_utils)
+- [ ] Rewrite probe helpers (`udp_roundtrip`, `udp_rtt`, `probe_nat_mapping`) to take `&Device` — deferred (Device methods added: `probe_udp_mapping`, `spawn_reflector`)
+- [ ] Promote `spawn_tcp_echo` and `tcp_roundtrip` from test-private into `test_utils` — deferred
+- [x] Rename `resources()` → `ResourceList::global()`
+- [x] Migrate all tests from raw ns names to `Device`/`Router` handles (Device/Router `.ns()`, `.spawn_reflector()`, `.probe_udp_mapping()` methods added)
 - [x] Remove `smoke_debug_netns_exit_trace` test (accesses `lab.core` directly)
-- [ ] Migrate netsim crate from `core::resources()` to `ResourceList::global()`
+- [x] Migrate netsim crate from `core::resources()` to `ResourceList::global()`
 
 ### Phase 10: Internalize and final cleanup
 
-- [ ] Make `NetworkCore` and all its methods `pub(crate)`
-- [ ] Make all `core::` free functions `pub(crate)` (namespace, netlink, nft, sysctl, impair, NAT)
-- [ ] Remove `Lab::root_namespace_name()`, `Lab::node_ns()`, `Lab::device_ns_name()`, `Lab::router_ns_name()`
-- [ ] Remove `Lab::router_downlink_bridge()`
-- [ ] Remove `Lab::run_on()`, `Lab::run_in_namespace()`, `Lab::run_in_namespace_thread()`
-- [ ] Remove `Lab::spawn_on()`
-- [ ] Drop `NETSIM_NS_*` from `Lab::env_vars()`
+- [x] Make `NetworkCore` and all its methods `pub(crate)` (core module already `pub(crate)`)
+- [x] Make all `core::` free functions `pub(crate)` (namespace, netlink, nft, sysctl, impair, NAT)
+- [x] Remove `Lab::node_ns()`, `Lab::device_ns_name()`, `Lab::router_ns_name()` (`root_namespace_name` kept — used by netsim inspect)
+- [x] Remove `Lab::router_downlink_gw(id)`, `Lab::router_uplink_ip(id)`, `Lab::device_ip(id)`, `Lab::router_id()`, `Lab::device_id()`, `Lab::spawn_reflector(ns, bind)`, `Lab::probe_udp_mapping(device, refl)`
+- [x] Remove `Lab::router_downlink_bridge()` — already removed in Phase 7 impair_link migration
+- [x] Remove `Lab::run_on()`, `Lab::run_in_namespace()`, `Lab::run_in_namespace_thread()` — removed in Phase 4/6
+- [x] Remove `Lab::spawn_on()` — removed in Phase 6
+- [x] Drop `NETSIM_NS_*` from `Lab::env_vars()`
 - [x] Rename `Lab::add_region_latency` → `Lab::set_region_latency`
-- [ ] Update netsim crate imports and call sites for all changes
+- [x] Update netsim crate imports and call sites for all changes
 - [ ] Final audit: `cargo doc` to verify only intended items are public
 - [ ] Run full test suite + netsim integration tests

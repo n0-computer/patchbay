@@ -561,7 +561,7 @@ fn perform_cleanup(prefixes: &[String]) -> Result<()> {
             prefixes.join(", ")
         );
     }
-    let resources = netsim_core::resources();
+    let resources = netsim_core::ResourceList::global();
     if !prefixes.is_empty() {
         for prefix in prefixes {
             resources.cleanup_by_prefix(prefix);
@@ -652,24 +652,24 @@ async fn inspect_command(input: PathBuf, work_dir: PathBuf) -> Result<()> {
 
     for router in &topo.router {
         let name = router.name.clone();
-        let ns = lab
-            .router_ns_name(&name)
-            .with_context(|| format!("resolve router namespace for '{name}'"))?;
+        let r = lab
+            .router_by_name(&name)
+            .ok_or_else(|| anyhow!("unknown router '{name}'"))?;
+        let ns = r.ns();
         node_keeper_pids.insert(name.clone(), spawn_keeper_in_namespace(&ns)?);
         node_namespaces.insert(name.clone(), ns);
-        if let Some(id) = lab.router_id(&name) {
-            node_ips_v4.insert(name, lab.router_uplink_ip(id)?.to_string());
+        if let Some(ip) = r.uplink_ip() {
+            node_ips_v4.insert(name, ip.to_string());
         }
     }
     for name in topo.device.keys() {
-        let ns = lab
-            .device_ns_name(name)
-            .with_context(|| format!("resolve device namespace for '{name}'"))?;
+        let d = lab
+            .device_by_name(name)
+            .ok_or_else(|| anyhow!("unknown device '{name}'"))?;
+        let ns = d.ns();
         node_keeper_pids.insert(name.clone(), spawn_keeper_in_namespace(&ns)?);
         node_namespaces.insert(name.clone(), ns);
-        if let Some(id) = lab.device_id(name) {
-            node_ips_v4.insert(name.clone(), lab.device_ip(id)?.to_string());
-        }
+        node_ips_v4.insert(name.clone(), d.ip().to_string());
     }
 
     let prefix = lab.prefix().to_string();

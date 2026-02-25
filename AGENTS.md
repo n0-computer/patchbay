@@ -112,7 +112,7 @@ When an open issue is resolved, remove its details from `# Open` and add a brief
 
 - Always document public items; strictly adhere to official Rust doc conventions and naming conventions.
 - Document important findings and changes in `AGENTS.md`.
-- Before each commit run: `cargo check`, `cargo clippy --tests --examples --fix`, `cargo test`, `cargo fmt`, and `cd ui && npm run test:e2e`; require all to pass cleanly.
+- Before each commit run: `cargo check`, `cargo clippy --tests --examples --fix`, `cargo test`, `cargo fmt`, and `cd ui && npm run test:e2e`; require all to pass cleanly. ALWAYS run cargo test with a timeout to not get stuck when tests hang.
 - When a task is ready, run the checks then ask to commit; stage files already but do not commit without asking.
 - After confirmation commit with `"feat: short description"` etc. with details; elaborate open issues a little, explain decisions taken concisely.
 
