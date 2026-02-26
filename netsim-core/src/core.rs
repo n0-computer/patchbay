@@ -1328,29 +1328,60 @@ pub(crate) async fn apply_home_nat(
     wan_if: &str,
     wan_ip: Ipv4Addr,
 ) -> Result<()> {
-    let snat_rule = match mode {
+    let rules = match mode {
         NatMode::DestinationIndependent => {
-            format!("oif \"{wan}\" snat to {ip}", wan = wan_if, ip = wan_ip)
+            // Full-cone NAT (EIM + EIF) via dynamic nftables map.
+            //
+            // postrouting: record udp sport → src_ip . src_port in @fullcone,
+            //   then SNAT to wan_ip.  With `snat to <ip>` (no port range),
+            //   Linux keeps the original source port when it is free, so the
+            //   pre-SNAT sport == mapped port in virtually all cases.
+            // prerouting: any inbound UDP whose dst port is in @fullcone gets
+            //   DNATted back to the original internal endpoint.
+            //
+            // This gives endpoint-independent filtering: once an internal host
+            // opens a port, *any* external host can send to that mapped port.
+            format!(
+                r#"
+table ip nat {{
+    map fullcone {{
+        type inet_service : ipv4_addr . inet_service
+        flags dynamic,timeout
+        timeout 300s
+        size 65536
+    }}
+    chain prerouting {{
+        type nat hook prerouting priority dstnat; policy accept;
+        iif "{wan}" meta l4proto udp dnat to udp dport map @fullcone
+    }}
+    chain postrouting {{
+        type nat hook postrouting priority srcnat; policy accept;
+        oif "{wan}" meta l4proto udp update @fullcone {{ udp sport timeout 300s : ip saddr . udp sport }}
+        oif "{wan}" snat to {ip}
+    }}
+}}
+"#,
+                wan = wan_if,
+                ip = wan_ip,
+            )
         }
         NatMode::DestinationDependent => {
-            format!("oif \"{wan}\" masquerade random", wan = wan_if)
+            format!(
+                r#"
+table ip nat {{
+    chain postrouting {{
+        type nat hook postrouting priority 100;
+        oif "{wan}" masquerade random
+    }}
+}}
+"#,
+                wan = wan_if,
+            )
         }
         NatMode::None | NatMode::Cgnat => {
             return Ok(());
         }
     };
-
-    let rules = format!(
-        r#"
-table ip nat {{
-    chain postrouting {{
-        type nat hook postrouting priority 100;
-        {snat}
-    }}
-}}
-"#,
-        snat = snat_rule,
-    );
     run_nft_in(ns, &rules).await
 }
 

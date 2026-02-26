@@ -1,9 +1,13 @@
 use anyhow::{anyhow, bail, Context, Result};
 use n0_tracing_test::traced_test;
+use std::future::Future;
 use std::io::{Read, Write};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::thread;
 use std::time::Duration;
+use tokio::net::UdpSocket;
+use tokio::sync::oneshot;
+use tracing::{error, error_span, info, Instrument};
 
 use super::*;
 use crate::check_caps;
@@ -3374,4 +3378,131 @@ async fn latency_dual_stack_region() -> Result<()> {
     );
 
     Ok(())
+}
+
+#[tokio::test]
+#[traced_test]
+async fn netsim_basic_holepunch() -> Result<()> {
+    let lab = Lab::default();
+    let nat_mode = NatMode::DestinationIndependent;
+    let dc = lab.add_router("dc").build().await?;
+    let nat1 = lab.add_router("nat1").nat(nat_mode).build().await?;
+    let nat2 = lab.add_router("nat2").nat(nat_mode).build().await?;
+    let stun = lab.add_device("stun").uplink(dc.id()).build().await?;
+    let dev1 = lab.add_device("dev1").uplink(nat1.id()).build().await?;
+    let dev2 = lab.add_device("dev2").uplink(nat2.id()).build().await?;
+
+    let (stun_tx, stun_rx) = oneshot::channel();
+    let _task_relay = stun.spawn({
+        async move |ctx| {
+            let addr = SocketAddr::from((ctx.ip(), 9999));
+            ctx.spawn_reflector(addr)?;
+            stun_tx.send(addr).unwrap();
+            anyhow::Ok(())
+        }
+    });
+    let stun_addr = stun_rx.await.unwrap();
+
+    info!("NOW START");
+
+    let timeout = Duration::from_secs(10);
+
+    // spawn acceptor endpoint on dev1
+    let (addr1_tx, addr1_rx) = oneshot::channel();
+    let (addr2_tx, addr2_rx) = oneshot::channel();
+    let task1 = dev1.spawn({
+        async move |_| {
+            span_log_timeout("ep1", timeout, async {
+                let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).await?;
+                let public_addr = get_public_addr(&socket, stun_addr).await?;
+                info!("src {public_addr}");
+
+                addr1_tx.send(public_addr).unwrap();
+                let dst = addr2_rx.await.unwrap();
+                info!("got addr1 {dst}");
+
+                send_recv(&socket, dst, Duration::ZERO).await?;
+                anyhow::Ok(())
+            })
+            .await
+        }
+    });
+
+    // spawn connector endpoint on dev2
+    let task2 = dev2.spawn(async move |_| {
+        span_log_timeout("ep2", timeout, async {
+            let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).await?;
+            let public_addr = get_public_addr(&socket, stun_addr).await?;
+            info!("src {public_addr}");
+
+            addr2_tx.send(public_addr).unwrap();
+            let dst = addr1_rx.await.unwrap();
+            info!("got addr1 {dst}");
+
+            send_recv(&socket, dst, Duration::from_millis(1000)).await?;
+
+            anyhow::Ok(())
+        })
+        .await
+    });
+    tokio::try_join!(async { task1.await.unwrap() }, async {
+        task2.await.unwrap()
+    },)?;
+    Ok(())
+}
+
+async fn get_public_addr(socket: &UdpSocket, reflector: SocketAddr) -> Result<SocketAddr> {
+    socket.send_to(b"PROBE", reflector).await?;
+    let mut buf = [0u8; 256];
+    let (n, _) = socket.recv_from(&mut buf).await?;
+    let s = std::str::from_utf8(&buf[..n])?;
+    let addr_str = s
+        .strip_prefix("OBSERVED ")
+        .ok_or_else(|| anyhow!("unexpected reflector reply: {:?}", s))?;
+    Ok(addr_str.parse()?)
+}
+
+async fn send_recv(socket: &UdpSocket, dst: SocketAddr, wait_before_send: Duration) -> Result<()> {
+    let send_fut = async {
+        // Even with a large delay (e.g. 500ms), fullcone NAT allows this
+        // to work — the mapping is populated from the initial STUN probe.
+        tokio::time::sleep(wait_before_send).await;
+        for i in 0..10 {
+            info!("send to {dst} {i}");
+            let msg = format!("punch {i}");
+            socket.send_to(msg.as_bytes(), dst).await?;
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+        anyhow::Ok(())
+    };
+
+    let recv_fut = async {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let mut buf = vec![0u8; 1024];
+            let (len, from) = socket.recv_from(&mut buf).await?;
+            let msg = std::str::from_utf8(&buf[..len])?;
+            info!("recv from {from}: {msg}");
+            anyhow::Ok(())
+        })
+        .await??;
+        anyhow::Ok(())
+    };
+    tokio::try_join!(send_fut, recv_fut)?;
+    Ok(())
+}
+
+async fn span_log_timeout(
+    id: &str,
+    timeout: Duration,
+    fut: impl Future<Output = Result<()>>,
+) -> Result<()> {
+    async {
+        match tokio::time::timeout(timeout, fut).await {
+            Err(err) => Err(err.into()),
+            Ok(res) => res,
+        }
+        .inspect_err(|err| error!("{err:#}"))
+    }
+    .instrument(error_span!("ep", %id))
+    .await
 }

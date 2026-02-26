@@ -151,7 +151,11 @@ fn create_unshared_netns_fd() -> Result<File> {
 // ─────────────────────────────────────────────
 
 /// Returned when a namespace task's result could not be received (worker dropped).
+#[derive(Debug, derive_more::Display)]
+#[display("Task cancelled")]
 pub struct TaskCancelled;
+
+impl std::error::Error for TaskCancelled {}
 
 /// A handle to an async task running inside a namespace worker.
 /// Implements `Future`; resolves to `Result<T, TaskCancelled>`.
@@ -407,10 +411,7 @@ impl NetnsManager {
     fn async_tx_for(&self, ns: &str) -> Result<tokio::sync::mpsc::UnboundedSender<AsyncMsg>> {
         let mut workers = self.workers.lock().expect("netns worker map poisoned");
         if !workers.contains_key(ns) {
-            workers.insert(
-                ns.to_string(),
-                Worker::new(ns, self.parent_span.clone()),
-            );
+            workers.insert(ns.to_string(), Worker::new(ns, self.parent_span.clone()));
         }
         workers.get(ns).expect("just inserted").async_tx()
     }
@@ -418,10 +419,7 @@ impl NetnsManager {
     fn sync_tx_for(&self, ns: &str) -> Result<mpsc::SyncSender<SyncMsg>> {
         let mut workers = self.workers.lock().expect("netns worker map poisoned");
         if !workers.contains_key(ns) {
-            workers.insert(
-                ns.to_string(),
-                Worker::new(ns, self.parent_span.clone()),
-            );
+            workers.insert(ns.to_string(), Worker::new(ns, self.parent_span.clone()));
         }
         workers.get(ns).expect("just inserted").sync_tx()
     }
