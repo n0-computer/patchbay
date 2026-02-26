@@ -1,9 +1,7 @@
 use std::process::Command;
 
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use ipnet::IpNet;
-
-use crate::core::run_command_in_namespace;
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct ImpairLimits {
@@ -12,12 +10,13 @@ pub(crate) struct ImpairLimits {
     pub(crate) latency_ms: u32,
 }
 
-pub(crate) fn apply_impair(ns: &str, ifname: &str, limits: ImpairLimits) -> Result<()> {
-    remove_qdisc(ns, ifname);
+/// Applies netem impairment on `ifname`. Caller must already be in the target ns.
+pub(crate) fn apply_impair(ifname: &str, limits: ImpairLimits) -> Result<()> {
+    remove_qdisc(ifname);
     let qdisc = Qdisc::new(ifname);
-    qdisc.add_netem_root(ns, limits)?;
+    qdisc.add_netem_root(limits)?;
     if limits.rate_kbit > 0 {
-        qdisc.add_tbf(ns, limits.rate_kbit)?;
+        qdisc.add_tbf(limits.rate_kbit)?;
     }
     Ok(())
 }
@@ -25,8 +24,8 @@ pub(crate) fn apply_impair(ns: &str, ifname: &str, limits: ImpairLimits) -> Resu
 /// Applies region latency filters for both v4 and v6 CIDRs.
 ///
 /// Each `IpNet` entry maps to either a v4 or v6 tc filter on the same HTB class tree.
+/// Caller must already be in the target ns.
 pub(crate) fn apply_region_latency_dual(
-    ns: &str,
     ifname: &str,
     filters: &[(IpNet, u32)],
 ) -> Result<()> {
@@ -34,30 +33,30 @@ pub(crate) fn apply_region_latency_dual(
         return Ok(());
     }
 
-    remove_qdisc(ns, ifname);
+    remove_qdisc(ifname);
     let qdisc = Qdisc::new(ifname);
-    qdisc.add_htb_root(ns)?;
-    qdisc.add_base_class(ns)?;
+    qdisc.add_htb_root()?;
+    qdisc.add_base_class()?;
 
     for (idx, (cidr, latency)) in filters.iter().enumerate() {
         let class_id = format!("1:{}", 10 + idx as u16);
         let handle = format!("{}:", 10 + idx as u16);
         let cidr_str = format!("{}/{}", cidr.addr(), cidr.prefix_len());
 
-        qdisc.add_htb_class(ns, &class_id)?;
-        qdisc.add_netem_class(ns, &class_id, &handle, *latency)?;
+        qdisc.add_htb_class(&class_id)?;
+        qdisc.add_netem_class(&class_id, &handle, *latency)?;
         match cidr {
-            IpNet::V4(_) => qdisc.add_filter(ns, &cidr_str, &class_id)?,
-            IpNet::V6(_) => qdisc.add_filter_v6(ns, &cidr_str, &class_id)?,
+            IpNet::V4(_) => qdisc.add_filter(&cidr_str, &class_id)?,
+            IpNet::V6(_) => qdisc.add_filter_v6(&cidr_str, &class_id)?,
         }
     }
 
     Ok(())
 }
 
-pub(crate) fn remove_qdisc(ns: &str, ifname: &str) {
+pub(crate) fn remove_qdisc(ifname: &str) {
     let qdisc = Qdisc::new(ifname);
-    qdisc.clear_root(ns);
+    qdisc.clear_root();
 }
 
 struct Qdisc<'a> {
@@ -69,16 +68,14 @@ impl<'a> Qdisc<'a> {
         Self { ifname }
     }
 
-    fn clear_root(&self, ns: &str) {
-        let _ = run_command_in_namespace(ns, {
-            let mut cmd = Command::new("tc");
-            cmd.args(["qdisc", "del", "dev", self.ifname, "root"]);
-            cmd.stderr(std::process::Stdio::null());
-            cmd
-        });
+    fn clear_root(&self) {
+        let mut cmd = Command::new("tc");
+        cmd.args(["qdisc", "del", "dev", self.ifname, "root"]);
+        cmd.stderr(std::process::Stdio::null());
+        let _ = cmd.status();
     }
 
-    fn add_netem_root(&self, ns: &str, limits: ImpairLimits) -> Result<()> {
+    fn add_netem_root(&self, limits: ImpairLimits) -> Result<()> {
         let mut cmd = Command::new("tc");
         cmd.args([
             "qdisc",
@@ -95,11 +92,11 @@ impl<'a> Qdisc<'a> {
             &format!("{:.3}%", limits.loss_pct),
         ]);
         cmd.stderr(std::process::Stdio::null());
-        ensure_success(ns, cmd, "tc qdisc netem add")?;
+        ensure_success(cmd, "tc qdisc netem add")?;
         Ok(())
     }
 
-    fn add_tbf(&self, ns: &str, rate_kbit: u32) -> Result<()> {
+    fn add_tbf(&self, rate_kbit: u32) -> Result<()> {
         let mut cmd = Command::new("tc");
         cmd.args([
             "qdisc",
@@ -119,11 +116,11 @@ impl<'a> Qdisc<'a> {
             "400ms",
         ]);
         cmd.stderr(std::process::Stdio::null());
-        ensure_success(ns, cmd, "tc qdisc tbf add")?;
+        ensure_success(cmd, "tc qdisc tbf add")?;
         Ok(())
     }
 
-    fn add_htb_root(&self, ns: &str) -> Result<()> {
+    fn add_htb_root(&self) -> Result<()> {
         let mut cmd = Command::new("tc");
         cmd.args([
             "qdisc",
@@ -140,11 +137,11 @@ impl<'a> Qdisc<'a> {
             "1000",
         ]);
         cmd.stderr(std::process::Stdio::null());
-        ensure_success(ns, cmd, "tc qdisc htb add")?;
+        ensure_success(cmd, "tc qdisc htb add")?;
         Ok(())
     }
 
-    fn add_base_class(&self, ns: &str) -> Result<()> {
+    fn add_base_class(&self) -> Result<()> {
         let mut cmd = Command::new("tc");
         cmd.args([
             "class",
@@ -160,11 +157,11 @@ impl<'a> Qdisc<'a> {
             "1000mbit",
         ]);
         cmd.stderr(std::process::Stdio::null());
-        ensure_success(ns, cmd, "tc class htb add base")?;
+        ensure_success(cmd, "tc class htb add base")?;
         Ok(())
     }
 
-    fn add_htb_class(&self, ns: &str, class_id: &str) -> Result<()> {
+    fn add_htb_class(&self, class_id: &str) -> Result<()> {
         let mut cmd = Command::new("tc");
         cmd.args([
             "class",
@@ -180,13 +177,12 @@ impl<'a> Qdisc<'a> {
             "1000mbit",
         ]);
         cmd.stderr(std::process::Stdio::null());
-        ensure_success(ns, cmd, "tc class htb add")?;
+        ensure_success(cmd, "tc class htb add")?;
         Ok(())
     }
 
     fn add_netem_class(
         &self,
-        ns: &str,
         class_id: &str,
         handle: &str,
         latency_ms: u32,
@@ -206,11 +202,11 @@ impl<'a> Qdisc<'a> {
             &format!("{}ms", latency_ms),
         ]);
         cmd.stderr(std::process::Stdio::null());
-        ensure_success(ns, cmd, "tc qdisc netem class add")?;
+        ensure_success(cmd, "tc qdisc netem class add")?;
         Ok(())
     }
 
-    fn add_filter(&self, ns: &str, cidr: &str, class_id: &str) -> Result<()> {
+    fn add_filter(&self, cidr: &str, class_id: &str) -> Result<()> {
         let mut cmd = Command::new("tc");
         cmd.args([
             "filter",
@@ -232,11 +228,11 @@ impl<'a> Qdisc<'a> {
             class_id,
         ]);
         cmd.stderr(std::process::Stdio::null());
-        ensure_success(ns, cmd, "tc filter add")?;
+        ensure_success(cmd, "tc filter add")?;
         Ok(())
     }
 
-    fn add_filter_v6(&self, ns: &str, cidr: &str, class_id: &str) -> Result<()> {
+    fn add_filter_v6(&self, cidr: &str, class_id: &str) -> Result<()> {
         let mut cmd = Command::new("tc");
         cmd.args([
             "filter",
@@ -258,16 +254,16 @@ impl<'a> Qdisc<'a> {
             class_id,
         ]);
         cmd.stderr(std::process::Stdio::null());
-        ensure_success(ns, cmd, "tc filter v6 add")?;
+        ensure_success(cmd, "tc filter v6 add")?;
         Ok(())
     }
 }
 
-fn ensure_success(ns: &str, cmd: Command, context: &str) -> Result<()> {
-    let status = run_command_in_namespace(ns, cmd)?;
+fn ensure_success(mut cmd: Command, context: &str) -> Result<()> {
+    let status = cmd.status().with_context(|| format!("{context}: spawn"))?;
     if status.success() {
         Ok(())
     } else {
-        bail!("{} failed for {}", context, ns);
+        bail!("{} failed", context);
     }
 }

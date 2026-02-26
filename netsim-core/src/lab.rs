@@ -18,10 +18,13 @@ use ipnet::{Ipv4Net, Ipv6Net};
 use serde::Deserialize;
 use tracing::{debug, debug_span, Instrument as _};
 
-use crate::core::{
-    apply_impair_in, apply_nat, apply_nat_v6, cleanup_netns, run_closure_in_namespace, run_nft_in,
-    setup_device_async, setup_root_ns_async, setup_router_async, spawn_command_in_namespace,
-    CoreConfig, DownstreamPool, IfaceBuild, NetworkCore, NodeId, RouterSetupData, TaskHandle,
+use crate::{
+    core::{
+        self, apply_impair_in, apply_nat, apply_nat_v6, run_nft_in, setup_device_async,
+        setup_root_ns_async, setup_router_async, CoreConfig, DownstreamPool, IfaceBuild,
+        NetworkCore, NodeId, RouterSetupData, TaskHandle,
+    },
+    netlink::Netlink,
 };
 
 pub(crate) static LAB_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -473,6 +476,7 @@ impl Lab {
         }
 
         // Apply tc netem filters on each IX-connected router's "ix" interface.
+        let netns = Arc::clone(&inner.core.netns);
         for router in inner.core.all_routers() {
             let Some(uplink) = router.uplink else {
                 continue;
@@ -495,7 +499,10 @@ impl Lab {
                 }
             }
             if !filters.is_empty() {
-                crate::qdisc::apply_region_latency_dual(&router.ns, "ix", &filters)?;
+                let ns = router.ns.clone();
+                netns.run_closure_in(&ns, move || {
+                    crate::qdisc::apply_region_latency_dual("ix", &filters)
+                })?;
             }
         }
         Ok(())
@@ -605,16 +612,17 @@ impl Lab {
 
     /// Spawns a UDP reflector in the lab root namespace (IX bridge side).
     pub fn spawn_reflector_on_ix(&self, bind: SocketAddr) -> Result<TaskHandle> {
-        let root_ns = self.inner.lock().unwrap().core.root_ns().to_string();
-        let (handle, join) = crate::test_utils::spawn_reflector_in(&root_ns, bind)?;
-        self.inner.lock().unwrap().children.push(ChildTask::Thread {
-            handle: handle.clone(),
-            join,
-        });
-        Ok(handle)
+        self.ix().spawn_reflector(bind)
     }
 
     // ── Lookup helpers ───────────────────────────────────────────────────
+
+    /// Returns a handle to the IX (Internet Exchange) root namespace.
+    pub fn ix(&self) -> Ix {
+        Ix {
+            lab: Arc::clone(&self.inner),
+        }
+    }
 
     /// Returns the IX gateway IP (203.0.113.1).
     pub fn ix_gw(&self) -> Ipv4Addr {
@@ -624,8 +632,8 @@ impl Lab {
     /// Safety-net cleanup: drops fd-registry entries for this lab's prefix.
     /// Normal cleanup happens in `NetworkCore::drop`.
     pub fn cleanup(&self) {
-        let prefix = self.prefix();
-        crate::netns::cleanup_registry_prefix(&prefix);
+        let inner = self.inner.lock().unwrap();
+        inner.core.netns.cleanup_prefix(&inner.core.cfg.prefix);
     }
 
     // ── Dynamic operations ────────────────────────────────────────────────
@@ -643,6 +651,7 @@ impl Lab {
     pub fn impair_link(&self, a: NodeId, b: NodeId, impair: Option<Impair>) -> Result<()> {
         debug!(a = ?a, b = ?b, impair = ?impair, "lab: impair_link");
         let inner = self.inner.lock().unwrap();
+        let netns = Arc::clone(&inner.core.netns);
 
         // Try Device(a) ↔ Router(b) or Device(b) ↔ Router(a).
         if let Some(dev) = inner.core.device(a) {
@@ -665,8 +674,11 @@ impl Lab {
                 let ifname = iface.ifname.clone();
                 drop(inner);
                 match impair {
-                    Some(imp) => apply_impair_in(&ns, &ifname, imp),
-                    None => crate::qdisc::remove_qdisc(&ns, &ifname),
+                    Some(imp) => apply_impair_in(&netns, &ns, &ifname, imp),
+                    None => netns.run_closure_in(&ns, move || {
+                        crate::qdisc::remove_qdisc(&ifname);
+                        Ok(())
+                    })?,
                 }
                 return Ok(());
             }
@@ -691,8 +703,11 @@ impl Lab {
                 let ifname = iface.ifname.clone();
                 drop(inner);
                 match impair {
-                    Some(imp) => apply_impair_in(&ns, &ifname, imp),
-                    None => crate::qdisc::remove_qdisc(&ns, &ifname),
+                    Some(imp) => apply_impair_in(&netns, &ns, &ifname, imp),
+                    None => netns.run_closure_in(&ns, move || {
+                        crate::qdisc::remove_qdisc(&ifname);
+                        Ok(())
+                    })?,
                 }
                 return Ok(());
             }
@@ -704,11 +719,14 @@ impl Lab {
             if let Some(a_downlink) = ra.downlink {
                 if rb.uplink == Some(a_downlink) {
                     let ns = rb.ns.clone();
-                    let wan_if = rb.wan_ifname(inner.core.ix_sw());
+                    let wan_if = rb.wan_ifname(inner.core.ix_sw()).to_string();
                     drop(inner);
                     match impair {
-                        Some(imp) => apply_impair_in(&ns, wan_if, imp),
-                        None => crate::qdisc::remove_qdisc(&ns, wan_if),
+                        Some(imp) => apply_impair_in(&netns, &ns, &wan_if, imp),
+                        None => netns.run_closure_in(&ns, move || {
+                            crate::qdisc::remove_qdisc(&wan_if);
+                            Ok(())
+                        })?,
                     }
                     return Ok(());
                 }
@@ -717,11 +735,14 @@ impl Lab {
             if let Some(b_downlink) = rb.downlink {
                 if ra.uplink == Some(b_downlink) {
                     let ns = ra.ns.clone();
-                    let wan_if = ra.wan_ifname(inner.core.ix_sw());
+                    let wan_if = ra.wan_ifname(inner.core.ix_sw()).to_string();
                     drop(inner);
                     match impair {
-                        Some(imp) => apply_impair_in(&ns, wan_if, imp),
-                        None => crate::qdisc::remove_qdisc(&ns, wan_if),
+                        Some(imp) => apply_impair_in(&netns, &ns, &wan_if, imp),
+                        None => netns.run_closure_in(&ns, move || {
+                            crate::qdisc::remove_qdisc(&wan_if);
+                            Ok(())
+                        })?,
                     }
                     return Ok(());
                 }
@@ -748,53 +769,18 @@ impl Lab {
         let r = inner.core.router(router).context("unknown router id")?;
         let ns = r.ns.clone();
         let bridge = r.downlink_bridge.clone();
+        let netns = Arc::clone(&inner.core.netns);
         drop(inner);
         match impair {
-            Some(imp) => apply_impair_in(&ns, &bridge, imp),
-            None => crate::qdisc::remove_qdisc(&ns, &bridge),
+            Some(imp) => apply_impair_in(&netns, &ns, &bridge, imp),
+            None => netns.run_closure_in(&ns, move || {
+                crate::qdisc::remove_qdisc(&bridge);
+                Ok(())
+            })?,
         }
         Ok(())
     }
 
-    /// Like [`crate::test_utils::probe_in_ns`] but with an explicit bind address.
-    pub fn probe_in_ns_from(
-        ns: &str,
-        reflector: SocketAddr,
-        bind: SocketAddr,
-        timeout: Duration,
-    ) -> Result<ObservedAddr> {
-        use std::net::UdpSocket;
-        let ns_name = ns.to_string();
-        run_closure_in_namespace(&ns_name, move || {
-            let sock = UdpSocket::bind(bind)?;
-            sock.set_read_timeout(Some(timeout))?;
-            let mut buf = [0u8; 512];
-            for _attempt in 1..=3 {
-                sock.send_to(b"PROBE", reflector)?;
-                match sock.recv_from(&mut buf) {
-                    Ok((n, _)) => {
-                        let s = std::str::from_utf8(&buf[..n])?;
-                        let addr_str = s
-                            .strip_prefix("OBSERVED ")
-                            .ok_or_else(|| anyhow!("unexpected reflector reply: {:?}", s))?;
-                        return Ok(ObservedAddr {
-                            observed: addr_str.parse()?,
-                        });
-                    }
-                    Err(e)
-                        if matches!(
-                            e.kind(),
-                            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
-                        ) =>
-                    {
-                        continue;
-                    }
-                    Err(e) => return Err(e.into()),
-                }
-            }
-            Err(anyhow!("probe timed out after 3 attempts"))
-        })
-    }
 }
 
 impl Default for Lab {
@@ -810,9 +796,7 @@ impl Drop for LabInner {
             handle.stop();
             let _ = join.join();
         }
-        for ns_name in self.core.all_ns_names() {
-            cleanup_netns(&ns_name);
-        }
+        // NetworkCore::drop handles namespace cleanup via self.core.netns
     }
 }
 
@@ -1448,13 +1432,10 @@ impl Device {
             (dev.ns.clone(), Arc::clone(&inner.core.netns))
         };
         let ifname = ifname.to_string();
-        netns
-            .spawn_netlink_task_in(
-                &ns,
-                move |nl| async move { nl.set_link_down(&ifname).await },
-            )
-            .await
-            .map_err(|_| anyhow!("netns task cancelled"))?
+        core::nl_run(&netns, &ns, move |nl: Netlink| async move {
+            nl.set_link_down(&ifname).await
+        })
+        .await
     }
 
     /// Brings an interface administratively up.
@@ -1479,13 +1460,11 @@ impl Device {
             )
         };
         let ifname_owned = ifname.to_string();
-        netns
-            .spawn_netlink_task_in(&ns, {
-                let ifname_owned = ifname_owned.clone();
-                move |nl| async move { nl.set_link_up(&ifname_owned).await }
-            })
-            .await
-            .map_err(|_| anyhow!("netns task cancelled"))??;
+        core::nl_run(&netns, &ns, {
+            let ifname_owned = ifname_owned.clone();
+            move |nl: Netlink| async move { nl.set_link_up(&ifname_owned).await }
+        })
+        .await?;
         if is_default_via {
             let gw_ip = self
                 .lab
@@ -1493,12 +1472,10 @@ impl Device {
                 .unwrap()
                 .core
                 .router_downlink_gw_for_switch(uplink)?;
-            netns
-                .spawn_netlink_task_in(&ns, move |nl| async move {
-                    nl.replace_default_route_v4(&ifname_owned, gw_ip).await
-                })
-                .await
-                .map_err(|_| anyhow!("netns task cancelled"))??;
+            core::nl_run(&netns, &ns, move |nl: Netlink| async move {
+                nl.replace_default_route_v4(&ifname_owned, gw_ip).await
+            })
+            .await?;
         }
         Ok(())
     }
@@ -1528,15 +1505,17 @@ impl Device {
             .core
             .router_downlink_gw_for_switch(uplink)?;
         let to_owned = to.to_string();
-        netns
-            .spawn_netlink_task_in(&ns, move |nl| async move {
-                nl.replace_default_route_v4(&to_owned, gw_ip).await
-            })
-            .await
-            .map_err(|_| anyhow!("netns task cancelled"))??;
+        core::nl_run(&netns, &ns, move |nl: Netlink| async move {
+            nl.replace_default_route_v4(&to_owned, gw_ip).await
+        })
+        .await?;
+        let to_ifname = to.to_string();
         match impair {
-            Some(imp) => apply_impair_in(&ns, to, imp),
-            None => crate::qdisc::remove_qdisc(&ns, to),
+            Some(imp) => apply_impair_in(&netns, &ns, &to_ifname, imp),
+            None => netns.run_closure_in(&ns, move || {
+                crate::qdisc::remove_qdisc(&to_ifname);
+                Ok(())
+            })?,
         }
         self.lab
             .lock()
@@ -1551,7 +1530,7 @@ impl Device {
     /// If `ifname` is `None`, applies to the default interface.
     pub fn set_impair(&self, ifname: &str, impair: Option<Impair>) -> Result<()> {
         let mut inner = self.lab.lock().unwrap();
-        let (ns, resolved_ifname) = {
+        let (ns, resolved_ifname, netns) = {
             let dev = inner
                 .core
                 .device(self.id)
@@ -1560,11 +1539,17 @@ impl Device {
             if dev.iface(&iname).is_none() {
                 bail!("interface '{}' not found", iname);
             }
-            (dev.ns.clone(), iname)
+            (dev.ns.clone(), iname, Arc::clone(&inner.core.netns))
         };
         match impair {
-            Some(imp) => apply_impair_in(&ns, &resolved_ifname, imp),
-            None => crate::qdisc::remove_qdisc(&ns, &resolved_ifname),
+            Some(imp) => apply_impair_in(&netns, &ns, &resolved_ifname, imp),
+            None => {
+                let ifname_owned = resolved_ifname.clone();
+                netns.run_closure_in(&ns, move || {
+                    crate::qdisc::remove_qdisc(&ifname_owned);
+                    Ok(())
+                })?
+            }
         }
         if let Some(dev) = inner.core.device_mut(self.id) {
             if let Some(iface) = dev.iface_mut(&resolved_ifname) {
@@ -1574,57 +1559,101 @@ impl Device {
         Ok(())
     }
 
-    // ── Spawn ───────────────────────────────────────────────────────────
+    // ── Spawn / run ────────────────────────────────────────────────────
 
     /// Spawns an async task in this device's network namespace.
     ///
     /// The closure receives a cloned [`Device`] handle. Returns a
-    /// `TaskHandle` that resolves to the task's output.
-    pub fn spawn<F, Fut, T>(&self, f: F) -> crate::netns::TaskHandle<T>
+    /// `JoinHandle` that resolves to the task's output.
+    pub fn spawn<F, Fut, T>(&self, f: F) -> tokio::task::JoinHandle<T>
     where
         F: FnOnce(Device) -> Fut + Send + 'static,
-        Fut: std::future::Future<Output = T> + 'static,
+        Fut: std::future::Future<Output = T> + Send + 'static,
         T: Send + 'static,
     {
-        let ns = {
+        let (ns, netns) = {
             let inner = self.lab.lock().unwrap();
-            inner
+            let ns = inner
                 .core
                 .device(self.id)
                 .expect("device handle has valid id")
                 .ns
-                .clone()
+                .clone();
+            (ns, Arc::clone(&inner.core.netns))
         };
         let handle = self.clone();
-        crate::netns::spawn_task_in_netns(&ns, move || f(handle))
+        let rt = netns.rt_handle_for(&ns).expect("namespace has async worker");
+        rt.spawn(f(handle))
+    }
+
+    /// Runs a short-lived sync closure in this device's network namespace.
+    /// Blocks the caller until the closure returns.
+    ///
+    /// Only for fast, non-blocking work. Never pass TCP/UDP I/O here.
+    pub fn run_sync<F, R>(&self, f: F) -> Result<R>
+    where
+        F: FnOnce() -> Result<R> + Send + 'static,
+        R: Send + 'static,
+    {
+        let (ns, netns) = {
+            let inner = self.lab.lock().unwrap();
+            let dev = inner
+                .core
+                .device(self.id)
+                .ok_or_else(|| anyhow!("unknown device id"))?;
+            (dev.ns.clone(), Arc::clone(&inner.core.netns))
+        };
+        netns.run_closure_in(&ns, f)
+    }
+
+    /// Spawns a dedicated OS thread in this device's network namespace.
+    pub fn spawn_thread<F, R>(&self, f: F) -> Result<thread::JoinHandle<Result<R>>>
+    where
+        F: FnOnce() -> Result<R> + Send + 'static,
+        R: Send + 'static,
+    {
+        let (ns, netns) = {
+            let inner = self.lab.lock().unwrap();
+            let dev = inner
+                .core
+                .device(self.id)
+                .ok_or_else(|| anyhow!("unknown device id"))?;
+            (dev.ns.clone(), Arc::clone(&inner.core.netns))
+        };
+        netns.spawn_thread_in(&ns, f)
     }
 
     /// Spawns a raw command in this device's network namespace.
-    pub fn spawn_command(&self, cmd: Command) -> Result<std::process::Child> {
-        let ns = {
+    pub fn spawn_command(&self, mut cmd: Command) -> Result<std::process::Child> {
+        let (ns, netns) = {
             let inner = self.lab.lock().unwrap();
-            inner
+            let dev = inner
                 .core
                 .device(self.id)
-                .ok_or_else(|| anyhow!("unknown device id"))?
-                .ns
-                .clone()
+                .ok_or_else(|| anyhow!("unknown device id"))?;
+            (dev.ns.clone(), Arc::clone(&inner.core.netns))
         };
-        spawn_command_in_namespace(&ns, cmd)
+        netns.run_closure_in(&ns, move || {
+            cmd.spawn().context("spawn command in namespace")
+        })
     }
 
     /// Probes the NAT mapping seen by a reflector from this device.
     pub fn probe_udp_mapping(&self, reflector: SocketAddr) -> Result<ObservedAddr> {
-        let ns = self.ns();
         let base = 40000u16;
         let port = base + ((self.id.0 % 20000) as u16);
-        crate::test_utils::probe_in_ns(&ns, reflector, Duration::from_millis(500), Some(port))
+        self.run_sync(move || {
+            crate::test_utils::probe_udp(reflector, Duration::from_millis(500), Some(port))
+        })
     }
 
     /// Spawns a UDP reflector in this device's network namespace.
     pub fn spawn_reflector(&self, bind: SocketAddr) -> Result<TaskHandle> {
-        let ns = self.ns();
-        let (handle, join) = crate::test_utils::spawn_reflector_in(&ns, bind)?;
+        let (stop_tx, stop_rx) = std::sync::mpsc::channel();
+        let join = self.spawn_thread(move || {
+            crate::test_utils::run_reflector(bind, stop_rx)
+        })?;
+        let handle = TaskHandle::new(stop_tx);
         self.lab.lock().unwrap().children.push(ChildTask::Thread {
             handle: handle.clone(),
             join,
@@ -1713,7 +1742,7 @@ impl Device {
         core::nl_run(&netns, &root_ns, {
             let old_root_gw = old_root_gw.clone();
             let old_root_dev = old_root_dev.clone();
-            async move |h| {
+            move |h: Netlink| async move {
                 h.ensure_link_deleted(&old_root_gw).await.ok();
                 h.ensure_link_deleted(&old_root_dev).await.ok();
                 Ok(())
@@ -1877,11 +1906,14 @@ impl Router {
     /// Replaces NAT rules on this router at runtime.
     ///
     /// Flushes the `ip nat` table then re-applies the new rules.
-    pub async fn set_nat_mode(&self, mode: NatMode) -> Result<()> {
-        let (ns, lan_if, wan_if, wan_ip) =
-            self.lab.lock().unwrap().core.router_nat_params(self.id)?;
-        run_nft_in(&ns, "flush table ip nat").await.ok();
-        apply_nat(&ns, mode, &lan_if, &wan_if, wan_ip).await?;
+    pub fn set_nat_mode(&self, mode: NatMode) -> Result<()> {
+        let (ns, lan_if, wan_if, wan_ip, netns) = {
+            let inner = self.lab.lock().unwrap();
+            let (ns, lan_if, wan_if, wan_ip) = inner.core.router_nat_params(self.id)?;
+            (ns, lan_if, wan_if, wan_ip, Arc::clone(&inner.core.netns))
+        };
+        run_nft_in(&netns, &ns, "flush table ip nat").ok();
+        apply_nat(&netns, &ns, mode, &lan_if, &wan_if, wan_ip)?;
         self.lab
             .lock()
             .unwrap()
@@ -1890,8 +1922,8 @@ impl Router {
     }
 
     /// Replaces IPv6 NAT rules on this router at runtime.
-    pub async fn set_nat_v6_mode(&self, mode: NatV6Mode) -> Result<()> {
-        let (ns, wan_if, lan_prefix, wan_prefix) = {
+    pub fn set_nat_v6_mode(&self, mode: NatV6Mode) -> Result<()> {
+        let (ns, wan_if, lan_prefix, wan_prefix, netns) = {
             let inner = self.lab.lock().unwrap();
             let router = inner
                 .core
@@ -1915,10 +1947,10 @@ impl Router {
                 };
                 Ipv6Net::new(up_ip, up_prefix).unwrap_or_else(|_| Ipv6Net::new(up_ip, 128).unwrap())
             };
-            (router.ns.clone(), wan_if, lan_prefix, wan_prefix)
+            (router.ns.clone(), wan_if, lan_prefix, wan_prefix, Arc::clone(&inner.core.netns))
         };
-        run_nft_in(&ns, "flush table ip6 nat").await.ok();
-        apply_nat_v6(&ns, mode, &wan_if, lan_prefix, wan_prefix).await?;
+        run_nft_in(&netns, &ns, "flush table ip6 nat").ok();
+        apply_nat_v6(&netns, &ns, mode, &wan_if, lan_prefix, wan_prefix)?;
         {
             let mut inner = self.lab.lock().unwrap();
             let router = inner
@@ -1934,14 +1966,12 @@ impl Router {
     ///
     /// Subsequent flows get new external port assignments. Requires `conntrack-tools`.
     pub fn rebind_nats(&self) -> Result<()> {
-        let ns = self
-            .lab
-            .lock()
-            .unwrap()
-            .core
-            .router_ns(self.id)?
-            .to_string();
-        run_closure_in_namespace(&ns, || {
+        let (ns, netns) = {
+            let inner = self.lab.lock().unwrap();
+            let ns = inner.core.router_ns(self.id)?.to_string();
+            (ns, Arc::clone(&inner.core.netns))
+        };
+        netns.run_closure_in(&ns, || {
             let st = std::process::Command::new("conntrack").arg("-F").status()?;
             if !st.success() {
                 bail!("conntrack -F failed: {st}");
@@ -1950,48 +1980,213 @@ impl Router {
         })
     }
 
-    // ── Spawn ───────────────────────────────────────────────────────────
+    // ── Spawn / run ────────────────────────────────────────────────────
 
     /// Spawns an async task in this router's network namespace.
     ///
     /// The closure receives a cloned [`Router`] handle.
-    pub fn spawn<F, Fut, T>(&self, f: F) -> crate::netns::TaskHandle<T>
+    pub fn spawn<F, Fut, T>(&self, f: F) -> tokio::task::JoinHandle<T>
     where
         F: FnOnce(Router) -> Fut + Send + 'static,
-        Fut: std::future::Future<Output = T> + 'static,
+        Fut: std::future::Future<Output = T> + Send + 'static,
         T: Send + 'static,
     {
-        let ns = {
+        let (ns, netns) = {
             let inner = self.lab.lock().unwrap();
-            inner
+            let ns = inner
                 .core
                 .router(self.id)
                 .expect("router handle has valid id")
                 .ns
-                .clone()
+                .clone();
+            (ns, Arc::clone(&inner.core.netns))
         };
         let handle = self.clone();
-        crate::netns::spawn_task_in_netns(&ns, move || f(handle))
+        let rt = netns.rt_handle_for(&ns).expect("namespace has async worker");
+        rt.spawn(f(handle))
+    }
+
+    /// Runs a short-lived sync closure in this router's network namespace.
+    /// Blocks the caller until the closure returns.
+    pub fn run_sync<F, R>(&self, f: F) -> Result<R>
+    where
+        F: FnOnce() -> Result<R> + Send + 'static,
+        R: Send + 'static,
+    {
+        let (ns, netns) = {
+            let inner = self.lab.lock().unwrap();
+            let router = inner
+                .core
+                .router(self.id)
+                .ok_or_else(|| anyhow!("unknown router id"))?;
+            (router.ns.clone(), Arc::clone(&inner.core.netns))
+        };
+        netns.run_closure_in(&ns, f)
+    }
+
+    /// Spawns a dedicated OS thread in this router's network namespace.
+    pub fn spawn_thread<F, R>(&self, f: F) -> Result<thread::JoinHandle<Result<R>>>
+    where
+        F: FnOnce() -> Result<R> + Send + 'static,
+        R: Send + 'static,
+    {
+        let (ns, netns) = {
+            let inner = self.lab.lock().unwrap();
+            let router = inner
+                .core
+                .router(self.id)
+                .ok_or_else(|| anyhow!("unknown router id"))?;
+            (router.ns.clone(), Arc::clone(&inner.core.netns))
+        };
+        netns.spawn_thread_in(&ns, f)
     }
 
     /// Spawns a raw command in this router's network namespace.
-    pub fn spawn_command(&self, cmd: Command) -> Result<std::process::Child> {
-        let ns = {
+    pub fn spawn_command(&self, mut cmd: Command) -> Result<std::process::Child> {
+        let (ns, netns) = {
             let inner = self.lab.lock().unwrap();
-            inner
+            let router = inner
                 .core
                 .router(self.id)
-                .ok_or_else(|| anyhow!("unknown router id"))?
-                .ns
-                .clone()
+                .ok_or_else(|| anyhow!("unknown router id"))?;
+            (router.ns.clone(), Arc::clone(&inner.core.netns))
         };
-        spawn_command_in_namespace(&ns, cmd)
+        netns.run_closure_in(&ns, move || {
+            cmd.spawn().context("spawn command in namespace")
+        })
     }
 
     /// Spawns a UDP reflector in this router's network namespace.
     pub fn spawn_reflector(&self, bind: SocketAddr) -> Result<TaskHandle> {
-        let ns = self.ns();
-        let (handle, join) = crate::test_utils::spawn_reflector_in(&ns, bind)?;
+        let (stop_tx, stop_rx) = std::sync::mpsc::channel();
+        let join = self.spawn_thread(move || {
+            crate::test_utils::run_reflector(bind, stop_rx)
+        })?;
+        let handle = TaskHandle::new(stop_tx);
+        self.lab.lock().unwrap().children.push(ChildTask::Thread {
+            handle: handle.clone(),
+            join,
+        });
+        Ok(handle)
+    }
+}
+
+// ─────────────────────────────────────────────
+// Ix handle
+// ─────────────────────────────────────────────
+
+/// Handle to the IX (Internet Exchange) — the lab root namespace that hosts
+/// the shared bridge connecting all IX-level routers.
+///
+/// Same pattern as [`Device`] and [`Router`]: holds an `Arc` to the lab
+/// interior. All accessor methods briefly lock the mutex.
+pub struct Ix {
+    lab: Arc<Mutex<LabInner>>,
+}
+
+impl Clone for Ix {
+    fn clone(&self) -> Self {
+        Self {
+            lab: Arc::clone(&self.lab),
+        }
+    }
+}
+
+impl std::fmt::Debug for Ix {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Ix").finish()
+    }
+}
+
+impl Ix {
+    /// Returns the root namespace name.
+    pub fn ns(&self) -> String {
+        self.lab.lock().unwrap().core.root_ns().to_string()
+    }
+
+    /// Returns the IX gateway IPv4 address (e.g. 203.0.113.1).
+    pub fn gw(&self) -> Ipv4Addr {
+        self.lab.lock().unwrap().core.ix_gw()
+    }
+
+    /// Returns the IX gateway IPv6 address (e.g. 2001:db8::1).
+    pub fn gw_v6(&self) -> Ipv6Addr {
+        self.lab.lock().unwrap().core.cfg.ix_gw_v6
+    }
+
+    /// Spawns an async task in the IX root namespace.
+    pub fn spawn<F, Fut, T>(&self, f: F) -> tokio::task::JoinHandle<T>
+    where
+        F: FnOnce(Ix) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = T> + Send + 'static,
+        T: Send + 'static,
+    {
+        let (ns, netns) = {
+            let inner = self.lab.lock().unwrap();
+            (
+                inner.core.root_ns().to_string(),
+                Arc::clone(&inner.core.netns),
+            )
+        };
+        let handle = self.clone();
+        let rt = netns.rt_handle_for(&ns).expect("root namespace has async worker");
+        rt.spawn(f(handle))
+    }
+
+    /// Runs a short-lived sync closure in the IX root namespace.
+    /// Blocks the caller until the closure returns.
+    pub fn run_sync<F, R>(&self, f: F) -> Result<R>
+    where
+        F: FnOnce() -> Result<R> + Send + 'static,
+        R: Send + 'static,
+    {
+        let (ns, netns) = {
+            let inner = self.lab.lock().unwrap();
+            (
+                inner.core.root_ns().to_string(),
+                Arc::clone(&inner.core.netns),
+            )
+        };
+        netns.run_closure_in(&ns, f)
+    }
+
+    /// Spawns a dedicated OS thread in the IX root namespace.
+    pub fn spawn_thread<F, R>(&self, f: F) -> Result<thread::JoinHandle<Result<R>>>
+    where
+        F: FnOnce() -> Result<R> + Send + 'static,
+        R: Send + 'static,
+    {
+        let (ns, netns) = {
+            let inner = self.lab.lock().unwrap();
+            (
+                inner.core.root_ns().to_string(),
+                Arc::clone(&inner.core.netns),
+            )
+        };
+        netns.spawn_thread_in(&ns, f)
+    }
+
+    /// Spawns a raw command in the IX root namespace.
+    pub fn spawn_command(&self, mut cmd: Command) -> Result<std::process::Child> {
+        let (ns, netns) = {
+            let inner = self.lab.lock().unwrap();
+            (
+                inner.core.root_ns().to_string(),
+                Arc::clone(&inner.core.netns),
+            )
+        };
+        netns.run_closure_in(&ns, move || {
+            cmd.spawn().context("spawn command in namespace")
+        })
+    }
+
+    /// Spawns a UDP reflector in the IX root namespace.
+    pub fn spawn_reflector(&self, bind: SocketAddr) -> Result<TaskHandle> {
+        let (stop_tx, stop_rx) = std::sync::mpsc::channel();
+        let join = self.spawn_thread(move || {
+            crate::test_utils::run_reflector(bind, stop_rx)
+        })?;
+        let handle = TaskHandle::new(stop_tx);
         self.lab.lock().unwrap().children.push(ChildTask::Thread {
             handle: handle.clone(),
             join,

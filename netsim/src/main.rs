@@ -550,21 +550,10 @@ fn cleanup_command(prefixes: Vec<String>) -> Result<()> {
     perform_cleanup(&use_prefixes)
 }
 
-fn perform_cleanup(prefixes: &[String]) -> Result<()> {
-    if prefixes.is_empty() {
-        tracing::info!(
-            "netsim cleanup: no prefixes specified and fd-based namespaces need no cleanup"
-        );
-        return Ok(());
-    }
-    tracing::debug!(
-        "netsim cleanup: starting (prefixes: {})",
-        prefixes.join(", ")
+fn perform_cleanup(_prefixes: &[String]) -> Result<()> {
+    tracing::info!(
+        "netsim cleanup: fd-based namespaces are automatically cleaned up on drop; nothing to do"
     );
-    for prefix in prefixes {
-        netsim_core::cleanup_registry_prefix(prefix);
-    }
-    tracing::info!("netsim cleanup: complete");
     Ok(())
 }
 

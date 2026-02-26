@@ -1145,6 +1145,7 @@ dependencies = [
  "serde",
  "strum",
  "tokio",
+ "tokio-util",
  "toml",
  "tracing",
  "tracing-subscriber",

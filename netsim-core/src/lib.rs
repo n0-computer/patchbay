@@ -62,13 +62,12 @@ mod userns;
 pub mod util;
 
 pub use lab::{
-    Device, DeviceBuilder, DeviceIface, Impair, IpSupport, Lab, NatMode, NatV6Mode, ObservedAddr,
-    Router, RouterBuilder,
+    Device, DeviceBuilder, DeviceIface, Impair, IpSupport, Ix, Lab, NatMode, NatV6Mode,
+    ObservedAddr, Router, RouterBuilder,
 };
 
 pub use crate::{
     core::NodeId,
-    netns::cleanup_registry_prefix,
     userns::{init_userns, init_userns_for_ctor},
 };
 

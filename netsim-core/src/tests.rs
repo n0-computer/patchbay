@@ -12,32 +12,29 @@ use tokio::{net::UdpSocket, sync::oneshot};
 use tracing::{error, error_span, info, Instrument};
 
 use super::*;
-use crate::{
-    check_caps, config,
-    core::{run_closure_in_namespace, run_command_in_namespace, spawn_closure_in_namespace_thread},
-    netns::spawn_task_in_netns,
-    test_utils::{udp_roundtrip_in_ns, udp_rtt_in_ns},
-};
+use crate::{check_caps, config};
 
 #[ctor::ctor]
 fn init() {
     let _ = crate::init_userns();
 }
 
-fn ping_in_ns(ns: &str, addr: &str) -> Result<()> {
-    let mut cmd = std::process::Command::new("ping");
-    cmd.args(["-c", "1", "-W", "1", addr]);
-    let status = run_command_in_namespace(ns, cmd)?;
+fn ping(addr: &str) -> Result<()> {
+    let status = std::process::Command::new("ping")
+        .args(["-c", "1", "-W", "1", addr])
+        .status()
+        .context("ping spawn")?;
     if !status.success() {
         bail!("ping {} failed with status {}", addr, status);
     }
     Ok(())
 }
 
-fn ping_fails_in_ns(ns: &str, addr: &str) -> Result<()> {
-    let mut cmd = std::process::Command::new("ping");
-    cmd.args(["-c", "1", "-W", "1", addr]);
-    let status = run_command_in_namespace(ns, cmd)?;
+fn ping_fails(addr: &str) -> Result<()> {
+    let status = std::process::Command::new("ping")
+        .args(["-c", "1", "-W", "1", addr])
+        .status()
+        .context("ping spawn")?;
     if status.success() {
         bail!("ping {} unexpectedly succeeded", addr);
     }
@@ -74,7 +71,7 @@ enum BindMode {
 }
 
 struct NatTestCtx {
-    dev_ns: String,
+    dev: Device,
     dev_ip: Ipv4Addr,
     expected_ip: Ipv4Addr,
     r_dc: SocketAddr,
@@ -82,7 +79,8 @@ struct NatTestCtx {
 }
 
 struct DualNatLab {
-    lab: Lab,
+    _lab: Lab,
+    dc: Router,
     dev: Device,
     nat_a: Router,
     nat_b: Router,
@@ -91,46 +89,64 @@ struct DualNatLab {
 
 // ── Test helper functions ────────────────────────────────────────────
 
-/// UDP probe with explicit bind address.
-fn probe_udp(ns: &str, reflector: SocketAddr, bind: SocketAddr) -> Result<ObservedAddr> {
-    Lab::probe_in_ns_from(ns, reflector, bind, Duration::from_millis(500))
+/// UDP probe with explicit bind address — ns-free, call inside `handle.run_sync`.
+fn probe_udp_from(reflector: SocketAddr, bind: SocketAddr) -> Result<ObservedAddr> {
+    use std::net::UdpSocket;
+    let sock = UdpSocket::bind(bind)?;
+    sock.set_read_timeout(Some(Duration::from_millis(500)))?;
+    let mut buf = [0u8; 512];
+    for _attempt in 1..=3 {
+        sock.send_to(b"PROBE", reflector)?;
+        match sock.recv_from(&mut buf) {
+            Ok((n, _)) => {
+                let s = std::str::from_utf8(&buf[..n]).context("utf8")?;
+                let addr_str = s
+                    .strip_prefix("OBSERVED ")
+                    .ok_or_else(|| anyhow!("unexpected reflector reply: {:?}", s))?;
+                return Ok(ObservedAddr {
+                    observed: addr_str.parse().context("parse observed addr")?,
+                });
+            }
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                continue
+            }
+            Err(e) => return Err(e.into()),
+        }
+    }
+    Err(anyhow!("probe timed out after 3 attempts"))
 }
 
-/// TCP probe from `ns`, reads "OBSERVED {addr}" from server.
-///
-/// The `_bind` address is accepted for API parity with `probe_udp`; in
-/// practice the OS always picks the device's primary IP as source address
-/// (since there is only one default-route interface in test topologies).
-async fn probe_tcp(ns: &str, target: SocketAddr, _bind: SocketAddr) -> Result<ObservedAddr> {
+/// TCP probe — ns-free async, call inside `handle.spawn(|_| async { probe_tcp(t).await })`.
+async fn probe_tcp(target: SocketAddr) -> Result<ObservedAddr> {
     use tokio::io::AsyncReadExt;
-    let ns = ns.to_string();
     let timeout = Duration::from_millis(500);
-    spawn_task_in_netns(&ns, move || async move {
-        let mut stream = tokio::time::timeout(timeout, tokio::net::TcpStream::connect(target))
-            .await
-            .context("tcp connect timeout")?
-            .context("tcp connect")?;
-        let mut buf = vec![0u8; 256];
-        let n = tokio::time::timeout(timeout, stream.read(&mut buf))
-            .await
-            .context("tcp read timeout")?
-            .context("tcp read")?;
-        let s = std::str::from_utf8(&buf[..n]).context("utf8")?;
-        let addr_str = s
-            .strip_prefix("OBSERVED ")
-            .ok_or_else(|| anyhow!("unexpected tcp reflector reply: {:?}", s))?;
-        Ok::<_, anyhow::Error>(ObservedAddr {
-            observed: addr_str.parse().context("parse observed addr")?,
-        })
+    let mut stream = tokio::time::timeout(timeout, tokio::net::TcpStream::connect(target))
+        .await
+        .context("tcp connect timeout")?
+        .context("tcp connect")?;
+    let mut buf = vec![0u8; 256];
+    let n = tokio::time::timeout(timeout, stream.read(&mut buf))
+        .await
+        .context("tcp read timeout")?
+        .context("tcp read")?;
+    let s = std::str::from_utf8(&buf[..n]).context("utf8")?;
+    let addr_str = s
+        .strip_prefix("OBSERVED ")
+        .ok_or_else(|| anyhow!("unexpected tcp reflector reply: {:?}", s))?;
+    Ok(ObservedAddr {
+        observed: addr_str.parse().context("parse observed addr")?,
     })
-    .await
-    .map_err(|_| anyhow!("probe_tcp: netns task cancelled"))?
 }
 
 async fn probe_reflexive_addr(
+    dev: &Device,
     proto: Proto,
     bind: BindMode,
-    ns: &str,
     dev_ip: Ipv4Addr,
     reflector: SocketAddr,
 ) -> Result<ObservedAddr> {
@@ -139,125 +155,117 @@ async fn probe_reflexive_addr(
         BindMode::SpecificIp => SocketAddr::new(IpAddr::V4(dev_ip), 0),
     };
     match proto {
-        Proto::Udp => probe_udp(ns, reflector, bind_addr),
-        Proto::Tcp => probe_tcp(ns, reflector, bind_addr).await,
+        Proto::Udp => dev.run_sync(move || probe_udp_from(reflector, bind_addr)),
+        Proto::Tcp => {
+            dev.spawn(move |_| async move { probe_tcp(reflector).await })
+                .await
+                .context("probe_tcp task panicked")?
+        }
     }
 }
 
-async fn probe_reflexive(proto: Proto, bind: BindMode, ctx: &NatTestCtx) -> Result<ObservedAddr> {
-    probe_reflexive_addr(proto, bind, &ctx.dev_ns, ctx.dev_ip, ctx.r_dc).await
+async fn probe_reflexive(dev: &Device, proto: Proto, bind: BindMode, ctx: &NatTestCtx) -> Result<ObservedAddr> {
+    probe_reflexive_addr(dev, proto, bind, ctx.dev_ip, ctx.r_dc).await
 }
 
-/// TCP sink: accept one connection, drain all bytes, exit.
-fn spawn_tcp_sink(server_ns: &str, addr: SocketAddr) -> thread::JoinHandle<Result<()>> {
+/// TCP sink: accept one connection, drain all bytes, exit — ns-free.
+/// Call via `handle.spawn_thread(move || tcp_sink(addr))`.
+fn tcp_sink(addr: SocketAddr) -> Result<()> {
     use std::io::Read as _;
-    let ns = server_ns.to_string();
-    spawn_closure_in_namespace_thread(ns, move || {
-        let listener = std::net::TcpListener::bind(addr).context("tcp sink bind")?;
-        let (mut stream, _) = listener.accept().context("tcp sink accept")?;
-        let mut buf = [0u8; 8192];
-        loop {
-            match stream.read(&mut buf) {
-                Ok(0) => break,
-                Ok(_) => continue,
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => continue,
-                Err(e) => return Err(e.into()),
-            }
+    let listener = std::net::TcpListener::bind(addr).context("tcp sink bind")?;
+    let (mut stream, _) = listener.accept().context("tcp sink accept")?;
+    let mut buf = [0u8; 8192];
+    loop {
+        match stream.read(&mut buf) {
+            Ok(0) => break,
+            Ok(_) => continue,
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => continue,
+            Err(e) => return Err(e.into()),
         }
-        Ok(())
-    })
+    }
+    Ok(())
 }
 
-/// Sends `bytes` bytes over TCP from `client_ns` to `server_addr`.
+/// Sends `bytes` bytes over TCP to `server_addr` — ns-free.
+/// Call via `handle.run_sync(move || tcp_measure_throughput(addr, bytes))`.
 /// Returns `(elapsed, kbit/s)`.
-fn tcp_measure_throughput(
-    client_ns: &str,
-    server_addr: SocketAddr,
-    bytes: usize,
-) -> Result<(Duration, u32)> {
+fn tcp_measure_throughput(server_addr: SocketAddr, bytes: usize) -> Result<(Duration, u32)> {
     use std::{
         io::{Read as _, Write as _},
         time::Instant,
     };
-    let ns = client_ns.to_string();
-    run_closure_in_namespace(&ns, move || {
-        let mut stream = std::net::TcpStream::connect_timeout(&server_addr, Duration::from_secs(5))
-            .context("tcp connect")?;
-        stream
-            .set_write_timeout(Some(Duration::from_secs(60)))
-            .context("set write timeout")?;
-        let chunk = vec![0u8; 4096];
-        let start = Instant::now();
-        let mut sent = 0;
-        while sent < bytes {
-            let n = chunk.len().min(bytes - sent);
-            stream.write_all(&chunk[..n]).context("tcp write")?;
-            sent += n;
-        }
-        stream
-            .shutdown(std::net::Shutdown::Write)
-            .context("tcp shutdown")?;
-        // Wait for server to acknowledge EOF.
-        let mut tmp = [0u8; 1];
-        let _ = stream.read(&mut tmp);
-        let elapsed = start.elapsed();
-        let kbps = ((bytes as u64 * 8) / (elapsed.as_millis() as u64).max(1)) as u32;
-        Ok((elapsed, kbps))
-    })
+    let mut stream = std::net::TcpStream::connect_timeout(&server_addr, Duration::from_secs(5))
+        .context("tcp connect")?;
+    stream
+        .set_write_timeout(Some(Duration::from_secs(60)))
+        .context("set write timeout")?;
+    let chunk = vec![0u8; 4096];
+    let start = Instant::now();
+    let mut sent = 0;
+    while sent < bytes {
+        let n = chunk.len().min(bytes - sent);
+        stream.write_all(&chunk[..n]).context("tcp write")?;
+        sent += n;
+    }
+    stream
+        .shutdown(std::net::Shutdown::Write)
+        .context("tcp shutdown")?;
+    // Wait for server to acknowledge EOF.
+    let mut tmp = [0u8; 1];
+    let _ = stream.read(&mut tmp);
+    let elapsed = start.elapsed();
+    let kbps = ((bytes as u64 * 8) / (elapsed.as_millis() as u64).max(1)) as u32;
+    Ok((elapsed, kbps))
 }
 
-/// Sends `total` UDP datagrams from `ns` to `target` and collects echoes.
+/// Sends `total` UDP datagrams to `target` and collects echoes — ns-free.
+/// Call via `handle.run_sync(move || udp_send_recv_count(target, total, payload, wait))`.
 /// Returns `(sent, received)`.
 fn udp_send_recv_count(
-    ns: &str,
     target: SocketAddr,
     total: usize,
     payload: usize,
     wait: Duration,
 ) -> Result<(usize, usize)> {
     use std::time::Instant;
-    let ns = ns.to_string();
-    run_closure_in_namespace(&ns, move || {
-        let sock = std::net::UdpSocket::bind("0.0.0.0:0").context("udp bind")?;
-        sock.set_read_timeout(Some(Duration::from_millis(200)))
-            .context("set timeout")?;
-        let buf = vec![0u8; payload];
-        let mut recv_buf = vec![0u8; payload + 64];
-        for _ in 0..total {
-            let _ = sock.send_to(&buf, target);
+    let sock = std::net::UdpSocket::bind("0.0.0.0:0").context("udp bind")?;
+    sock.set_read_timeout(Some(Duration::from_millis(200)))
+        .context("set timeout")?;
+    let buf = vec![0u8; payload];
+    let mut recv_buf = vec![0u8; payload + 64];
+    for _ in 0..total {
+        let _ = sock.send_to(&buf, target);
+    }
+    let deadline = Instant::now() + wait;
+    let mut received = 0usize;
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break;
         }
-        let deadline = Instant::now() + wait;
-        let mut received = 0usize;
-        loop {
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
-                break;
-            }
-            let timeout = remaining.min(Duration::from_millis(200));
-            sock.set_read_timeout(Some(timeout)).ok();
-            match sock.recv_from(&mut recv_buf) {
-                Ok(_) => received += 1,
-                Err(e)
-                    if matches!(
-                        e.kind(),
-                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
-                    ) => {}
-                Err(_) => break,
-            }
+        let timeout = remaining.min(Duration::from_millis(200));
+        sock.set_read_timeout(Some(timeout)).ok();
+        match sock.recv_from(&mut recv_buf) {
+            Ok(_) => received += 1,
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) => {}
+            Err(_) => break,
         }
-        Ok((total, received))
-    })
+    }
+    Ok((total, received))
 }
 
-/// Spawns an async TCP reflector (accept → "OBSERVED {peer}" → close) in `ns`.
+/// Spawns an async TCP reflector (accept → "OBSERVED {peer}" → close) — ns-free.
 ///
-/// Returns when the listener is bound. The task continues on the namespace's
-/// persistent async worker until the listener is closed.
-async fn spawn_tcp_reflector_in_ns(ns: &str, bind: SocketAddr) -> Result<()> {
+/// Returns when the listener is bound. The background task continues on the
+/// current tokio runtime. Call inside `handle.spawn(|_| async { spawn_tcp_reflector(b).await })`.
+async fn spawn_tcp_reflector(bind: SocketAddr) -> Result<()> {
     use tokio::io::AsyncWriteExt;
-    let ns = ns.to_string();
     let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<Result<()>>();
-    spawn_task_in_netns(&ns, move || async move {
+    tokio::spawn(async move {
         match tokio::net::TcpListener::bind(bind).await {
             Ok(listener) => {
                 let _ = ready_tx.send(Ok(()));
@@ -313,18 +321,18 @@ async fn build_nat_case(
     let dc_ip = dc.uplink_ip().context("no dc uplink ip")?;
     let r_dc = SocketAddr::new(IpAddr::V4(dc_ip), port_base);
     let r_ix = SocketAddr::new(IpAddr::V4(lab.ix_gw()), port_base + 1);
-    let dc_ns = dc.ns();
 
     // UDP reflector (managed by lab).
     dc.spawn_reflector(r_dc)?;
     lab.spawn_reflector_on_ix(r_ix)?;
 
-    // TCP reflector on the namespace's async worker.
-    spawn_tcp_reflector_in_ns(&dc_ns, r_dc).await?;
+    // TCP reflector on the DC namespace's async worker.
+    dc.spawn(move |_| async move { spawn_tcp_reflector(r_dc).await })
+        .await
+        .context("tcp reflector task panicked")??;
 
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    let dev_ns = dev.ns();
     let dev_ip = dev.ip();
     let expected_ip = match (nat_mode, wiring) {
         (_, UplinkWiring::ViaCgnatIsp) => lab
@@ -338,7 +346,7 @@ async fn build_nat_case(
     Ok((
         lab,
         NatTestCtx {
-            dev_ns,
+            dev,
             dev_ip,
             expected_ip,
             r_dc,
@@ -366,14 +374,16 @@ async fn build_dual_nat_lab(
 
     let dc_ip = dc.uplink_ip().context("no dc uplink ip")?;
     let reflector = SocketAddr::new(IpAddr::V4(dc_ip), port_base);
-    let dc_ns = dc.ns();
 
     dc.spawn_reflector(reflector)?;
-    spawn_tcp_reflector_in_ns(&dc_ns, reflector).await?;
+    dc.spawn(move |_| async move { spawn_tcp_reflector(reflector).await })
+        .await
+        .context("tcp reflector task panicked")??;
 
     tokio::time::sleep(Duration::from_millis(200)).await;
     Ok(DualNatLab {
-        lab,
+        _lab: lab,
+        dc,
         dev,
         nat_a,
         nat_b,
@@ -432,14 +442,13 @@ async fn build_single_nat_case(
     Ok((lab, dev_ns, r_dc, r_ix, expected_ip))
 }
 
-/// Spawns an async TCP echo server in `ns` that loops accepting connections,
-/// echoes each one's payload, and continues until the namespace is torn down.
-/// Returns when the listener is bound.
-async fn spawn_tcp_echo_server(ns: &str, bind: SocketAddr) -> Result<()> {
+/// Spawns an async TCP echo server that loops accepting connections,
+/// echoes each one's payload, and continues until the runtime shuts down — ns-free.
+/// Returns when the listener is bound. Call inside `handle.spawn(|_| async { spawn_tcp_echo_server(b).await })`.
+async fn spawn_tcp_echo_server(bind: SocketAddr) -> Result<()> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    let ns = ns.to_string();
     let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<Result<()>>();
-    spawn_task_in_netns(&ns, move || async move {
+    tokio::spawn(async move {
         match tokio::net::TcpListener::bind(bind).await {
             Ok(listener) => {
                 let _ = ready_tx.send(Ok(()));
@@ -463,13 +472,12 @@ async fn spawn_tcp_echo_server(ns: &str, bind: SocketAddr) -> Result<()> {
         .map_err(|_| anyhow!("tcp echo server task dropped before ready"))?
 }
 
-/// Spawns an async TCP echo server in `ns` that accepts one connection, echoes bytes, then stops.
-/// Returns when the listener is bound. The task runs on the namespace's async worker.
-async fn spawn_tcp_echo_in(ns: &str, bind: SocketAddr) -> Result<()> {
+/// Spawns an async TCP echo server that accepts one connection, echoes bytes, then stops — ns-free.
+/// Returns when the listener is bound. Call inside `handle.spawn(|_| async { spawn_tcp_echo_in(b).await })`.
+async fn spawn_tcp_echo_in(bind: SocketAddr) -> Result<()> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    let ns = ns.to_string();
     let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<Result<()>>();
-    spawn_task_in_netns(&ns, move || async move {
+    tokio::spawn(async move {
         match tokio::net::TcpListener::bind(bind).await {
             Ok(listener) => {
                 let _ = ready_tx.send(Ok(()));
@@ -490,32 +498,28 @@ async fn spawn_tcp_echo_in(ns: &str, bind: SocketAddr) -> Result<()> {
         .map_err(|_| anyhow!("tcp echo task dropped before ready"))?
 }
 
-async fn tcp_roundtrip_in_ns(ns: &str, target: SocketAddr) -> Result<()> {
+/// TCP roundtrip — ns-free async. Call inside `handle.spawn(|_| async { tcp_roundtrip(t).await })`.
+async fn tcp_roundtrip(target: SocketAddr) -> Result<()> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    let ns = ns.to_string();
     let timeout = Duration::from_millis(500);
-    spawn_task_in_netns(&ns, move || async move {
-        let mut stream = tokio::time::timeout(timeout, tokio::net::TcpStream::connect(target))
-            .await
-            .context("tcp connect timeout")?
-            .context("tcp connect")?;
-        let payload = b"ping";
-        tokio::time::timeout(timeout, stream.write_all(payload))
-            .await
-            .context("tcp write timeout")?
-            .context("tcp write")?;
-        let mut buf = [0u8; 4];
-        tokio::time::timeout(timeout, stream.read_exact(&mut buf))
-            .await
-            .context("tcp read timeout")?
-            .context("tcp read")?;
-        if &buf != payload {
-            bail!("tcp echo mismatch: {:?}", buf);
-        }
-        Ok::<_, anyhow::Error>(())
-    })
-    .await
-    .map_err(|_| anyhow!("tcp_roundtrip: netns task cancelled"))?
+    let mut stream = tokio::time::timeout(timeout, tokio::net::TcpStream::connect(target))
+        .await
+        .context("tcp connect timeout")?
+        .context("tcp connect")?;
+    let payload = b"ping";
+    tokio::time::timeout(timeout, stream.write_all(payload))
+        .await
+        .context("tcp write timeout")?
+        .context("tcp write")?;
+    let mut buf = [0u8; 4];
+    tokio::time::timeout(timeout, stream.read_exact(&mut buf))
+        .await
+        .context("tcp read timeout")?
+        .context("tcp read")?;
+    if &buf != payload {
+        bail!("tcp echo mismatch: {:?}", buf);
+    }
+    Ok(())
 }
 
 // ── Builder-API NAT tests ────────────────────────────────────────────
@@ -777,9 +781,9 @@ async fn smoke_ping_gateway() -> Result<()> {
         .build()
         .await?;
 
-    let dev_ns = dev.ns();
     let lan_gw = home.downstream_gw().context("no downstream gw")?;
-    ping_in_ns(&dev_ns, &lan_gw.to_string())?;
+    let lan_gw_str = lan_gw.to_string();
+    dev.run_sync(move || ping(&lan_gw_str))?;
     Ok(())
 }
 
@@ -808,8 +812,7 @@ async fn smoke_udp_dc_roundtrip() -> Result<()> {
 
     tokio::time::sleep(Duration::from_millis(250)).await;
 
-    let dev_ns = dev.ns();
-    let _ = udp_roundtrip_in_ns(&dev_ns, r)?;
+    let _ = dev.run_sync(move || crate::test_utils::udp_roundtrip(r))?;
     Ok(())
 }
 
@@ -834,13 +837,15 @@ async fn smoke_tcp_dc_roundtrip() -> Result<()> {
 
     let dc_ip = dc.uplink_ip().context("no uplink ip")?;
     let bind = SocketAddr::new(IpAddr::V4(dc_ip), 9000);
-    let dc_ns = dc.ns();
-    spawn_tcp_echo_in(&dc_ns, bind).await?;
+    dc.spawn(move |_| async move { spawn_tcp_echo_in(bind).await })
+        .await
+        .context("tcp echo task panicked")??;
 
     tokio::time::sleep(Duration::from_millis(250)).await;
 
-    let dev_ns = dev.ns();
-    tcp_roundtrip_in_ns(&dev_ns, bind).await?;
+    dev.spawn(move |_| async move { tcp_roundtrip(bind).await })
+        .await
+        .context("tcp roundtrip task panicked")??;
     Ok(())
 }
 
@@ -857,9 +862,9 @@ async fn smoke_ping_home_to_isp() -> Result<()> {
         .build()
         .await?;
 
-    let home_ns = home.ns();
     let isp_wan_ip = isp.downstream_gw().context("no downstream gw")?;
-    ping_in_ns(&home_ns, &isp_wan_ip.to_string())?;
+    let isp_wan_str = isp_wan_ip.to_string();
+    home.run_sync(move || ping(&isp_wan_str))?;
     Ok(())
 }
 
@@ -871,10 +876,11 @@ async fn smoke_ping_isp_to_ix_and_dc() -> Result<()> {
     let isp = lab.add_router("isp1").region("eu").build().await?;
     let dc = lab.add_router("dc1").region("eu").build().await?;
 
-    let isp_ns = isp.ns();
-    ping_in_ns(&isp_ns, &lab.ix_gw().to_string())?;
+    let ix_gw_str = lab.ix_gw().to_string();
+    isp.run_sync(move || ping(&ix_gw_str))?;
     let dc_ip = dc.uplink_ip().context("no dc uplink ip")?;
-    ping_in_ns(&isp_ns, &dc_ip.to_string())?;
+    let dc_ip_str = dc_ip.to_string();
+    isp.run_sync(move || ping(&dc_ip_str))?;
     Ok(())
 }
 
@@ -913,11 +919,10 @@ async fn smoke_nat_homes_can_ping_public_relay_device() -> Result<()> {
         .await?;
 
     let relay_ip = relay.ip();
-    let provider_ns = provider.ns();
-    let fetcher_ns = fetcher.ns();
-
-    ping_in_ns(&provider_ns, &relay_ip.to_string())?;
-    ping_in_ns(&fetcher_ns, &relay_ip.to_string())?;
+    let relay_ip_str = relay_ip.to_string();
+    let relay_ip_str2 = relay_ip_str.clone();
+    provider.run_sync(move || ping(&relay_ip_str))?;
+    fetcher.run_sync(move || ping(&relay_ip_str2))?;
     Ok(())
 }
 
@@ -940,12 +945,13 @@ async fn nat_matrix_public_connectivity_and_reflexive_ip() -> Result<()> {
     for (mode, wiring) in cases {
         let port_base = 10000 + case_idx * 10;
         case_idx = case_idx.saturating_add(1);
-        let (lab, dev_ns, r_dc, _r_ix, expected_ip) =
+        let (lab, _dev_ns, r_dc, _r_ix, expected_ip) =
             build_single_nat_case(mode, wiring, port_base).await?;
-
-        ping_in_ns(&dev_ns, &r_dc.ip().to_string())?;
-        let _ = udp_roundtrip_in_ns(&dev_ns, r_dc)?;
-        let observed = lab.device_by_name("dev").unwrap().probe_udp_mapping(r_dc)?;
+        let dev = lab.device_by_name("dev").unwrap();
+        let r_dc_ip_str = r_dc.ip().to_string();
+        dev.run_sync(move || ping(&r_dc_ip_str))?;
+        let _ = dev.run_sync(move || crate::test_utils::udp_roundtrip(r_dc))?;
+        let observed = dev.probe_udp_mapping(r_dc)?;
         assert_eq!(
             observed.observed.ip(),
             IpAddr::V4(expected_ip),
@@ -1052,24 +1058,30 @@ async fn nat_private_reachability_isolated_public_reachable() -> Result<()> {
         .build()
         .await?;
 
-    let a1_ns = a1.ns();
-    let b1_ns = b1.ns();
     let a2_ip = a2.ip();
     let b1_ip = b1.ip();
     let a1_ip = a1.ip();
     let relay_ip = relay.ip();
 
-    ping_in_ns(&a1_ns, &a2_ip.to_string())?;
-    ping_fails_in_ns(&a1_ns, &b1_ip.to_string())?;
-    ping_fails_in_ns(&b1_ns, &a1_ip.to_string())?;
+    let a2_ip_str = a2_ip.to_string();
+    let b1_ip_str = b1_ip.to_string();
+    let a1_ip_str = a1_ip.to_string();
+    let relay_ip_str = relay_ip.to_string();
+    let relay_ip_str2 = relay_ip_str.clone();
 
-    ping_in_ns(&a1_ns, &relay_ip.to_string())?;
-    ping_in_ns(&b1_ns, &relay_ip.to_string())?;
+    a1.run_sync(move || ping(&a2_ip_str))?;
+    a1.run_sync(move || ping_fails(&b1_ip_str))?;
+    b1.run_sync(move || ping_fails(&a1_ip_str))?;
+
+    a1.run_sync(move || ping(&relay_ip_str))?;
+    b1.run_sync(move || ping(&relay_ip_str2))?;
 
     let nat_a_public = nat_a.uplink_ip().context("no uplink ip")?;
     let nat_b_public = nat_b.uplink_ip().context("no uplink ip")?;
-    ping_in_ns(&a1_ns, &nat_b_public.to_string())?;
-    ping_in_ns(&b1_ns, &nat_a_public.to_string())?;
+    let nat_b_str = nat_b_public.to_string();
+    let nat_a_str = nat_a_public.to_string();
+    a1.run_sync(move || ping(&nat_b_str))?;
+    b1.run_sync(move || ping(&nat_a_str))?;
 
     let dc_ip = dc.uplink_ip().context("no dc uplink ip")?;
     let reflector = SocketAddr::new(IpAddr::V4(dc_ip), 12000);
@@ -1108,9 +1120,8 @@ async fn smoke_device_to_device_same_lan() -> Result<()> {
         .build()
         .await?;
 
-    let dev1_ns = dev1.ns();
-    let dev2_ip = dev2.ip();
-    ping_in_ns(&dev1_ns, &dev2_ip.to_string())?;
+    let dev2_ip_str = dev2.ip().to_string();
+    dev1.run_sync(move || ping(&dev2_ip_str))?;
     Ok(())
 }
 
@@ -1144,10 +1155,8 @@ async fn latency_directional_between_regions() -> Result<()> {
 
     tokio::time::sleep(Duration::from_millis(250)).await;
 
-    let dev_eu_ns = dev_eu.ns();
-    let dev_us_ns = dev_us.ns();
-    let rtt_eu_to_us = udp_rtt_in_ns(&dev_eu_ns, r_us)?;
-    let rtt_us_to_eu = udp_rtt_in_ns(&dev_us_ns, r_eu)?;
+    let rtt_eu_to_us = dev_eu.run_sync(move || crate::test_utils::udp_rtt(r_us))?;
+    let rtt_us_to_eu = dev_us.run_sync(move || crate::test_utils::udp_rtt(r_eu))?;
     let expected = Duration::from_millis(100);
 
     assert!(
@@ -1186,8 +1195,7 @@ async fn latency_inter_region_dc_to_dc() -> Result<()> {
     tokio::time::sleep(Duration::from_millis(250)).await;
 
     let dev = lab.device_by_name("dev1").context("missing dev1")?;
-    let dev_ns = dev.ns();
-    let rtt = udp_rtt_in_ns(&dev_ns, r)?;
+    let rtt = dev.run_sync(move || crate::test_utils::udp_rtt(r))?;
     assert!(
         rtt >= Duration::from_millis(90),
         "expected inter-region RTT >= 90ms, got {rtt:?}"
@@ -1217,8 +1225,7 @@ async fn latency_device_impair_adds_delay() -> Result<()> {
         tokio::time::sleep(Duration::from_millis(250)).await;
 
         let dev = lab.device_by_name("dev1").context("missing dev1")?;
-        let dev_ns = dev.ns();
-        udp_rtt_in_ns(&dev_ns, r)
+        dev.run_sync(move || crate::test_utils::udp_rtt(r))
     }
 
     let base = measure(None).await?;
@@ -1258,8 +1265,7 @@ async fn latency_manual_impair_applies() -> Result<()> {
     dc_us.spawn_reflector(r)?;
     tokio::time::sleep(Duration::from_millis(250)).await;
 
-    let dev_ns = dev.ns();
-    let rtt = udp_rtt_in_ns(&dev_ns, r)?;
+    let rtt = dev.run_sync(move || crate::test_utils::udp_rtt(r))?;
     assert!(
         rtt >= Duration::from_millis(90),
         "expected manual latency >= 90ms RTT, got {rtt:?}"
@@ -1324,20 +1330,19 @@ async fn dynamic_set_impair_changes_rtt() -> Result<()> {
     dc.spawn_reflector(r)?;
     tokio::time::sleep(Duration::from_millis(250)).await;
 
-    let dev_ns = dev.ns();
-    let base_rtt = udp_rtt_in_ns(&dev_ns, r)?;
+    let base_rtt = dev.run_sync(move || crate::test_utils::udp_rtt(r))?;
 
     let dev_handle = lab.device_by_name("dev1").unwrap();
     let default_if = dev_handle.default_iface().name().to_string();
     dev_handle.set_impair(&default_if, Some(Impair::Mobile))?;
-    let impaired_rtt = udp_rtt_in_ns(&dev_ns, r)?;
+    let impaired_rtt = dev.run_sync(move || crate::test_utils::udp_rtt(r))?;
     assert!(
         impaired_rtt >= base_rtt + Duration::from_millis(40),
         "expected impaired RTT >= base + 40ms, base={base_rtt:?} impaired={impaired_rtt:?}"
     );
 
     dev_handle.set_impair(&default_if, None)?;
-    let recovered_rtt = udp_rtt_in_ns(&dev_ns, r)?;
+    let recovered_rtt = dev.run_sync(move || crate::test_utils::udp_rtt(r))?;
     assert!(
         recovered_rtt < base_rtt + Duration::from_millis(30),
         "expected recovered RTT close to base, base={base_rtt:?} recovered={recovered_rtt:?}"
@@ -1358,19 +1363,25 @@ async fn dynamic_link_down_up_connectivity() -> Result<()> {
         .await?;
 
     let gw = dc.downstream_gw().context("no downstream gw")?;
-    let dev_ns = dev.ns();
+    let gw_str = gw.to_string();
 
-    ping_in_ns(&dev_ns, &gw.to_string())?;
+    {
+        let gw_str = gw_str.clone();
+        dev.run_sync(move || ping(&gw_str))?;
+    }
 
     lab.device_by_name("dev1")
         .unwrap()
         .link_down("eth0")
         .await?;
-    let result = ping_in_ns(&dev_ns, &gw.to_string());
-    assert!(result.is_err(), "expected ping to fail after link_down");
+    {
+        let gw_str = gw_str.clone();
+        let result = dev.run_sync(move || ping(&gw_str));
+        assert!(result.is_err(), "expected ping to fail after link_down");
+    }
 
     lab.device_by_name("dev1").unwrap().link_up("eth0").await?;
-    ping_in_ns(&dev_ns, &gw.to_string())?;
+    dev.run_sync(move || ping(&gw_str))?;
     Ok(())
 }
 
@@ -1394,14 +1405,13 @@ async fn dynamic_switch_route_changes_path() -> Result<()> {
     dc.spawn_reflector(r)?;
     tokio::time::sleep(Duration::from_millis(250)).await;
 
-    let dev_ns = dev.ns();
-    let fast_rtt = udp_rtt_in_ns(&dev_ns, r)?;
+    let fast_rtt = dev.run_sync(move || crate::test_utils::udp_rtt(r))?;
 
     lab.device_by_name("dev1")
         .unwrap()
         .switch_route("eth1")
         .await?;
-    let slow_rtt = udp_rtt_in_ns(&dev_ns, r)?;
+    let slow_rtt = dev.run_sync(move || crate::test_utils::udp_rtt(r))?;
 
     assert!(
         slow_rtt >= fast_rtt + Duration::from_millis(80),
@@ -1481,12 +1491,15 @@ async fn tcp_reflector_basic() -> Result<()> {
 
     let dc_ip = dc.uplink_ip().context("no dc uplink ip")?;
     let r = SocketAddr::new(IpAddr::V4(dc_ip), 13_000);
-    let dc_ns = dc.ns();
-    let dev_ns = dev.ns();
 
-    spawn_tcp_reflector_in_ns(&dc_ns, r).await?;
+    dc.spawn(move |_| async move { spawn_tcp_reflector(r).await })
+        .await
+        .context("tcp reflector task panicked")??;
 
-    let obs = probe_tcp(&dev_ns, r, "0.0.0.0:0".parse().unwrap()).await?;
+    let obs = dev
+        .spawn(move |_| async move { probe_tcp(r).await })
+        .await
+        .context("probe_tcp task panicked")??;
     assert_ne!(obs.observed.port(), 0, "expected non-zero port");
     Ok(())
 }
@@ -1518,7 +1531,7 @@ async fn reflexive_ip_all_combos() -> Result<()> {
     for (mode, wiring, proto, bind) in combos {
         let result: Result<()> = async {
             let (_lab, ctx) = build_nat_case(mode, wiring, port_base).await?;
-            let obs = probe_reflexive(proto, bind, &ctx).await?;
+            let obs = probe_reflexive(&ctx.dev, proto, bind, &ctx).await?;
             if obs.observed.ip() != IpAddr::V4(ctx.expected_ip) {
                 bail!("expected {} got {}", ctx.expected_ip, obs.observed.ip());
             }
@@ -1615,11 +1628,12 @@ async fn port_mapping_edm_changes() -> Result<()> {
 async fn switch_route_reflexive_ip() -> Result<()> {
     use strum::IntoEnumIterator;
     let DualNatLab {
-        lab: _,
+        _lab: _,
         dev,
         nat_a,
         nat_b,
         reflector,
+        dc: _,
     } = build_dual_nat_lab(
         NatMode::DestinationIndependent,
         NatMode::DestinationDependent,
@@ -1627,7 +1641,6 @@ async fn switch_route_reflexive_ip() -> Result<()> {
     )
     .await?;
 
-    let dev_ns = dev.ns();
     let wan_a = nat_a.uplink_ip().context("no uplink ip")?;
     let wan_b = nat_b.uplink_ip().context("no uplink ip")?;
 
@@ -1637,7 +1650,7 @@ async fn switch_route_reflexive_ip() -> Result<()> {
             // SpecificIp must use the IP of the currently-active interface;
             // device_ip() returns the default_via interface IP, which changes on switch_route.
             let dev_ip = dev.ip();
-            let obs = probe_reflexive_addr(proto, bind, &dev_ns, dev_ip, reflector).await;
+            let obs = probe_reflexive_addr(&dev, proto, bind, dev_ip, reflector).await;
             match obs {
                 Ok(o) if o.observed.ip() == IpAddr::V4(wan_a) => {}
                 Ok(o) => failures.push(format!(
@@ -1651,7 +1664,7 @@ async fn switch_route_reflexive_ip() -> Result<()> {
             tokio::time::sleep(Duration::from_millis(50)).await;
 
             let dev_ip = dev.ip();
-            let obs = probe_reflexive_addr(proto, bind, &dev_ns, dev_ip, reflector).await;
+            let obs = probe_reflexive_addr(&dev, proto, bind, dev_ip, reflector).await;
             match obs {
                 Ok(o) if o.observed.ip() == IpAddr::V4(wan_b) => {}
                 Ok(o) => failures.push(format!(
@@ -1675,7 +1688,8 @@ async fn switch_route_reflexive_ip() -> Result<()> {
 #[traced_test]
 async fn switch_route_multiple() -> Result<()> {
     let DualNatLab {
-        lab: _,
+        _lab: _,
+        dc: _,
         dev,
         nat_a,
         nat_b,
@@ -1687,11 +1701,10 @@ async fn switch_route_multiple() -> Result<()> {
     )
     .await?;
 
-    let dev_ns = dev.ns();
     let wan_a = nat_a.uplink_ip().context("no uplink ip")?;
     let wan_b = nat_b.uplink_ip().context("no uplink ip")?;
 
-    let o = udp_roundtrip_in_ns(&dev_ns, reflector)?;
+    let o = dev.run_sync(move || crate::test_utils::udp_roundtrip(reflector))?;
     assert_eq!(
         o.observed.ip(),
         IpAddr::V4(wan_a),
@@ -1700,7 +1713,7 @@ async fn switch_route_multiple() -> Result<()> {
 
     dev.switch_route("eth1").await?;
     tokio::time::sleep(Duration::from_millis(50)).await;
-    let o = udp_roundtrip_in_ns(&dev_ns, reflector)?;
+    let o = dev.run_sync(move || crate::test_utils::udp_roundtrip(reflector))?;
     assert_eq!(
         o.observed.ip(),
         IpAddr::V4(wan_b),
@@ -1709,7 +1722,7 @@ async fn switch_route_multiple() -> Result<()> {
 
     dev.switch_route("eth0").await?;
     tokio::time::sleep(Duration::from_millis(50)).await;
-    let o = udp_roundtrip_in_ns(&dev_ns, reflector)?;
+    let o = dev.run_sync(move || crate::test_utils::udp_roundtrip(reflector))?;
     assert_eq!(
         o.observed.ip(),
         IpAddr::V4(wan_a),
@@ -1723,7 +1736,8 @@ async fn switch_route_multiple() -> Result<()> {
 #[traced_test]
 async fn switch_route_tcp_roundtrip() -> Result<()> {
     let DualNatLab {
-        lab,
+        _lab: _,
+        dc,
         dev,
         nat_a: _,
         nat_b: _,
@@ -1735,19 +1749,22 @@ async fn switch_route_tcp_roundtrip() -> Result<()> {
     )
     .await?;
 
-    let dc = lab.router_by_name("dc").context("missing dc")?;
     let dc_ip = dc.uplink_ip().context("no dc uplink ip")?;
-    let dc_ns = dc.ns();
-    let dev_ns = dev.ns();
 
     let r = SocketAddr::new(IpAddr::V4(dc_ip), 16_410);
-    spawn_tcp_echo_server(&dc_ns, r).await?;
+    dc.spawn(move |_| async move { spawn_tcp_echo_server(r).await })
+        .await
+        .context("tcp echo server task panicked")??;
     tokio::time::sleep(Duration::from_millis(200)).await;
-    tcp_roundtrip_in_ns(&dev_ns, r).await?;
+    dev.spawn(move |_| async move { tcp_roundtrip(r).await })
+        .await
+        .context("tcp roundtrip task panicked")??;
 
     dev.switch_route("eth1").await?;
     tokio::time::sleep(Duration::from_millis(100)).await;
-    tcp_roundtrip_in_ns(&dev_ns, r).await?;
+    dev.spawn(move |_| async move { tcp_roundtrip(r).await })
+        .await
+        .context("tcp roundtrip task panicked")??;
 
     Ok(())
 }
@@ -1756,7 +1773,8 @@ async fn switch_route_tcp_roundtrip() -> Result<()> {
 #[traced_test]
 async fn switch_route_udp_reflexive_change() -> Result<()> {
     let DualNatLab {
-        lab: _,
+        _lab: _,
+        dc: _,
         dev,
         nat_a,
         nat_b,
@@ -1768,11 +1786,10 @@ async fn switch_route_udp_reflexive_change() -> Result<()> {
     )
     .await?;
 
-    let dev_ns = dev.ns();
     let wan_a = nat_a.uplink_ip().context("no uplink ip")?;
     let wan_b = nat_b.uplink_ip().context("no uplink ip")?;
 
-    let before = udp_roundtrip_in_ns(&dev_ns, reflector)?;
+    let before = dev.run_sync(move || crate::test_utils::udp_roundtrip(reflector))?;
     assert_eq!(
         before.observed.ip(),
         IpAddr::V4(wan_a),
@@ -1782,7 +1799,7 @@ async fn switch_route_udp_reflexive_change() -> Result<()> {
     dev.switch_route("eth1").await?;
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    let after = udp_roundtrip_in_ns(&dev_ns, reflector)?;
+    let after = dev.run_sync(move || crate::test_utils::udp_roundtrip(reflector))?;
     assert_eq!(
         after.observed.ip(),
         IpAddr::V4(wan_b),
@@ -1816,8 +1833,6 @@ async fn link_down_up_connectivity() -> Result<()> {
 
             let dc_ip = dc.uplink_ip().context("no dc uplink ip")?;
             let r = SocketAddr::new(IpAddr::V4(dc_ip), port_base);
-            let dc_ns = dc.ns();
-            let dev_ns = dev.ns();
             let bind = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0);
 
             let dev_handle = lab.device_by_name("dev").unwrap();
@@ -1825,30 +1840,39 @@ async fn link_down_up_connectivity() -> Result<()> {
                 Proto::Udp => {
                     dc.spawn_reflector(r)?;
                     tokio::time::sleep(Duration::from_millis(200)).await;
-                    probe_udp(&dev_ns, r, bind).context("before link_down")?;
+                    dev.run_sync(move || probe_udp_from(r, bind)).context("before link_down")?;
                     dev_handle.link_down("eth0").await?;
-                    if probe_udp(&dev_ns, r, bind).is_ok() {
+                    if dev.run_sync(move || probe_udp_from(r, bind)).is_ok() {
                         bail!("probe should fail after link_down");
                     }
                     dev_handle.link_up("eth0").await?;
                     tokio::time::sleep(Duration::from_millis(100)).await;
-                    probe_udp(&dev_ns, r, bind).context("after link_up")?;
+                    dev.run_sync(move || probe_udp_from(r, bind)).context("after link_up")?;
                 }
                 Proto::Tcp => {
                     // Persistent echo server: handles all connections for the whole test.
-                    spawn_tcp_echo_server(&dc_ns, r).await?;
-                    tokio::time::sleep(Duration::from_millis(200)).await;
-                    tcp_roundtrip_in_ns(&dev_ns, r)
+                    dc.spawn(move |_| async move { spawn_tcp_echo_server(r).await })
                         .await
+                        .context("tcp echo server task panicked")??;
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                    dev.spawn(move |_| async move { tcp_roundtrip(r).await })
+                        .await
+                        .context("tcp roundtrip panicked")?
                         .context("before link_down")?;
                     dev_handle.link_down("eth0").await?;
-                    if tcp_roundtrip_in_ns(&dev_ns, r).await.is_ok() {
+                    if dev
+                        .spawn(move |_| async move { tcp_roundtrip(r).await })
+                        .await
+                        .map(|r| r.is_ok())
+                        .unwrap_or(false)
+                    {
                         bail!("tcp should fail after link_down");
                     }
                     dev_handle.link_up("eth0").await?;
                     tokio::time::sleep(Duration::from_millis(200)).await;
-                    tcp_roundtrip_in_ns(&dev_ns, r)
+                    dev.spawn(move |_| async move { tcp_roundtrip(r).await })
                         .await
+                        .context("tcp roundtrip panicked")?
                         .context("after link_up")?;
                 }
             }
@@ -1890,7 +1914,7 @@ async fn nat_rebind_mode_port() -> Result<()> {
         let result: Result<()> = async {
             let (lab, ctx) = build_nat_case(from, UplinkWiring::DirectIx, port_base).await?;
             let nat_handle = lab.router_by_name("nat").context("missing nat")?;
-            nat_handle.set_nat_mode(to).await?;
+            nat_handle.set_nat_mode(to)?;
             tokio::time::sleep(Duration::from_millis(50)).await;
             let dev = lab.device_by_name("dev").unwrap();
             let o1 = dev.probe_udp_mapping(ctx.r_dc)?;
@@ -1932,13 +1956,11 @@ async fn nat_rebind_mode_ip() -> Result<()> {
             let (lab, ctx) = build_nat_case(from, UplinkWiring::DirectIx, port_base).await?;
             let nat_handle = lab.router_by_name("nat").context("missing nat")?;
             let wan_ip = nat_handle.uplink_ip().context("no uplink ip")?;
-            nat_handle.set_nat_mode(to).await?;
+            nat_handle.set_nat_mode(to)?;
             tokio::time::sleep(Duration::from_millis(50)).await;
-            let o = probe_udp(
-                &ctx.dev_ns,
-                ctx.r_dc,
-                SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0),
-            )?;
+            let bind = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0);
+            let r_dc = ctx.r_dc;
+            let o = ctx.dev.run_sync(move || probe_udp_from(r_dc, bind))?;
             let expected = match to {
                 NatMode::DestinationIndependent => IpAddr::V4(wan_ip),
                 NatMode::None => IpAddr::V4(ctx.dev_ip),
@@ -1981,10 +2003,11 @@ async fn nat_rebind_conntrack_flush() -> Result<()> {
     .await?;
     let nat_handle = lab.router_by_name("nat").context("missing nat")?;
     let bind = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0);
-    let o1 = probe_udp(&ctx.dev_ns, ctx.r_dc, bind)?;
+    let r_dc = ctx.r_dc;
+    let o1 = ctx.dev.run_sync(move || probe_udp_from(r_dc, bind))?;
     nat_handle.rebind_nats()?;
     tokio::time::sleep(Duration::from_millis(50)).await;
-    let o2 = probe_udp(&ctx.dev_ns, ctx.r_dc, bind)?;
+    let o2 = ctx.dev.run_sync(move || probe_udp_from(r_dc, bind))?;
     assert_ne!(
         o1.observed.port(),
         o2.observed.port(),
@@ -2021,10 +2044,8 @@ async fn devices_same_nat_share_ip() -> Result<()> {
     dc.spawn_reflector(r)?;
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    let ns_a = dev_a.ns();
-    let ns_b = dev_b.ns();
-    let oa = udp_roundtrip_in_ns(&ns_a, r)?;
-    let ob = udp_roundtrip_in_ns(&ns_b, r)?;
+    let oa = dev_a.run_sync(move || crate::test_utils::udp_roundtrip(r))?;
+    let ob = dev_b.run_sync(move || crate::test_utils::udp_roundtrip(r))?;
     assert_eq!(
         oa.observed.ip(),
         ob.observed.ip(),
@@ -2064,18 +2085,20 @@ async fn devices_diff_nat_isolate() -> Result<()> {
     dc.spawn_reflector(r)?;
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    let ns_a = dev_a.ns();
-    let ns_b = dev_b.ns();
     let ip_a = dev_a.ip();
     let ip_b = dev_b.ip();
+    let ip_a_str = ip_a.to_string();
+    let ip_b_str = ip_b.to_string();
+    let dc_ip_str = dc_ip.to_string();
+    let dc_ip_str2 = dc_ip_str.clone();
 
-    ping_fails_in_ns(&ns_a, &ip_b.to_string())?;
-    ping_fails_in_ns(&ns_b, &ip_a.to_string())?;
-    ping_in_ns(&ns_a, &dc_ip.to_string())?;
-    ping_in_ns(&ns_b, &dc_ip.to_string())?;
+    dev_a.run_sync(move || ping_fails(&ip_b_str))?;
+    dev_b.run_sync(move || ping_fails(&ip_a_str))?;
+    dev_a.run_sync(move || ping(&dc_ip_str))?;
+    dev_b.run_sync(move || ping(&dc_ip_str2))?;
 
-    let oa = udp_roundtrip_in_ns(&ns_a, r)?;
-    let ob = udp_roundtrip_in_ns(&ns_b, r)?;
+    let oa = dev_a.run_sync(move || crate::test_utils::udp_roundtrip(r))?;
+    let ob = dev_b.run_sync(move || crate::test_utils::udp_roundtrip(r))?;
     assert_ne!(
         oa.observed.ip(),
         ob.observed.ip(),
@@ -2116,12 +2139,10 @@ async fn rate_limit_tcp_upload() -> Result<()> {
 
     let dc_ip = dc.uplink_ip().context("no dc uplink ip")?;
     let addr = SocketAddr::new(IpAddr::V4(dc_ip), 17_300);
-    let dc_ns = dc.ns();
-    let dev_ns = dev.ns();
 
-    let sink = spawn_tcp_sink(&dc_ns, addr);
+    let sink = dc.spawn_thread(move || tcp_sink(addr))?;
     tokio::time::sleep(Duration::from_millis(100)).await;
-    let (_elapsed, kbps) = tcp_measure_throughput(&dev_ns, addr, 256 * 1024)?;
+    let (_elapsed, kbps) = dev.run_sync(move || tcp_measure_throughput(addr, 256 * 1024))?;
     join_sink(sink)?;
 
     assert!(kbps >= 1400, "expected ≥ 1400 kbit/s, got {kbps}");
@@ -2151,13 +2172,11 @@ async fn rate_limit_tcp_download() -> Result<()> {
 
     let dev_ip = dev_id.ip();
     let addr = SocketAddr::new(IpAddr::V4(dev_ip), 17_400);
-    let dev_ns = dev_id.ns();
-    let dc_ns = dc.ns();
 
     // Client (DC) writes to server (device) — bytes travel the download path.
-    let sink = spawn_tcp_sink(&dev_ns, addr);
+    let sink = dev_id.spawn_thread(move || tcp_sink(addr))?;
     tokio::time::sleep(Duration::from_millis(100)).await;
-    let (_elapsed, kbps) = tcp_measure_throughput(&dc_ns, addr, 256 * 1024)?;
+    let (_elapsed, kbps) = dc.run_sync(move || tcp_measure_throughput(addr, 256 * 1024))?;
     join_sink(sink)?;
 
     assert!(kbps >= 1400, "expected ≥ 1400 kbit/s, got {kbps}");
@@ -2187,13 +2206,12 @@ async fn rate_limit_udp_upload() -> Result<()> {
 
     let dc_ip = dc.uplink_ip().context("no dc uplink ip")?;
     let r = SocketAddr::new(IpAddr::V4(dc_ip), 17_500);
-    let dev_ns = dev.ns();
     dc.spawn_reflector(r)?;
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     // ~300 KB at 2 Mbit/s ≈ 1.2 s.
     let start = Instant::now();
-    udp_send_recv_count(&dev_ns, r, 300, 1024, Duration::from_secs(5))?;
+    dev.run_sync(move || udp_send_recv_count(r, 300, 1024, Duration::from_secs(5)))?;
     let elapsed = start.elapsed();
     assert!(
         elapsed >= Duration::from_millis(1000),
@@ -2225,13 +2243,12 @@ async fn rate_limit_udp_download() -> Result<()> {
 
     let dc_ip = dc.uplink_ip().context("no dc uplink ip")?;
     let r = SocketAddr::new(IpAddr::V4(dc_ip), 17_600);
-    let dev_ns = dev_id.ns();
     dc.spawn_reflector(r)?;
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     // Replies travel the download path (DC → device) which is throttled.
     let start = Instant::now();
-    udp_send_recv_count(&dev_ns, r, 300, 1024, Duration::from_secs(5))?;
+    dev_id.run_sync(move || udp_send_recv_count(r, 300, 1024, Duration::from_secs(5)))?;
     let elapsed = start.elapsed();
     assert!(
         elapsed >= Duration::from_millis(1000),
@@ -2272,17 +2289,15 @@ async fn rate_limit_asymmetric() -> Result<()> {
     let up_addr = SocketAddr::new(IpAddr::V4(dc_ip), 17_700);
     let dev_ip = dev_id.ip();
     let down_addr = SocketAddr::new(IpAddr::V4(dev_ip), 17_710);
-    let dc_ns = dc.ns();
-    let dev_ns = dev_id.ns();
 
-    let sink_up = spawn_tcp_sink(&dc_ns, up_addr);
+    let sink_up = dc.spawn_thread(move || tcp_sink(up_addr))?;
     tokio::time::sleep(Duration::from_millis(100)).await;
-    let (_e, kbps_up) = tcp_measure_throughput(&dev_ns, up_addr, 128 * 1024)?;
+    let (_e, kbps_up) = dev_id.run_sync(move || tcp_measure_throughput(up_addr, 128 * 1024))?;
     join_sink(sink_up)?;
 
-    let sink_down = spawn_tcp_sink(&dev_ns, down_addr);
+    let sink_down = dev_id.spawn_thread(move || tcp_sink(down_addr))?;
     tokio::time::sleep(Duration::from_millis(100)).await;
-    let (_e, kbps_down) = tcp_measure_throughput(&dc_ns, down_addr, 128 * 1024)?;
+    let (_e, kbps_down) = dc.run_sync(move || tcp_measure_throughput(down_addr, 128 * 1024))?;
     join_sink(sink_down)?;
 
     assert!(
@@ -2326,12 +2341,10 @@ async fn rate_limit_multihop_bottleneck() -> Result<()> {
 
     let dc_ip = dc.uplink_ip().context("no dc uplink ip")?;
     let addr = SocketAddr::new(IpAddr::V4(dc_ip), 17_800);
-    let dc_ns = dc.ns();
-    let dev_ns = dev.ns();
 
-    let sink = spawn_tcp_sink(&dc_ns, addr);
+    let sink = dc.spawn_thread(move || tcp_sink(addr))?;
     tokio::time::sleep(Duration::from_millis(100)).await;
-    let (_e, kbps) = tcp_measure_throughput(&dev_ns, addr, 128 * 1024)?;
+    let (_e, kbps) = dev.run_sync(move || tcp_measure_throughput(addr, 128 * 1024))?;
     join_sink(sink)?;
 
     assert!(
@@ -2371,12 +2384,10 @@ async fn rate_limit_two_hops_stack() -> Result<()> {
 
     let dc_ip = dc.uplink_ip().context("no dc uplink ip")?;
     let addr = SocketAddr::new(IpAddr::V4(dc_ip), 17_900);
-    let dc_ns = dc.ns();
-    let dev_ns = dev.ns();
 
-    let sink = spawn_tcp_sink(&dc_ns, addr);
+    let sink = dc.spawn_thread(move || tcp_sink(addr))?;
     tokio::time::sleep(Duration::from_millis(100)).await;
-    let (_e, kbps) = tcp_measure_throughput(&dev_ns, addr, 256 * 1024)?;
+    let (_e, kbps) = dev.run_sync(move || tcp_measure_throughput(addr, 256 * 1024))?;
     join_sink(sink)?;
 
     // Both hops at 2 Mbit/s → effective rate ≤ 2 Mbit/s.
@@ -2407,11 +2418,10 @@ async fn loss_udp_moderate() -> Result<()> {
 
     let dc_ip = dc.uplink_ip().context("no dc uplink ip")?;
     let r = SocketAddr::new(IpAddr::V4(dc_ip), 18_000);
-    let dev_ns = dev.ns();
     dc.spawn_reflector(r)?;
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    let (_, received) = udp_send_recv_count(&dev_ns, r, 100, 64, Duration::from_secs(3))?;
+    let (_, received) = dev.run_sync(move || udp_send_recv_count(r, 100, 64, Duration::from_secs(3)))?;
     assert!(
         received >= 20,
         "expected ≥ 20 received at 50% loss, got {received}"
@@ -2444,11 +2454,10 @@ async fn loss_udp_high() -> Result<()> {
 
     let dc_ip = dc.uplink_ip().context("no dc uplink ip")?;
     let r = SocketAddr::new(IpAddr::V4(dc_ip), 18_100);
-    let dev_ns = dev.ns();
     dc.spawn_reflector(r)?;
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    let (_, received) = udp_send_recv_count(&dev_ns, r, 100, 64, Duration::from_secs(3))?;
+    let (_, received) = dev.run_sync(move || udp_send_recv_count(r, 100, 64, Duration::from_secs(3)))?;
     assert!(
         received <= 30,
         "expected ≤ 30 received at 90% loss, got {received}"
@@ -2478,20 +2487,18 @@ async fn loss_tcp_integrity() -> Result<()> {
     const BYTES: usize = 200 * 1024;
     let dc_ip = dc.uplink_ip().context("no dc uplink ip")?;
     let addr = SocketAddr::new(IpAddr::V4(dc_ip), 18_200);
-    let dc_ns = dc.ns();
-    let dev_ns = dev.ns();
 
     // Server in DC writes BYTES to client; client counts received bytes.
-    let server = spawn_closure_in_namespace_thread(dc_ns, move || {
+    let server = dc.spawn_thread(move || {
         let listener = std::net::TcpListener::bind(addr)?;
         let (mut stream, _) = listener.accept()?;
         let data = vec![0xABu8; BYTES];
         stream.write_all(&data)?;
         Ok(())
-    });
+    })?;
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    let n = run_closure_in_namespace(&dev_ns, move || {
+    let n = dev.run_sync(move || {
         let mut stream = std::net::TcpStream::connect_timeout(&addr, Duration::from_secs(5))?;
         stream.set_read_timeout(Some(Duration::from_secs(30)))?;
         let mut buf = Vec::with_capacity(BYTES);
@@ -2536,12 +2543,11 @@ async fn loss_udp_both_directions() -> Result<()> {
 
     let dc_ip = dc.uplink_ip().context("no dc uplink ip")?;
     let r = SocketAddr::new(IpAddr::V4(dc_ip), 18_300);
-    let dev_ns = dev.ns();
     dc.spawn_reflector(r)?;
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     // Round-trip delivery ≈ (1-0.3)×(1-0.3) = 49 %; expect < 80.
-    let (_, received) = udp_send_recv_count(&dev_ns, r, 100, 64, Duration::from_secs(3))?;
+    let (_, received) = dev.run_sync(move || udp_send_recv_count(r, 100, 64, Duration::from_secs(3)))?;
     assert!(
         received <= 80,
         "expected < 80 echoes with bidirectional loss, got {received}"
@@ -2565,11 +2571,10 @@ async fn latency_download_direction() -> Result<()> {
 
     let dc_ip = dc.uplink_ip().context("no dc uplink ip")?;
     let r = SocketAddr::new(IpAddr::V4(dc_ip), 18_400);
-    let dev_ns = dev.ns();
     dc.spawn_reflector(r)?;
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    let base = udp_rtt_in_ns(&dev_ns, r)?;
+    let base = dev.run_sync(move || crate::test_utils::udp_rtt(r))?;
 
     lab.impair_router_downlink(
         dc.id(),
@@ -2580,7 +2585,7 @@ async fn latency_download_direction() -> Result<()> {
         }),
     )?;
 
-    let impaired = udp_rtt_in_ns(&dev_ns, r)?;
+    let impaired = dev.run_sync(move || crate::test_utils::udp_rtt(r))?;
     assert!(
         impaired >= base + Duration::from_millis(40),
         "expected RTT +40ms after 50ms download latency, base={base:?} impaired={impaired:?}"
@@ -2618,12 +2623,11 @@ async fn latency_upload_and_download() -> Result<()> {
 
     let dc_ip = dc.uplink_ip().context("no dc uplink ip")?;
     let r = SocketAddr::new(IpAddr::V4(dc_ip), 18_500);
-    let dev_ns = dev.ns();
     dc.spawn_reflector(r)?;
     tokio::time::sleep(Duration::from_millis(200)).await;
 
     // Each packet traverses: upload(20ms) + download(30ms) = 50ms one-way → RTT ≥ 100ms.
-    let rtt = udp_rtt_in_ns(&dev_ns, r)?;
+    let rtt = dev.run_sync(move || crate::test_utils::udp_rtt(r))?;
     assert!(
         rtt >= Duration::from_millis(90),
         "expected RTT ≥ 90ms with 20ms upload + 30ms download, got {rtt:?}"
@@ -2661,13 +2665,12 @@ async fn latency_device_plus_region() -> Result<()> {
         IpAddr::V4(dc_eu.uplink_ip().context("no uplink ip")?),
         18_601,
     );
-    let dev_ns = dev.ns();
     dc_us.spawn_reflector(r_us)?;
     dc_eu.spawn_reflector(r_eu)?;
     tokio::time::sleep(Duration::from_millis(250)).await;
 
     // eu→us: device(30ms) + region(40ms) = 70ms one-way → RTT ≥ 140ms.
-    let rtt_eu_us = udp_rtt_in_ns(&dev_ns, r_us)?;
+    let rtt_eu_us = dev.run_sync(move || crate::test_utils::udp_rtt(r_us))?;
     assert!(
         rtt_eu_us >= Duration::from_millis(130),
         "expected eu→us RTT ≥ 130ms, got {rtt_eu_us:?}"
@@ -2675,7 +2678,7 @@ async fn latency_device_plus_region() -> Result<()> {
 
     // eu→eu: only device upload impair (30ms egress on dev eth0) → RTT ≈ 30ms.
     // Download path has no qdisc, so we expect at least 25ms to allow slack.
-    let rtt_eu_eu = udp_rtt_in_ns(&dev_ns, r_eu)?;
+    let rtt_eu_eu = dev.run_sync(move || crate::test_utils::udp_rtt(r_eu))?;
     assert!(
         rtt_eu_eu >= Duration::from_millis(25),
         "expected eu→eu RTT ≥ 25ms (device upload impair only), got {rtt_eu_eu:?}"
@@ -2721,12 +2724,11 @@ async fn latency_multihop_chain() -> Result<()> {
 
     let dc_ip = dc.uplink_ip().context("no dc uplink ip")?;
     let r = SocketAddr::new(IpAddr::V4(dc_ip), 18_700);
-    let dev_ns = dev.ns();
     dc.spawn_reflector(r)?;
     tokio::time::sleep(Duration::from_millis(200)).await;
 
     // One-way: device(20ms) + nat WAN(30ms) = 50ms → RTT ≥ 100ms.
-    let rtt = udp_rtt_in_ns(&dev_ns, r)?;
+    let rtt = dev.run_sync(move || crate::test_utils::udp_rtt(r))?;
     assert!(
         rtt >= Duration::from_millis(90),
         "expected RTT ≥ 90ms for multi-hop chain, got {rtt:?}"
@@ -2756,16 +2758,12 @@ async fn rate_dynamic_decrease() -> Result<()> {
         .await?;
 
     let dc_ip = dc.uplink_ip().context("no dc uplink ip")?;
-    let dc_ns = dc.ns();
-    let dev_ns = dev.ns();
 
-    let sink = spawn_tcp_sink(&dc_ns, SocketAddr::new(IpAddr::V4(dc_ip), 18_800));
+    let sink = dc.spawn_thread(move || tcp_sink(SocketAddr::new(IpAddr::V4(dc_ip), 18_800)))?;
     tokio::time::sleep(Duration::from_millis(100)).await;
-    let (_e, kbps_fast) = tcp_measure_throughput(
-        &dev_ns,
-        SocketAddr::new(IpAddr::V4(dc_ip), 18_800),
-        256 * 1024,
-    )?;
+    let (_e, kbps_fast) = dev.run_sync(move || {
+        tcp_measure_throughput(SocketAddr::new(IpAddr::V4(dc_ip), 18_800), 256 * 1024)
+    })?;
     join_sink(sink)?;
 
     let dev_handle = lab.device_by_name("dev").unwrap();
@@ -2779,13 +2777,11 @@ async fn rate_dynamic_decrease() -> Result<()> {
         }),
     )?;
 
-    let sink = spawn_tcp_sink(&dc_ns, SocketAddr::new(IpAddr::V4(dc_ip), 18_801));
+    let sink = dc.spawn_thread(move || tcp_sink(SocketAddr::new(IpAddr::V4(dc_ip), 18_801)))?;
     tokio::time::sleep(Duration::from_millis(100)).await;
-    let (_e, kbps_slow) = tcp_measure_throughput(
-        &dev_ns,
-        SocketAddr::new(IpAddr::V4(dc_ip), 18_801),
-        64 * 1024,
-    )?;
+    let (_e, kbps_slow) = dev.run_sync(move || {
+        tcp_measure_throughput(SocketAddr::new(IpAddr::V4(dc_ip), 18_801), 64 * 1024)
+    })?;
     join_sink(sink)?;
 
     assert!(
@@ -2823,29 +2819,23 @@ async fn rate_dynamic_remove() -> Result<()> {
         .await?;
 
     let dc_ip = dc.uplink_ip().context("no dc uplink ip")?;
-    let dc_ns = dc.ns();
-    let dev_ns = dev.ns();
 
-    let sink = spawn_tcp_sink(&dc_ns, SocketAddr::new(IpAddr::V4(dc_ip), 18_900));
+    let sink = dc.spawn_thread(move || tcp_sink(SocketAddr::new(IpAddr::V4(dc_ip), 18_900)))?;
     tokio::time::sleep(Duration::from_millis(100)).await;
-    let (_e, kbps_throttled) = tcp_measure_throughput(
-        &dev_ns,
-        SocketAddr::new(IpAddr::V4(dc_ip), 18_900),
-        128 * 1024,
-    )?;
+    let (_e, kbps_throttled) = dev.run_sync(move || {
+        tcp_measure_throughput(SocketAddr::new(IpAddr::V4(dc_ip), 18_900), 128 * 1024)
+    })?;
     join_sink(sink)?;
 
     let dev_handle = lab.device_by_name("dev").unwrap();
     let default_if = dev_handle.default_iface().name().to_string();
     dev_handle.set_impair(&default_if, None)?;
 
-    let sink = spawn_tcp_sink(&dc_ns, SocketAddr::new(IpAddr::V4(dc_ip), 18_901));
+    let sink = dc.spawn_thread(move || tcp_sink(SocketAddr::new(IpAddr::V4(dc_ip), 18_901)))?;
     tokio::time::sleep(Duration::from_millis(100)).await;
-    let (_e, kbps_free) = tcp_measure_throughput(
-        &dev_ns,
-        SocketAddr::new(IpAddr::V4(dc_ip), 18_901),
-        256 * 1024,
-    )?;
+    let (_e, kbps_free) = dev.run_sync(move || {
+        tcp_measure_throughput(SocketAddr::new(IpAddr::V4(dc_ip), 18_901), 256 * 1024)
+    })?;
     join_sink(sink)?;
 
     assert!(
@@ -2868,11 +2858,10 @@ async fn latency_dynamic_add_remove() -> Result<()> {
 
     let dc_ip = dc.uplink_ip().context("no dc uplink ip")?;
     let r = SocketAddr::new(IpAddr::V4(dc_ip), 19_000);
-    let dev_ns = dev.ns();
     dc.spawn_reflector(r)?;
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    let baseline = udp_rtt_in_ns(&dev_ns, r)?;
+    let baseline = dev.run_sync(move || crate::test_utils::udp_rtt(r))?;
 
     let dev_handle = lab.device_by_name("dev").unwrap();
     let default_if = dev_handle.default_iface().name().to_string();
@@ -2884,14 +2873,14 @@ async fn latency_dynamic_add_remove() -> Result<()> {
             latency: 100,
         }),
     )?;
-    let high = udp_rtt_in_ns(&dev_ns, r)?;
+    let high = dev.run_sync(move || crate::test_utils::udp_rtt(r))?;
     assert!(
         high >= baseline + Duration::from_millis(90),
         "expected RTT +90ms after 100ms impair, baseline={baseline:?} high={high:?}"
     );
 
     dev_handle.set_impair(&default_if, None)?;
-    let recovered = udp_rtt_in_ns(&dev_ns, r)?;
+    let recovered = dev.run_sync(move || crate::test_utils::udp_rtt(r))?;
     assert!(
         recovered < baseline + Duration::from_millis(30),
         "expected RTT to recover near baseline, baseline={baseline:?} recovered={recovered:?}"
@@ -2920,18 +2909,17 @@ async fn rate_presets() -> Result<()> {
 
             let dc_ip = dc.uplink_ip().context("no dc uplink ip")?;
             let r = SocketAddr::new(IpAddr::V4(dc_ip), port_base);
-            let dev_ns = dev.ns();
             dc.spawn_reflector(r)?;
             tokio::time::sleep(Duration::from_millis(200)).await;
 
-            let rtt = udp_rtt_in_ns(&dev_ns, r)?;
+            let rtt = dev.run_sync(move || crate::test_utils::udp_rtt(r))?;
             if rtt < Duration::from_millis(min_latency_ms) {
                 bail!("preset {preset:?}: expected RTT ≥ {min_latency_ms}ms, got {rtt:?}");
             }
             if loss_pct > 0.0 {
                 // 1000 packets: P(zero loss at 1%) ≈ 0.000045 — reliably detects loss.
                 let (_, received) =
-                    udp_send_recv_count(&dev_ns, r, 1000, 64, Duration::from_secs(5))?;
+                    dev.run_sync(move || udp_send_recv_count(r, 1000, 64, Duration::from_secs(5)))?;
                 if received == 1000 {
                     bail!(
                         "preset {preset:?}: expected some loss at {loss_pct}%, got {received}/1000"
@@ -2985,7 +2973,7 @@ async fn smoke_dual_stack_roundtrip() -> Result<()> {
     let r_v4 = SocketAddr::new(IpAddr::V4(dc_ip_v4), 3480);
     dc.spawn_reflector(r_v4)?;
     tokio::time::sleep(Duration::from_millis(100)).await;
-    let o_v4 = udp_roundtrip_in_ns(&dev.ns(), r_v4)?;
+    let o_v4 = dev.run_sync(move || crate::test_utils::udp_roundtrip(r_v4))?;
     assert_eq!(
         o_v4.observed.ip(),
         IpAddr::V4(dev.ip()),
@@ -2997,8 +2985,7 @@ async fn smoke_dual_stack_roundtrip() -> Result<()> {
     let r_v6 = SocketAddr::new(IpAddr::V6(dc_ip_v6), 3481);
     dc.spawn_reflector(r_v6)?;
     tokio::time::sleep(Duration::from_millis(100)).await;
-    let dev_ns = dev.ns();
-    let o_v6 = udp_roundtrip_in_ns(&dev_ns, r_v6)?;
+    let o_v6 = dev.run_sync(move || crate::test_utils::udp_roundtrip(r_v6))?;
     assert!(o_v6.observed.ip().is_ipv6(), "v6 reflexive should be IPv6");
 
     Ok(())
@@ -3039,8 +3026,7 @@ async fn smoke_v6_only_roundtrip() -> Result<()> {
     let r_v6 = SocketAddr::new(IpAddr::V6(dc_ip_v6), 3490);
     dc.spawn_reflector(r_v6)?;
     tokio::time::sleep(Duration::from_millis(100)).await;
-    let dev_ns = dev.ns();
-    let o = udp_roundtrip_in_ns(&dev_ns, r_v6)?;
+    let o = dev.run_sync(move || crate::test_utils::udp_roundtrip(r_v6))?;
     assert!(o.observed.ip().is_ipv6(), "reflexive should be v6");
     Ok(())
 }
@@ -3081,8 +3067,7 @@ async fn nat_v6_masquerade() -> Result<()> {
     dc.spawn_reflector(r_v6)?;
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    let dev_ns = dev.ns();
-    let o = udp_roundtrip_in_ns(&dev_ns, r_v6)?;
+    let o = dev.run_sync(move || crate::test_utils::udp_roundtrip(r_v6))?;
     // With masquerade, the reflexive address should be the router's WAN IP.
     let home_wan_v6 = home.uplink_ip_v6().expect("home v6 uplink");
     assert_eq!(
@@ -3181,18 +3166,16 @@ async fn v6_only_no_v4() -> Result<()> {
         .build()
         .await?;
 
-    let dev_ns = dev.ns();
-
     // v6 roundtrip succeeds.
     let dc_ip_v6 = dc.uplink_ip_v6().expect("dc v6 uplink");
     let r_v6 = SocketAddr::new(IpAddr::V6(dc_ip_v6), 3491);
     dc.spawn_reflector(r_v6)?;
     tokio::time::sleep(Duration::from_millis(100)).await;
-    let o = udp_roundtrip_in_ns(&dev_ns, r_v6)?;
+    let o = dev.run_sync(move || crate::test_utils::udp_roundtrip(r_v6))?;
     assert!(o.observed.ip().is_ipv6(), "reflexive should be v6");
 
     // v4 ping to the IX gateway should fail (no v4 routes).
-    let res = ping_in_ns(&dev_ns, "203.0.113.1");
+    let res = dev.run_sync(|| ping("203.0.113.1"));
     assert!(res.is_err(), "v4 ping should fail under V6Only");
 
     Ok(())
@@ -3215,8 +3198,6 @@ async fn dual_stack_public_addrs() -> Result<()> {
         .build()
         .await?;
 
-    let dev_ns = dev.ns();
-
     // v4 reflector
     let dc_ip_v4 = dc.uplink_ip().expect("dc v4 uplink");
     let r_v4 = SocketAddr::new(IpAddr::V4(dc_ip_v4), 3492);
@@ -3229,10 +3210,10 @@ async fn dual_stack_public_addrs() -> Result<()> {
 
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    let o_v4 = udp_roundtrip_in_ns(&dev_ns, r_v4)?;
+    let o_v4 = dev.run_sync(move || crate::test_utils::udp_roundtrip(r_v4))?;
     assert!(o_v4.observed.ip().is_ipv4(), "v4 reflexive should be v4");
 
-    let o_v6 = udp_roundtrip_in_ns(&dev_ns, r_v6)?;
+    let o_v6 = dev.run_sync(move || crate::test_utils::udp_roundtrip(r_v6))?;
     assert!(o_v6.observed.ip().is_ipv6(), "v6 reflexive should be v6");
 
     Ok(())
@@ -3268,15 +3249,13 @@ async fn nat_v6_none_global() -> Result<()> {
         .build()
         .await?;
 
-    let dev_ns = dev.ns();
-
     // v6 reflector in DC
     let dc_ip_v6 = dc.uplink_ip_v6().expect("dc v6 uplink");
     let r_v6 = SocketAddr::new(IpAddr::V6(dc_ip_v6), 3494);
     dc.spawn_reflector(r_v6)?;
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    let o_v6 = udp_roundtrip_in_ns(&dev_ns, r_v6)?;
+    let o_v6 = dev.run_sync(move || crate::test_utils::udp_roundtrip(r_v6))?;
     // No v6 NAT → reflexive ip should be the device's own ULA address.
     let dev_ip6 = dev.ip6().expect("device v6 addr");
     assert_eq!(
@@ -3316,8 +3295,7 @@ async fn latency_v6_region() -> Result<()> {
     dc_eu.spawn_reflector(r_v6)?;
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    let us_ns = dc_us.ns();
-    let rtt_v6 = udp_rtt_in_ns(&us_ns, r_v6)?;
+    let rtt_v6 = dc_us.run_sync(move || crate::test_utils::udp_rtt(r_v6))?;
     assert!(
         rtt_v6.as_millis() >= 120,
         "v6 RTT {}ms should be >= 120ms (2x65ms)",
@@ -3361,10 +3339,8 @@ async fn latency_dual_stack_region() -> Result<()> {
 
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    let us_ns = dc_us.ns();
-
     // v4 RTT
-    let rtt_v4 = udp_rtt_in_ns(&us_ns, r_v4)?;
+    let rtt_v4 = dc_us.run_sync(move || crate::test_utils::udp_rtt(r_v4))?;
     assert!(
         rtt_v4.as_millis() >= 120,
         "v4 RTT {}ms should be >= 120ms (2×65ms)",
@@ -3372,7 +3348,7 @@ async fn latency_dual_stack_region() -> Result<()> {
     );
 
     // v6 RTT
-    let rtt_v6 = udp_rtt_in_ns(&us_ns, r_v6)?;
+    let rtt_v6 = dc_us.run_sync(move || crate::test_utils::udp_rtt(r_v6))?;
     assert!(
         rtt_v6.as_millis() >= 120,
         "v6 RTT {}ms should be >= 120ms (2×65ms)",

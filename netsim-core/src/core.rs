@@ -1,11 +1,8 @@
 use std::{
     collections::HashMap,
-    fs::File,
     io::Write as IoWrite,
     net::{Ipv4Addr, Ipv6Addr},
-    process::ExitStatus,
     sync::{mpsc, Arc},
-    thread,
 };
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -232,14 +229,14 @@ pub(crate) struct NetworkCore {
 
 impl Drop for NetworkCore {
     fn drop(&mut self) {
-        let netns: Vec<String> = std::mem::take(&mut self.own_netns);
+        let netns_list: Vec<String> = std::mem::take(&mut self.own_netns);
         debug!(
             "netsim cleanup: NetworkCore drop: {} namespaces",
-            netns.len()
+            netns_list.len()
         );
-        for ns in netns {
+        for ns in netns_list {
             debug!("netsim cleanup: drop netns {ns}");
-            netns::cleanup_netns(&ns);
+            self.netns.cleanup_netns(&ns);
         }
     }
 }
@@ -755,17 +752,6 @@ impl NetworkCore {
         self.routers.keys().copied().collect()
     }
 
-    /// Returns all namespace names owned by the lab.
-    pub fn all_ns_names(&self) -> Vec<String> {
-        let mut v = vec![self.cfg.root_ns.clone()];
-        for r in self.routers.values() {
-            v.push(r.ns.clone());
-        }
-        for d in self.devices.values() {
-            v.push(d.ns.clone());
-        }
-        v
-    }
 }
 
 // ─────────────────────────────────────────────
@@ -773,15 +759,17 @@ impl NetworkCore {
 // ─────────────────────────────────────────────
 
 /// Helper: run a netlink operation in a namespace via the shared NetnsManager.
-pub(crate) async fn nl_run<F>(netns: &Arc<netns::NetnsManager>, ns: &str, f: F) -> Result<()>
+pub(crate) async fn nl_run<F, Fut>(netns: &Arc<netns::NetnsManager>, ns: &str, f: F) -> Result<()>
 where
-    F: AsyncFnOnce(&Netlink) -> Result<()> + Send + 'static,
+    F: FnOnce(Netlink) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = Result<()>> + Send + 'static,
 {
+    let nl = netns.netlink_for(ns)?;
+    let rt = netns.rt_handle_for(ns)?;
     let span = tracing::Span::current();
-    netns
-        .spawn_netlink_task_in(ns, move |nl| async move { f(&nl).await }.instrument(span))
+    rt.spawn(f(nl).instrument(span))
         .await
-        .map_err(|_| anyhow!("netns task cancelled"))?
+        .context("netlink task panicked")?
 }
 
 /// Creates root namespace, IX bridge, and enables forwarding. Idempotent-safe at caller level.
@@ -790,20 +778,21 @@ pub(crate) async fn setup_root_ns_async(
     cfg: &CoreConfig,
     netns: &Arc<netns::NetnsManager>,
 ) -> Result<()> {
-    ensure_netns_dir()?;
     let root_ns = cfg.root_ns.clone();
-    create_netns(&root_ns).await?;
+    create_named_netns(netns, &root_ns)?;
 
-    if let Err(err) = run_nft_in(&root_ns, "flush ruleset").await {
+    if let Err(err) = run_nft_in(netns, &root_ns, "flush ruleset") {
         debug!(error = %err, "setup_root_ns: nft flush failed; continuing");
     }
 
-    // DAD already disabled by create_named_netns; enable forwarding.
-    set_sysctl_in(&root_ns, "net/ipv4/ip_forward", "1")?;
-    set_sysctl_in(&root_ns, "net/ipv6/conf/all/forwarding", "1")?;
+    netns.run_closure_in(&root_ns, || {
+        set_sysctl_root("net/ipv4/ip_forward", "1")?;
+        set_sysctl_root("net/ipv6/conf/all/forwarding", "1")?;
+        Ok(())
+    })?;
 
     let cfg = cfg.clone();
-    nl_run(netns, &root_ns, async move |h| {
+    nl_run(netns, &root_ns, move |h: Netlink| async move {
         h.set_link_up("lo").await?;
         h.ensure_link_deleted(&cfg.ix_br).await.ok();
         h.add_bridge(&cfg.ix_br).await?;
@@ -860,8 +849,8 @@ pub(crate) async fn setup_router_async(
     debug!(name = %router.name, ns = %router.ns, "router: setup");
 
     // Create router namespace.
-    create_netns(&router.ns).await?;
-    if let Err(err) = run_nft_in(&router.ns, "flush ruleset").await {
+    create_named_netns(netns, &router.ns)?;
+    if let Err(err) = run_nft_in(netns, &router.ns, "flush ruleset") {
         debug!(error = %err, "setup_router: nft flush failed; continuing");
     }
 
@@ -874,34 +863,39 @@ pub(crate) async fn setup_router_async(
         let root_if = format!("{}i{}", data.prefix, id.0);
         let ns_if = "ix".to_string();
 
+        let router_ns_fd = netns.ns_fd(&router.ns)?;
         nl_run(netns, &data.root_ns, {
             let root_if = root_if.clone();
             let ns_if = ns_if.clone();
             let ix_br = data.ix_br.clone();
-            let router_ns = router.ns.clone();
-            async move |h| {
+            move |h: Netlink| async move {
                 h.ensure_link_deleted(&root_if).await.ok();
                 h.ensure_link_deleted(&ns_if).await.ok();
                 h.add_veth(&root_if, &ns_if).await?;
                 h.set_master(&root_if, &ix_br).await?;
                 h.set_link_up(&root_if).await?;
-                h.move_link_to_netns(&ns_if, &open_netns_fd(&router_ns)?)
-                    .await?;
+                h.move_link_to_netns(&ns_if, &router_ns_fd).await?;
                 Ok(())
             }
         })
         .await?;
 
-        // DAD already disabled by create_named_netns; enable forwarding.
-        set_sysctl_in(&router.ns, "net/ipv4/ip_forward", "1")?;
-        if router.cfg.ip_support.has_v6() {
-            set_sysctl_in(&router.ns, "net/ipv6/conf/all/forwarding", "1")?;
+        // DAD already disabled by create_netns; enable forwarding.
+        {
+            let has_v6 = router.cfg.ip_support.has_v6();
+            netns.run_closure_in(&router.ns, move || {
+                set_sysctl_root("net/ipv4/ip_forward", "1")?;
+                if has_v6 {
+                    set_sysctl_root("net/ipv6/conf/all/forwarding", "1")?;
+                }
+                Ok(())
+            })?;
         }
 
         nl_run(netns, &router.ns, {
             let d = data.clone();
             let ns_if = ns_if.clone();
-            async move |h| {
+            move |h: Netlink| async move {
                 h.set_link_up("lo").await?;
                 h.set_link_up(&ns_if).await?;
                 if let Some(ip4) = d.router.upstream_ip {
@@ -922,13 +916,13 @@ pub(crate) async fn setup_router_async(
         if let Some(upstream_ip4) = router.upstream_ip {
             debug!(nat = ?router.cfg.nat, ip = %upstream_ip4, "router: apply NAT");
             apply_nat(
+                netns,
                 &router.ns,
                 router.cfg.nat,
                 &router.downlink_bridge,
                 &ns_if,
                 upstream_ip4,
-            )
-            .await?;
+            )?;
         }
 
         // IPv6 NAT (IX-level router).
@@ -943,7 +937,7 @@ pub(crate) async fn setup_router_async(
                 let lan_pfx = Ipv6Net::new(dl_gw_v6, dl_prefix)
                     .unwrap_or_else(|_| Ipv6Net::new(dl_gw_v6, 64).unwrap());
                 debug!(nat_v6 = ?router.cfg.nat_v6, "router: apply NAT v6");
-                apply_nat_v6(&router.ns, router.cfg.nat_v6, &ns_if, lan_pfx, wan_pfx).await?;
+                apply_nat_v6(netns, &router.ns, router.cfg.nat_v6, &ns_if, lan_pfx, wan_pfx)?;
             }
         }
     } else {
@@ -962,19 +956,17 @@ pub(crate) async fn setup_router_async(
 
         let root_a = format!("{}a{}", data.prefix, id.0);
         let root_b = format!("{}b{}", data.prefix, id.0);
+        let owner_ns_fd = netns.ns_fd(owner_ns)?;
+        let router_ns_fd = netns.ns_fd(&router.ns)?;
         nl_run(netns, &data.root_ns, {
             let root_a = root_a.clone();
             let root_b = root_b.clone();
-            let owner_ns = owner_ns.clone();
-            let router_ns = router.ns.clone();
-            async move |h| {
+            move |h: Netlink| async move {
                 h.ensure_link_deleted(&root_a).await.ok();
                 h.ensure_link_deleted(&root_b).await.ok();
                 h.add_veth(&root_a, &root_b).await?;
-                h.move_link_to_netns(&root_a, &open_netns_fd(&owner_ns)?)
-                    .await?;
-                h.move_link_to_netns(&root_b, &open_netns_fd(&router_ns)?)
-                    .await?;
+                h.move_link_to_netns(&root_a, &owner_ns_fd).await?;
+                h.move_link_to_netns(&root_b, &router_ns_fd).await?;
                 Ok(())
             }
         })
@@ -984,7 +976,7 @@ pub(crate) async fn setup_router_async(
         nl_run(netns, owner_ns, {
             let root_a = root_a.clone();
             let bridge = bridge.clone();
-            async move |h| {
+            move |h: Netlink| async move {
                 h.rename_link(&root_a, &owner_if).await?;
                 h.set_link_up(&owner_if).await?;
                 h.set_master(&owner_if, &bridge).await?;
@@ -994,9 +986,15 @@ pub(crate) async fn setup_router_async(
         .await?;
 
         // DAD already disabled by create_named_netns; enable forwarding.
-        set_sysctl_in(&router.ns, "net/ipv4/ip_forward", "1")?;
-        if router.cfg.ip_support.has_v6() {
-            set_sysctl_in(&router.ns, "net/ipv6/conf/all/forwarding", "1")?;
+        {
+            let has_v6 = router.cfg.ip_support.has_v6();
+            netns.run_closure_in(&router.ns, move || {
+                set_sysctl_root("net/ipv4/ip_forward", "1")?;
+                if has_v6 {
+                    set_sysctl_root("net/ipv6/conf/all/forwarding", "1")?;
+                }
+                Ok(())
+            })?;
         }
 
         let wan_if = "wan".to_string();
@@ -1004,7 +1002,7 @@ pub(crate) async fn setup_router_async(
             let d = data.clone();
             let root_b = root_b.clone();
             let wan_if = wan_if.clone();
-            async move |h| {
+            move |h: Netlink| async move {
                 h.set_link_up("lo").await?;
                 h.rename_link(&root_b, &wan_if).await?;
                 h.set_link_up(&wan_if).await?;
@@ -1028,13 +1026,13 @@ pub(crate) async fn setup_router_async(
         if let Some(upstream_ip4) = router.upstream_ip {
             debug!(nat = ?router.cfg.nat, ip = %upstream_ip4, "router: apply NAT");
             apply_nat(
+                netns,
                 &router.ns,
                 router.cfg.nat,
                 &router.downlink_bridge,
                 &wan_if,
                 upstream_ip4,
-            )
-            .await?;
+            )?;
         }
 
         // IPv6 NAT (sub-router).
@@ -1049,7 +1047,7 @@ pub(crate) async fn setup_router_async(
                 let lan_pfx = Ipv6Net::new(dl_gw_v6, dl_prefix)
                     .unwrap_or_else(|_| Ipv6Net::new(dl_gw_v6, 64).unwrap());
                 debug!(nat_v6 = ?router.cfg.nat_v6, "router: apply NAT v6");
-                apply_nat_v6(&router.ns, router.cfg.nat_v6, &wan_if, lan_pfx, wan_pfx).await?;
+                apply_nat_v6(netns, &router.ns, router.cfg.nat_v6, &wan_if, lan_pfx, wan_pfx)?;
             }
         }
     }
@@ -1060,7 +1058,7 @@ pub(crate) async fn setup_router_async(
         let v4_addr = *v4_addr;
         nl_run(netns, &router.ns, {
             let br = br.clone();
-            async move |h| {
+            move |h: Netlink| async move {
                 h.set_link_up("lo").await?;
                 h.ensure_link_deleted(&br).await.ok();
                 h.add_bridge(&br).await?;
@@ -1079,7 +1077,7 @@ pub(crate) async fn setup_router_async(
 
     // Return route in lab root for public downstreams.
     if let Some((net, prefix_len, via)) = data.return_route {
-        nl_run(netns, &data.root_ns, async move |h| {
+        nl_run(netns, &data.root_ns, move |h: Netlink| async move {
             h.add_route_v4(net, prefix_len, via).await.ok();
             Ok(())
         })
@@ -1087,7 +1085,7 @@ pub(crate) async fn setup_router_async(
         .ok();
     }
     if let Some((net6, prefix6, via6)) = data.return_route_v6 {
-        nl_run(netns, &data.root_ns, async move |h| {
+        nl_run(netns, &data.root_ns, move |h: Netlink| async move {
             h.add_route_v6(net6, prefix6, via6).await.ok();
             Ok(())
         })
@@ -1097,7 +1095,7 @@ pub(crate) async fn setup_router_async(
 
     // Route in parent router's ns for sub-router's downstream (NatV6Mode::None).
     if let Some((ref parent_ns, net6, prefix6, via6)) = data.parent_route_v6 {
-        nl_run(netns, parent_ns, async move |h| {
+        nl_run(netns, parent_ns, move |h: Netlink| async move {
             h.add_route_v6(net6, prefix6, via6).await.ok();
             Ok(())
         })
@@ -1118,8 +1116,8 @@ pub(crate) async fn setup_device_async(
     ifaces: Vec<IfaceBuild>,
 ) -> Result<()> {
     debug!(name = %dev.name, ns = %dev.ns, "device: setup");
-    create_netns(&dev.ns).await?;
-    if let Err(err) = run_nft_in(&dev.ns, "flush ruleset").await {
+    create_named_netns(netns, &dev.ns)?;
+    if let Err(err) = run_nft_in(netns, &dev.ns, "flush ruleset") {
         debug!(error = %err, "setup_device: nft flush failed; continuing");
     }
 
@@ -1141,19 +1139,17 @@ pub(crate) async fn wire_iface_async(
     let root_gw = format!("{}g{}", prefix, dev.idx);
     let root_dev = format!("{}e{}", prefix, dev.idx);
 
+    let gw_ns_fd = netns.ns_fd(&dev.gw_ns)?;
+    let dev_ns_fd = netns.ns_fd(&dev.dev_ns)?;
     nl_run(netns, root_ns, {
         let root_gw = root_gw.clone();
         let root_dev = root_dev.clone();
-        let dev_ns = dev.dev_ns.clone();
-        let gw_ns = dev.gw_ns.clone();
-        async move |h| {
+        move |h: Netlink| async move {
             h.ensure_link_deleted(&root_gw).await.ok();
             h.ensure_link_deleted(&root_dev).await.ok();
             h.add_veth(&root_gw, &root_dev).await?;
-            h.move_link_to_netns(&root_gw, &open_netns_fd(&gw_ns)?)
-                .await?;
-            h.move_link_to_netns(&root_dev, &open_netns_fd(&dev_ns)?)
-                .await?;
+            h.move_link_to_netns(&root_gw, &gw_ns_fd).await?;
+            h.move_link_to_netns(&root_dev, &dev_ns_fd).await?;
             Ok(())
         }
     })
@@ -1163,7 +1159,7 @@ pub(crate) async fn wire_iface_async(
     nl_run(netns, &dev.dev_ns, {
         let d = dev.clone();
         let root_dev = root_dev.clone();
-        async move |h| {
+        move |h: Netlink| async move {
             h.set_link_up("lo").await?;
             h.rename_link(&root_dev, &d.ifname).await?;
             h.set_link_up(&d.ifname).await?;
@@ -1192,7 +1188,7 @@ pub(crate) async fn wire_iface_async(
         let root_gw = root_gw.clone();
         let gw_if = format!("v{}", dev.idx);
         let gw_br = dev.gw_br.clone();
-        async move |h| {
+        move |h: Netlink| async move {
             h.rename_link(&root_gw, &gw_if).await?;
             h.set_link_up(&gw_if).await?;
             h.set_master(&gw_if, &gw_br).await?;
@@ -1202,7 +1198,7 @@ pub(crate) async fn wire_iface_async(
     .await?;
 
     if let Some(imp) = dev.impair {
-        apply_impair_in(&dev.dev_ns, &dev.ifname, imp);
+        apply_impair_in(netns, &dev.dev_ns, &dev.ifname, imp);
     }
     Ok(())
 }
@@ -1219,116 +1215,63 @@ fn add_host(cidr: Ipv4Net, host: u8) -> Result<Ipv4Addr> {
 // Netns + process helpers
 // ─────────────────────────────────────────────
 
-/// Ensures netns runtime prerequisites are initialized.
-pub(crate) fn ensure_netns_dir() -> Result<()> {
-    netns::ensure_netns_dir()
-}
-
-/// Opens a namespace file descriptor for `name`.
-pub(crate) fn open_netns_fd(name: &str) -> Result<File> {
-    netns::open_netns_fd(name)
-}
-
-/// Cleans up a namespace by name.
-pub(crate) fn cleanup_netns(name: &str) {
-    netns::cleanup_netns(name);
-}
-
-/// Creates a network namespace with DAD disabled.
+/// Creates a namespace with DAD disabled.
 ///
-/// IPv6 DAD (Duplicate Address Detection) is disabled immediately so that
-/// interfaces moved into this namespace will inherit `dad_transmits=0` and
-/// addresses assigned to them will go straight to the "valid" state.
-pub(crate) async fn create_netns(name: &str) -> Result<()> {
-    netns::create_netns(name).await?;
+/// IPv6 DAD is disabled immediately so interfaces moved in will inherit
+/// `dad_transmits=0` and addresses go straight to "valid" state.
+pub(crate) fn create_named_netns(netns: &netns::NetnsManager, name: &str) -> Result<()> {
+    netns.create_netns(name)?;
     // Disable DAD before any interfaces are created or moved in.
-    set_sysctl_in(name, "net/ipv6/conf/all/accept_dad", "0").ok();
-    set_sysctl_in(name, "net/ipv6/conf/default/accept_dad", "0").ok();
-    set_sysctl_in(name, "net/ipv6/conf/all/dad_transmits", "0").ok();
-    set_sysctl_in(name, "net/ipv6/conf/default/dad_transmits", "0").ok();
+    netns.run_closure_in(name, || {
+        set_sysctl_root("net/ipv6/conf/all/accept_dad", "0").ok();
+        set_sysctl_root("net/ipv6/conf/default/accept_dad", "0").ok();
+        set_sysctl_root("net/ipv6/conf/all/dad_transmits", "0").ok();
+        set_sysctl_root("net/ipv6/conf/default/dad_transmits", "0").ok();
+        Ok(())
+    })?;
     Ok(())
 }
 
-/// Spawns a worker-thread task that runs a closure inside `ns`.
-pub(crate) fn spawn_closure_in_namespace_thread<F, R>(
-    ns: String,
-    f: F,
-) -> thread::JoinHandle<Result<R>>
-where
-    F: FnOnce() -> Result<R> + Send + 'static,
-    R: Send + 'static,
-{
-    netns::spawn_closure_in_netns(ns, f)
-}
-
-/// Runs a synchronous closure inside `ns`.
-pub(crate) fn run_closure_in_namespace<F, R>(ns: &str, f: F) -> Result<R>
-where
-    F: FnOnce() -> Result<R> + Send + 'static,
-    R: Send + 'static,
-{
-    netns::run_closure_in_netns(ns, f)
-}
-
-/// Runs a command to completion inside `ns`.
-pub(crate) fn run_command_in_namespace(ns: &str, cmd: std::process::Command) -> Result<ExitStatus> {
-    netns::run_command_in_netns(ns, cmd)
-}
-
-/// Spawns a command process inside `ns`.
-pub(crate) fn spawn_command_in_namespace(
-    ns: &str,
-    cmd: std::process::Command,
-) -> Result<std::process::Child> {
-    netns::spawn_command_in_netns(ns, cmd)
-}
-
-/// Sets a sysctl value in the current namespace.
+/// Sets a sysctl value in the current namespace (caller must already be in the ns).
 pub(crate) fn set_sysctl_root(path: &str, val: &str) -> Result<()> {
-    debug!(path = %path, val = %val, "sysctl: set in root");
+    debug!(path = %path, val = %val, "sysctl: set");
     std::fs::write(format!("/proc/sys/{}", path), val)
         .with_context(|| format!("sysctl write {}", path))
 }
 
-/// Sets a sysctl value inside `ns`.
-pub(crate) fn set_sysctl_in(ns: &str, path: &str, val: &str) -> Result<()> {
-    debug!(ns = %ns, path = %path, val = %val, "sysctl: set in namespace");
-    let path = path.to_string();
-    let val = val.to_string();
-    run_closure_in_namespace(ns, move || set_sysctl_root(&path, &val))
+/// Applies nftables rules (assumes caller is already in the target namespace).
+pub(crate) fn run_nft(rules: &str) -> Result<()> {
+    let mut child = std::process::Command::new("nft")
+        .args(["-f", "-"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::inherit())
+        .spawn()
+        .context("spawn nft")?;
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(rules.as_bytes())
+        .context("write nft stdin")?;
+    let st = child.wait().context("wait nft")?;
+    if st.success() {
+        Ok(())
+    } else {
+        Err(anyhow!("nft apply failed"))
+    }
 }
 
-/// Applies nftables rules inside `ns`.
-pub(crate) async fn run_nft_in(ns: &str, rules: &str) -> Result<()> {
+/// Applies nftables rules inside `ns` via the sync worker.
+pub(crate) fn run_nft_in(netns: &netns::NetnsManager, ns: &str, rules: &str) -> Result<()> {
     debug!(ns = %ns, rules = %rules, "nft: apply rules");
     let rules = rules.to_string();
-    let ns = ns.to_string();
-    let ns_err = ns.clone();
-    run_closure_in_namespace(&ns, move || {
-        let mut child = std::process::Command::new("nft")
-            .args(["-f", "-"])
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::inherit())
-            .spawn()
-            .context("spawn nft")?;
-        child
-            .stdin
-            .take()
-            .unwrap()
-            .write_all(rules.as_bytes())
-            .context("write nft stdin")?;
-        let st = child.wait().context("wait nft")?;
-        if st.success() {
-            Ok(())
-        } else {
-            Err(anyhow!("nft apply failed in namespace '{}'", ns_err))
-        }
-    })
+    netns.run_closure_in(ns, move || run_nft(&rules))
 }
 
 /// Applies home-router NAT rules in `ns` for `mode`.
-pub(crate) async fn apply_home_nat(
+pub(crate) fn apply_home_nat(
+    netns: &netns::NetnsManager,
     ns: &str,
     mode: NatMode,
     _lan_if: &str,
@@ -1389,11 +1332,12 @@ table ip nat {{
             return Ok(());
         }
     };
-    run_nft_in(ns, &rules).await
+    run_nft_in(netns, ns, &rules)
 }
 
 /// Applies router NAT rules for the configured mode.
-pub(crate) async fn apply_nat(
+pub(crate) fn apply_nat(
+    netns: &netns::NetnsManager,
     ns: &str,
     mode: NatMode,
     lan_if: &str,
@@ -1402,15 +1346,16 @@ pub(crate) async fn apply_nat(
 ) -> Result<()> {
     match mode {
         NatMode::None => Ok(()),
-        NatMode::Cgnat => apply_isp_cgnat(ns, wan_if).await,
+        NatMode::Cgnat => apply_isp_cgnat(netns, ns, wan_if),
         NatMode::DestinationIndependent | NatMode::DestinationDependent => {
-            apply_home_nat(ns, mode, lan_if, wan_if, wan_ip).await
+            apply_home_nat(netns, ns, mode, lan_if, wan_if, wan_ip)
         }
     }
 }
 
 /// Applies IPv6 NAT rules in `ns`.
-pub(crate) async fn apply_nat_v6(
+pub(crate) fn apply_nat_v6(
+    netns: &netns::NetnsManager,
     ns: &str,
     mode: NatV6Mode,
     wan_if: &str,
@@ -1437,7 +1382,7 @@ table ip6 nat {{
                 wan_pfx = wan_prefix,
                 lan_pfx = lan_prefix,
             );
-            run_nft_in(ns, &rules).await
+            run_nft_in(netns, ns, &rules)
         }
         NatV6Mode::Masquerade => {
             let rules = format!(
@@ -1455,13 +1400,13 @@ table ip6 nat {{
 "#,
                 wan = wan_if,
             );
-            run_nft_in(ns, &rules).await
+            run_nft_in(netns, ns, &rules)
         }
     }
 }
 
 /// Applies ISP CGNAT masquerade rules in `ns` on `ix_if`.
-pub(crate) async fn apply_isp_cgnat(ns: &str, ix_if: &str) -> Result<()> {
+pub(crate) fn apply_isp_cgnat(netns: &netns::NetnsManager, ns: &str, ix_if: &str) -> Result<()> {
     let rules = format!(
         r#"
 table ip nat {{
@@ -1473,11 +1418,16 @@ table ip nat {{
 "#,
         ix = ix_if,
     );
-    run_nft_in(ns, &rules).await
+    run_nft_in(netns, ns, &rules)
 }
 
 /// Applies an impairment preset or manual limits on `ifname` inside `ns`.
-pub(crate) fn apply_impair_in(ns: &str, ifname: &str, impair: Impair) {
+pub(crate) fn apply_impair_in(
+    netns: &netns::NetnsManager,
+    ns: &str,
+    ifname: &str,
+    impair: Impair,
+) {
     debug!(ns = %ns, ifname = %ifname, impair = ?impair, "tc: apply impairment");
     let limits = match impair {
         Impair::Wifi => qdisc::ImpairLimits {
@@ -1501,8 +1451,9 @@ pub(crate) fn apply_impair_in(ns: &str, ifname: &str, impair: Impair) {
         },
     };
 
-    if let Err(e) = qdisc::apply_impair(ns, ifname, limits) {
-        eprintln!("warn: apply_impair_in({}): {}", ifname, e);
+    let ifname = ifname.to_string();
+    if let Err(e) = netns.run_closure_in(ns, move || qdisc::apply_impair(&ifname, limits)) {
+        eprintln!("warn: apply_impair_in({}): {}", ns, e);
     }
 }
 
