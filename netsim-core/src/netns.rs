@@ -321,11 +321,6 @@ impl NetnsManager {
         Ok(())
     }
 
-    /// Remove a namespace's worker and fd.
-    pub fn cleanup_netns(&self, name: &str) {
-        self.remove_worker(name);
-    }
-
     /// Remove workers/fds for all namespaces matching `prefix`.
     pub fn cleanup_prefix(&self, prefix: &str) {
         let mut workers = self.workers.lock().expect("netns worker map poisoned");
@@ -436,7 +431,7 @@ mod tests {
         let mgr = NetnsManager::new();
         mgr.create_netns("test-ns-1").unwrap();
         mgr.create_netns("test-ns-2").unwrap();
-        mgr.cleanup_netns("test-ns-1");
+        mgr.remove_worker("test-ns-1");
         // test-ns-2 still exists
         assert!(mgr.rt_handle_for("test-ns-2").is_ok());
         assert!(mgr.rt_handle_for("test-ns-1").is_err());

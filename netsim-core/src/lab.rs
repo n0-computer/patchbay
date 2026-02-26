@@ -1015,12 +1015,6 @@ impl RouterBuilder {
         .instrument(self.lab_span.clone())
         .await?;
 
-        // Phase 3: Lock → bookkeeping → unlock.
-        {
-            let mut inner = self.inner.lock().unwrap();
-            inner.own_netns.push(setup_data.router.ns.clone());
-        }
-
         // Apply any pending region latency rules now that this router is ready.
         let lab_handle = Lab {
             inner: Arc::clone(&self.inner),
@@ -1156,11 +1150,6 @@ impl DeviceBuilder {
         .await?;
 
         // Phase 3: Lock → bookkeeping → unlock.
-        {
-            let mut inner = self.inner.lock().unwrap();
-            inner.own_netns.push(dev.ns.clone());
-        }
-
         let lab = Arc::clone(&self.inner);
         Ok(Device { id: self.id, lab })
     }
@@ -2039,10 +2028,7 @@ async fn ensure_root_ns(
     let cfg = inner.lock().unwrap().cfg.clone();
     setup_root_ns_async(&cfg, netns).await?;
     let mut guard = inner.lock().unwrap();
-    if !guard.root_ns_initialized {
-        guard.own_netns.push(cfg.root_ns.clone());
-        guard.root_ns_initialized = true;
-    }
+    guard.root_ns_initialized = true;
     Ok(())
 }
 
