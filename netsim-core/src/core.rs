@@ -792,7 +792,7 @@ pub(crate) async fn setup_root_ns_async(
 ) -> Result<()> {
     ensure_netns_dir()?;
     let root_ns = cfg.root_ns.clone();
-    create_named_netns(&root_ns).await?;
+    create_netns(&root_ns).await?;
 
     if let Err(err) = run_nft_in(&root_ns, "flush ruleset").await {
         debug!(error = %err, "setup_root_ns: nft flush failed; continuing");
@@ -860,7 +860,7 @@ pub(crate) async fn setup_router_async(
     debug!(name = %router.name, ns = %router.ns, "router: setup");
 
     // Create router namespace.
-    create_named_netns(&router.ns).await?;
+    create_netns(&router.ns).await?;
     if let Err(err) = run_nft_in(&router.ns, "flush ruleset").await {
         debug!(error = %err, "setup_router: nft flush failed; continuing");
     }
@@ -1118,7 +1118,7 @@ pub(crate) async fn setup_device_async(
     ifaces: Vec<IfaceBuild>,
 ) -> Result<()> {
     debug!(name = %dev.name, ns = %dev.ns, "device: setup");
-    create_named_netns(&dev.ns).await?;
+    create_netns(&dev.ns).await?;
     if let Err(err) = run_nft_in(&dev.ns, "flush ruleset").await {
         debug!(error = %err, "setup_device: nft flush failed; continuing");
     }
@@ -1234,13 +1234,13 @@ pub(crate) fn cleanup_netns(name: &str) {
     netns::cleanup_netns(name);
 }
 
-/// Creates a named network namespace with DAD disabled.
+/// Creates a network namespace with DAD disabled.
 ///
 /// IPv6 DAD (Duplicate Address Detection) is disabled immediately so that
 /// interfaces moved into this namespace will inherit `dad_transmits=0` and
 /// addresses assigned to them will go straight to the "valid" state.
-pub(crate) async fn create_named_netns(name: &str) -> Result<()> {
-    netns::create_named_netns(name).await?;
+pub(crate) async fn create_netns(name: &str) -> Result<()> {
+    netns::create_netns(name).await?;
     // Disable DAD before any interfaces are created or moved in.
     set_sysctl_in(name, "net/ipv6/conf/all/accept_dad", "0").ok();
     set_sysctl_in(name, "net/ipv6/conf/default/accept_dad", "0").ok();
@@ -1276,7 +1276,7 @@ pub(crate) fn run_command_in_namespace(ns: &str, cmd: std::process::Command) -> 
 }
 
 /// Spawns a command process inside `ns`.
-pub fn spawn_command_in_namespace(
+pub(crate) fn spawn_command_in_namespace(
     ns: &str,
     cmd: std::process::Command,
 ) -> Result<std::process::Child> {

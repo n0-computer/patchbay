@@ -67,7 +67,7 @@ pub use lab::{
 };
 
 pub use crate::{
-    core::{spawn_command_in_namespace, NodeId},
+    core::NodeId,
     netns::cleanup_registry_prefix,
     userns::{init_userns, init_userns_for_ctor},
 };

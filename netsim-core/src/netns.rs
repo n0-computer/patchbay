@@ -103,7 +103,7 @@ pub fn cleanup_registry_prefix(prefix: &str) {
 }
 
 /// Create a namespace entry for `name` using the fd backend.
-pub async fn create_named_netns(name: &str) -> Result<()> {
+pub async fn create_netns(name: &str) -> Result<()> {
     debug!(ns = %name, "netns: create namespace");
     cleanup_netns(name);
 

@@ -148,16 +148,9 @@ pub struct ObservedAddr {
 ///
 /// `Lab` wraps `Arc<Mutex<LabInner>>` and is cheaply cloneable. All methods
 /// take `&self` and use interior mutability through the mutex.
+#[derive(Clone)]
 pub struct Lab {
     pub(crate) inner: Arc<Mutex<LabInner>>,
-}
-
-impl Clone for Lab {
-    fn clone(&self) -> Self {
-        Self {
-            inner: Arc::clone(&self.inner),
-        }
-    }
 }
 
 pub(crate) struct LabInner {

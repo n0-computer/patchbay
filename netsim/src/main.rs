@@ -621,15 +621,13 @@ fn load_topology_for_inspect(
     }
 }
 
-fn spawn_keeper_in_namespace(ns: &str) -> Result<u32> {
+fn keeper_commmand() -> ProcessCommand {
     let mut cmd = ProcessCommand::new("sh");
     cmd.args(["-lc", "while :; do sleep 3600; done"])
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
-    let child = netsim_core::spawn_command_in_namespace(ns, cmd)
-        .with_context(|| format!("spawn namespace keeper in '{ns}'"))?;
-    Ok(child.id())
+    cmd
 }
 
 async fn inspect_command(input: PathBuf, work_dir: PathBuf) -> Result<()> {
@@ -649,10 +647,10 @@ async fn inspect_command(input: PathBuf, work_dir: PathBuf) -> Result<()> {
         let name = router.name.clone();
         let r = lab
             .router_by_name(&name)
-            .ok_or_else(|| anyhow!("unknown router '{name}'"))?;
-        let ns = r.ns();
-        node_keeper_pids.insert(name.clone(), spawn_keeper_in_namespace(&ns)?);
-        node_namespaces.insert(name.clone(), ns);
+            .with_context(|| "unknown router '{name}'")?;
+        let child = r.spawn_command(keeper_commmand())?;
+        node_keeper_pids.insert(name.clone(), child.id());
+        node_namespaces.insert(name.clone(), r.ns());
         if let Some(ip) = r.uplink_ip() {
             node_ips_v4.insert(name, ip.to_string());
         }
@@ -660,10 +658,10 @@ async fn inspect_command(input: PathBuf, work_dir: PathBuf) -> Result<()> {
     for name in topo.device.keys() {
         let d = lab
             .device_by_name(name)
-            .ok_or_else(|| anyhow!("unknown device '{name}'"))?;
-        let ns = d.ns();
-        node_keeper_pids.insert(name.clone(), spawn_keeper_in_namespace(&ns)?);
-        node_namespaces.insert(name.clone(), ns);
+            .with_context(|| "unknown device '{name}'")?;
+        let child = d.spawn_command(keeper_commmand())?;
+        node_keeper_pids.insert(name.clone(), child.id());
+        node_namespaces.insert(name.clone(), d.ns());
         node_ips_v4.insert(name.clone(), d.ip().to_string());
     }
 
