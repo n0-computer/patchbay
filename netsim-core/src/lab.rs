@@ -583,11 +583,6 @@ impl Lab {
         }
     }
 
-    /// Returns the IX gateway IP (203.0.113.1).
-    pub fn ix_gw(&self) -> Ipv4Addr {
-        self.inner.lock().unwrap().ix_gw()
-    }
-
     /// Safety-net cleanup: drops fd-registry entries for this lab's prefix.
     /// Normal cleanup happens in `NetworkCore::drop`.
     pub fn cleanup(&self) {

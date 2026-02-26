@@ -320,7 +320,7 @@ async fn build_nat_case(
 
     let dc_ip = dc.uplink_ip().context("no dc uplink ip")?;
     let r_dc = SocketAddr::new(IpAddr::V4(dc_ip), port_base);
-    let r_ix = SocketAddr::new(IpAddr::V4(lab.ix_gw()), port_base + 1);
+    let r_ix = SocketAddr::new(IpAddr::V4(lab.ix().gw()), port_base + 1);
 
     // UDP reflector (managed by lab).
     dc.spawn_reflector(r_dc)?;
@@ -425,7 +425,7 @@ async fn build_single_nat_case(
 
     let dc_ip = dc.uplink_ip().context("no dc uplink ip")?;
     let r_dc = SocketAddr::new(IpAddr::V4(dc_ip), port_base);
-    let r_ix = SocketAddr::new(IpAddr::V4(lab.ix_gw()), port_base + 1);
+    let r_ix = SocketAddr::new(IpAddr::V4(lab.ix().gw()), port_base + 1);
     dc.spawn_reflector(r_dc)?;
     let ix = lab.ix();
     ix.spawn_reflector(r_ix)?;
@@ -550,7 +550,7 @@ async fn nat_dest_independent_keeps_port() -> Result<()> {
     dc.spawn_reflector(r1)?;
 
     // Reflector on IX bridge (lab-root ns).
-    let r2 = SocketAddr::new(IpAddr::V4(lab.ix_gw()), 3479);
+    let r2 = SocketAddr::new(IpAddr::V4(lab.ix().gw()), 3479);
     let ix = lab.ix();
     ix.spawn_reflector(r2)?;
 
@@ -591,7 +591,7 @@ async fn nat_dest_dependent_changes_port() -> Result<()> {
     let r1 = SocketAddr::new(IpAddr::V4(dc_ip), 4478);
     dc.spawn_reflector(r1)?;
 
-    let r2 = SocketAddr::new(IpAddr::V4(lab.ix_gw()), 4479);
+    let r2 = SocketAddr::new(IpAddr::V4(lab.ix().gw()), 4479);
     let ix = lab.ix();
     ix.spawn_reflector(r2)?;
 
@@ -880,7 +880,7 @@ async fn smoke_ping_isp_to_ix_and_dc() -> Result<()> {
     let isp = lab.add_router("isp1").region("eu").build().await?;
     let dc = lab.add_router("dc1").region("eu").build().await?;
 
-    let ix_gw_str = lab.ix_gw().to_string();
+    let ix_gw_str = lab.ix().gw().to_string();
     isp.run_sync(move || ping(&ix_gw_str))?;
     let dc_ip = dc.uplink_ip().context("no dc uplink ip")?;
     let dc_ip_str = dc_ip.to_string();
