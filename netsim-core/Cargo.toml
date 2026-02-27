@@ -1,26 +1,31 @@
 [package]
-name    = "netsim-core"
+name = "netsim-core"
 version = "0.1.0"
-edition = "2021"
+description = "Linux network-namespace lab for NAT, routing, and link-impairment experiments"
+keywords = ["network", "namespace", "nat", "simulation", "testing"]
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
 
 [dependencies]
-anyhow               = "1"
-tokio                = { version = "1", features = ["rt", "macros", "sync", "time", "fs", "net", "io-util"] }
-rtnetlink            = "0.20"
-netlink-packet-route = "0.28"
-futures              = "0.3"
-nix                  = { version = "0.30", features = ["sched", "mount", "fs", "signal", "process", "user"] }
-serde                = { version = "1", features = ["derive"] }
-toml                 = "0.8"
-tracing              = "0.1"
-ipnet                = "2.11"
-libc                 = "0.2"
-chrono               = { version = "0.4", default-features = false, features = ["clock"] }
-strum                = { version = "0.26", features = ["derive"] }
+anyhow = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 derive_more = { version = "2.1.1", features = ["display"] }
-tokio-util   = "0.7"
+futures = "0.3"
+ipnet = "2.11"
+libc = "0.2"
+netlink-packet-route = "0.28"
+nix = { version = "0.30", features = ["sched", "mount", "fs", "signal", "process", "user"] }
+rtnetlink = "0.20"
+serde = { version = "1", features = ["derive"] }
+strum = { version = "0.26", features = ["derive"] }
+tokio = { version = "1", features = ["rt", "macros", "sync", "time", "fs", "net", "io-util"] }
+tokio-util = "0.7"
+toml = "0.8"
+tracing = "0.1"
 
 [dev-dependencies]
-n0-tracing-test  = "0.3.0"
-ctor             = "0.2"
+ctor = "0.2"
+n0-tracing-test = "0.3.0"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

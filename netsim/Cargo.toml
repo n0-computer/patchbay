@@ -1,36 +1,41 @@
 [package]
-name    = "netsim"
+name = "netsim"
 version = "0.1.0"
-edition = "2021"
+description = "CLI runner for TOML-defined network simulations"
+keywords = ["network", "namespace", "simulation", "testing"]
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
 
 [[bin]]
 name = "netsim"
 path = "src/main.rs"
 
 [dependencies]
-netsim-core  = { path = "../netsim-core" }
+anyhow = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+clap = { version = "4", features = ["derive"] }
+comfy-table = "7"
+ctor = "0.2"
+ctrlc = "3"
+flate2 = "1"
+glob = "0.3"
+netsim-core = { path = "../netsim-core" }
 netsim-utils = { path = "../netsim-utils" }
-anyhow       = "1"
-tokio        = { version = "1", features = ["rt", "macros", "sync", "time", "fs", "process"] }
-clap         = { version = "4", features = ["derive"] }
-serde        = { version = "1", features = ["derive"] }
-serde_json   = "1"
-toml         = "0.8"
-regex        = "1"
-comfy-table  = "7"
-ctrlc        = "3"
-rcgen        = "0.13"
-sha2         = "0.10"
-tracing      = "0.1"
+nix = { version = "0.30", features = ["signal", "process"] }
+rcgen = "0.13"
+regex = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+tar = "0.4"
+tokio = { version = "1", features = ["rt", "macros", "sync", "time", "fs", "process"] }
+toml = "0.8"
+tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-chrono       = { version = "0.4", default-features = false, features = ["clock"] }
-glob         = "0.3"
-ctor         = "0.2"
-nix          = { version = "0.30", features = ["signal", "process"] }
-flate2       = "1"
-tar          = "0.4"
 
 [dev-dependencies]
-serial_test     = "3"
 n0-tracing-test = "0.3.0"
+serial_test = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

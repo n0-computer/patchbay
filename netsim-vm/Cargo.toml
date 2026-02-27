@@ -1,16 +1,21 @@
 [package]
 name = "netsim-vm"
 version = "0.1.0"
-edition = "2021"
+description = "QEMU VM wrapper for running netsim simulations on macOS"
+keywords = ["network", "simulation", "qemu", "vm"]
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
 
 [dependencies]
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
-serde   = { version = "1", features = ["derive"] }
-serde_json = "1"
-toml    = "0.8"
 dirs = "5"
-nix = { version = "0.30", features = ["signal", "process"] }
 flate2 = "1"
-tar = "0.4"
 netsim-utils = { path = "../netsim-utils" }
+nix = { version = "0.30", features = ["signal", "process"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tar = "0.4"
+toml = "0.8"

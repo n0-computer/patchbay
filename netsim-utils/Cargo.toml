@@ -1,18 +1,22 @@
 [package]
-name    = "netsim-utils"
+name = "netsim-utils"
 version = "0.1.0"
-edition = "2021"
-build   = "build.rs"
+description = "Shared utilities for netsim workspace"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+build = "build.rs"
 
 [dependencies]
-anyhow   = "1"
-serde    = { version = "1", features = ["derive"] }
+anyhow = "1"
+flate2 = "1"
+glob = "0.3"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls", "stream"] }
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-reqwest  = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls", "stream"] }
-sha2     = "0.10"
-flate2   = "1"
-tar      = "0.4"
-tracing  = "0.1"
+sha2 = "0.10"
+tar = "0.4"
+tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 webbrowser = "1"
-glob     = "0.3"
