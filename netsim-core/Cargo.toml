@@ -27,5 +27,6 @@ tracing = "0.1"
 
 [dev-dependencies]
 ctor = "0.2"
+hickory-resolver = { version = "0.25", default-features = false, features = ["system-config", "tokio"] }
 n0-tracing-test = "0.3.0"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

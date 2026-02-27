@@ -3302,6 +3302,157 @@ async fn dns_hosts_file_content() -> Result<()> {
     Ok(())
 }
 
+// ── DNS: in-process resolution ───────────────────────────────────────
+
+/// std::net::ToSocketAddrs resolves custom DNS names via the sync worker
+/// thread's bind-mounted /etc/hosts overlay.
+#[tokio::test(flavor = "current_thread")]
+#[traced_test]
+async fn dns_std_to_socket_addrs_in_process() -> Result<()> {
+    let lab = Lab::new();
+    let dc = lab.add_router("dc").build().await?;
+    let dev = lab
+        .add_device("dev")
+        .iface("eth0", dc.id(), None)
+        .build()
+        .await?;
+
+    let dc_ip = dc.uplink_ip().context("dc uplink ip")?;
+    lab.dns_entry("stdtest.netsim", IpAddr::V4(dc_ip))?;
+
+    // run_sync executes on the sync worker thread which has /etc/hosts overlay.
+    let resolved_ip = dev.run_sync(|| {
+        use std::net::ToSocketAddrs;
+        let addr = ("stdtest.netsim", 80u16)
+            .to_socket_addrs()
+            .ok()
+            .and_then(|mut addrs| addrs.next())
+            .map(|a| a.ip());
+        Ok(addr)
+    })?;
+    info!(?resolved_ip, "std::net::ToSocketAddrs via run_sync");
+    assert_eq!(
+        resolved_ip,
+        Some(IpAddr::V4(dc_ip)),
+        "std ToSocketAddrs should resolve via sync worker /etc/hosts overlay"
+    );
+
+    // dev.resolve() also works (in-memory).
+    assert_eq!(dev.resolve("stdtest.netsim"), Some(IpAddr::V4(dc_ip)));
+
+    // Spawned commands also see it (per-child CLONE_NEWNS + bind mount).
+    let mut cmd = std::process::Command::new("getent");
+    cmd.args(["hosts", "stdtest.netsim"]);
+    cmd.stdout(std::process::Stdio::piped());
+    cmd.stderr(std::process::Stdio::piped());
+    let child = dev.spawn_command(cmd)?;
+    let output = child.wait_with_output()?;
+    assert!(
+        output.status.success(),
+        "getent should resolve in spawned command"
+    );
+    Ok(())
+}
+
+/// tokio::net::lookup_host resolves via the blocking pool overlay.
+///
+/// The tokio runtime's `on_thread_start` callback applies `unshare(CLONE_NEWNS)`
+/// + DNS overlay to every blocking pool thread, so `spawn_blocking`-based
+/// `getaddrinfo` calls see the custom `/etc/hosts`.
+#[tokio::test(flavor = "current_thread")]
+#[traced_test]
+async fn dns_tokio_lookup() -> Result<()> {
+    let lab = Lab::new();
+    let dc = lab.add_router("dc").build().await?;
+    let dev = lab
+        .add_device("dev")
+        .iface("eth0", dc.id(), None)
+        .build()
+        .await?;
+
+    let dc_ip = dc.uplink_ip().context("dc uplink ip")?;
+    lab.dns_entry("tokiotest.netsim", IpAddr::V4(dc_ip))?;
+
+    let jh = dev.spawn(move |_dev| async move {
+        tokio::net::lookup_host("tokiotest.netsim:80")
+            .await
+            .ok()
+            .and_then(|mut addrs| addrs.next())
+            .map(|a| a.ip())
+    });
+    let resolved = jh.await.unwrap();
+    info!(?resolved, "tokio lookup_host via spawn");
+    assert_eq!(
+        resolved,
+        Some(IpAddr::V4(dc_ip)),
+        "tokio lookup_host should resolve via blocking pool /etc/hosts overlay"
+    );
+    Ok(())
+}
+
+/// hickory-resolver with system config reads /etc/hosts and /etc/resolv.conf
+/// on the async worker thread, which has the DNS overlay.
+#[tokio::test(flavor = "current_thread")]
+#[traced_test]
+async fn dns_hickory_system_resolver() -> Result<()> {
+    use hickory_resolver::TokioResolver;
+
+    let lab = Lab::new();
+    let dc = lab.add_router("dc").build().await?;
+    let dev = lab
+        .add_device("dev")
+        .iface("eth0", dc.id(), None)
+        .build()
+        .await?;
+
+    let dc_ip = dc.uplink_ip().context("dc uplink ip")?;
+    lab.dns_entry("hickorytest.netsim", IpAddr::V4(dc_ip))?;
+
+    let jh = dev.spawn(move |_dev| async move {
+        let resolver = TokioResolver::builder_tokio().ok()?.build();
+        let lookup = resolver.lookup_ip("hickorytest.netsim").await.ok()?;
+        lookup.iter().next().map(|ip| ip)
+    });
+    let resolved = jh.await.unwrap();
+    info!(?resolved, "hickory resolver via spawn");
+    assert_eq!(
+        resolved,
+        Some(IpAddr::V4(dc_ip)),
+        "hickory should resolve via async worker /etc/hosts overlay"
+    );
+    Ok(())
+}
+
+/// set_nameserver writes resolv.conf visible to spawned commands.
+#[tokio::test(flavor = "current_thread")]
+#[traced_test]
+async fn dns_set_nameserver() -> Result<()> {
+    let lab = Lab::new();
+    let dc = lab.add_router("dc").build().await?;
+    let dev = lab
+        .add_device("dev")
+        .iface("eth0", dc.id(), None)
+        .build()
+        .await?;
+
+    lab.set_nameserver(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)))?;
+
+    // cat /etc/resolv.conf in the device namespace.
+    let mut cmd = std::process::Command::new("cat");
+    cmd.arg("/etc/resolv.conf");
+    cmd.stdout(std::process::Stdio::piped());
+    cmd.stderr(std::process::Stdio::piped());
+    let child = dev.spawn_command(cmd)?;
+    let output = child.wait_with_output()?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    info!(%stdout, "resolv.conf content");
+    assert!(
+        stdout.contains("nameserver 8.8.8.8"),
+        "resolv.conf should contain nameserver line: {stdout}"
+    );
+    Ok(())
+}
+
 // ── IPv6 tests ──────────────────────────────────────────────────────
 
 /// Smoke test: dual-stack DC + device, v6 UDP roundtrip succeeds.

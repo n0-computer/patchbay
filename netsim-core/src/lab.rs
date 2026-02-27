@@ -592,20 +592,33 @@ impl Lab {
 
     // ── DNS entries ───────────────────────────────────────────────────────
 
-    /// Adds a hosts entry visible to all devices (applied to spawned commands via
-    /// `/etc/hosts` bind-mount overlay).
+    /// Adds a hosts entry visible to all devices.
+    ///
+    /// The entry is written to each device's hosts file overlay. Worker threads
+    /// (sync, async, and tokio blocking pool) have `/etc/hosts` bind-mounted, so
+    /// glibc picks up changes on the next `getaddrinfo()` via mtime check.
     pub fn dns_entry(&self, name: &str, ip: std::net::IpAddr) -> Result<()> {
         let mut inner = self.inner.lock().unwrap();
         inner.dns.global.push((name.to_string(), ip));
-        let ids: Vec<_> = inner.all_devices().map(|d| d.id).collect();
-        inner.dns.write_all_hosts_files(&ids)
+        let ids: Vec<_> = inner.all_device_ids();
+        inner.dns.write_all_hosts_files(&ids)?;
+        Ok(())
     }
 
-    /// Resolves a name from the lab-wide DNS entries.
-    /// For in-process Rust code that can't see the bind-mounted `/etc/hosts`.
+    /// Resolves a name from the lab-wide DNS entries (in-memory, no syscall).
     pub fn resolve(&self, name: &str) -> Option<std::net::IpAddr> {
         let inner = self.inner.lock().unwrap();
         inner.dns.resolve(None, name)
+    }
+
+    /// Sets the nameserver for all devices (writes `/etc/resolv.conf` overlay).
+    ///
+    /// Worker threads have `/etc/resolv.conf` bind-mounted, so glibc picks up
+    /// changes on the next resolver call.
+    pub fn set_nameserver(&self, server: std::net::IpAddr) -> Result<()> {
+        let mut inner = self.inner.lock().unwrap();
+        inner.dns.nameserver = Some(server);
+        inner.dns.write_resolv_conf()
     }
 
     // ── Dynamic operations ────────────────────────────────────────────────
@@ -1111,8 +1124,8 @@ impl DeviceBuilder {
     pub async fn build(self) -> Result<Device> {
         self.result?;
 
-        // Phase 1: Lock → extract snapshot → unlock.
-        let (dev, ifaces, prefix, root_ns, netns, need_root_setup) = {
+        // Phase 1: Lock → extract snapshot + DNS overlay → unlock.
+        let (dev, ifaces, prefix, root_ns, netns, need_root_setup, dns_overlay) = {
             let inner = self.inner.lock().unwrap();
             let dev = inner
                 .device(self.id)
@@ -1154,24 +1167,32 @@ impl DeviceBuilder {
                 });
             }
 
+            // Prepare DNS overlay: ensure the hosts file exists and build paths.
+            inner.dns.ensure_hosts_file(self.id)?;
+            let overlay = crate::netns::DnsOverlay {
+                hosts_path: inner.dns.hosts_path_for(self.id),
+                resolv_path: inner.dns.resolv_path(),
+            };
+
             let prefix = inner.cfg.prefix.clone();
             let root_ns = inner.cfg.root_ns.clone();
             let netns = Arc::clone(&inner.netns);
             let need_root = !inner.root_ns_initialized;
-            (dev, iface_data, prefix, root_ns, netns, need_root)
+            (dev, iface_data, prefix, root_ns, netns, need_root, overlay)
         }; // lock released
 
         // Phase 2: Async network setup (no lock held).
+        // The DNS overlay is passed to create_named_netns so worker threads
+        // get /etc/hosts and /etc/resolv.conf bind-mounted at startup.
         async {
             if need_root_setup {
                 ensure_root_ns(&self.inner, &netns).await?;
             }
-            setup_device_async(&netns, &prefix, &root_ns, &dev, ifaces).await
+            setup_device_async(&netns, &prefix, &root_ns, &dev, ifaces, Some(dns_overlay)).await
         }
         .instrument(self.lab_span.clone())
         .await?;
 
-        // Phase 3: Lock → bookkeeping → unlock.
         let lab = Arc::clone(&self.inner);
         Ok(Device { id: self.id, lab })
     }
@@ -1498,24 +1519,17 @@ impl Device {
 
     /// Spawns a raw command in this device's network namespace.
     ///
-    /// If DNS entries have been registered (via [`Lab::dns_entry`] or
-    /// [`Device::dns_entry`]), the child process gets a private mount namespace
-    /// with the generated hosts file bind-mounted over `/etc/hosts`.
+    /// The sync worker thread has `/etc/hosts` and `/etc/resolv.conf` bind-mounted.
+    /// `fork()` inherits the mount namespace, so child processes automatically see
+    /// the DNS overlay without a separate `pre_exec` hook.
     pub fn spawn_command(&self, mut cmd: Command) -> Result<std::process::Child> {
-        let (ns, netns, hosts_path) = {
+        let (ns, netns) = {
             let inner = self.lab.lock().unwrap();
             let dev = inner
                 .device(self.id)
                 .ok_or_else(|| anyhow!("unknown device id"))?;
-            (
-                dev.ns.clone(),
-                Arc::clone(&inner.netns),
-                inner.dns.hosts_path_for(self.id),
-            )
+            (dev.ns.clone(), Arc::clone(&inner.netns))
         };
-        if let Some(path) = hosts_path {
-            inject_hosts_pre_exec(&mut cmd, path);
-        }
         netns.run_closure_in(&ns, move || {
             cmd.spawn().context("spawn command in namespace")
         })
@@ -1540,8 +1554,10 @@ impl Device {
         inner.spawn_reflector_in(ns, bind)
     }
 
-    /// Adds a hosts entry visible only to this device (applied to spawned commands
-    /// via `/etc/hosts` bind-mount overlay).
+    /// Adds a hosts entry visible only to this device.
+    ///
+    /// Written to this device's hosts file overlay. glibc picks up changes
+    /// on the next `getaddrinfo()` via mtime check.
     pub fn dns_entry(&self, name: &str, ip: std::net::IpAddr) -> Result<()> {
         let mut inner = self.lab.lock().unwrap();
         inner
@@ -2067,37 +2083,6 @@ impl Ix {
 // ─────────────────────────────────────────────
 // Helpers
 // ─────────────────────────────────────────────
-
-/// Injects a `pre_exec` hook that creates a private mount namespace and
-/// bind-mounts the given hosts file over `/etc/hosts`.
-fn inject_hosts_pre_exec(cmd: &mut Command, hosts_path: std::path::PathBuf) {
-    use std::os::unix::process::CommandExt;
-    // SAFETY: The pre_exec closure runs between fork and exec in the child.
-    // It only calls async-signal-safe libc functions (unshare, mount).
-    unsafe {
-        cmd.pre_exec(move || {
-            if libc::unshare(libc::CLONE_NEWNS) != 0 {
-                return Err(std::io::Error::last_os_error());
-            }
-            let src =
-                std::ffi::CString::new(hosts_path.as_os_str().as_encoded_bytes()).map_err(
-                    |_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid path"),
-                )?;
-            let dst = c"/etc/hosts";
-            if libc::mount(
-                src.as_ptr(),
-                dst.as_ptr(),
-                std::ptr::null(),
-                libc::MS_BIND | libc::MS_RDONLY,
-                std::ptr::null(),
-            ) != 0
-            {
-                return Err(std::io::Error::last_os_error());
-            }
-            Ok(())
-        });
-    }
-}
 
 /// Ensures the root namespace and IX bridge are set up (lazy init, idempotent).
 async fn ensure_root_ns(

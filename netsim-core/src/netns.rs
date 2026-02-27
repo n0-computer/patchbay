@@ -76,13 +76,18 @@ struct SyncWorker {
 }
 
 impl SyncWorker {
-    fn spawn(fd: &File, parent_span: &tracing::Span, ns: &str) -> Result<Self> {
+    fn spawn(
+        fd: &File,
+        parent_span: &tracing::Span,
+        ns: &str,
+        dns_overlay: Option<DnsOverlay>,
+    ) -> Result<Self> {
         let target = fd
             .try_clone()
             .with_context(|| format!("clone fd for sync worker '{ns}'"))?;
         let (tx, rx) = mpsc::sync_channel(64);
         let span = debug_span!(parent: parent_span, "sync", ns = %ns);
-        let join = thread::spawn(move || sync_worker_main(target, rx, span));
+        let join = thread::spawn(move || sync_worker_main(target, rx, span, dns_overlay));
         Ok(Self {
             tx,
             join: Some(join),
@@ -104,11 +109,69 @@ impl Drop for SyncWorker {
     }
 }
 
-fn sync_worker_main(target: File, rx: mpsc::Receiver<SyncMsg>, span: tracing::Span) {
+/// DNS overlay paths for bind-mounting `/etc/hosts` and `/etc/resolv.conf`.
+#[derive(Clone, Debug)]
+pub struct DnsOverlay {
+    /// Path to the generated hosts file for this namespace.
+    pub hosts_path: std::path::PathBuf,
+    /// Path to the generated resolv.conf for this lab.
+    pub resolv_path: std::path::PathBuf,
+}
+
+/// Bind-mounts `src` over `dst` in the current thread's mount namespace.
+/// The thread must have previously called `unshare(CLONE_NEWNS)`.
+fn bind_mount(src: &std::path::Path, dst: &std::ffi::CStr) -> Result<()> {
+    use std::ffi::CString;
+    let src_c = CString::new(src.as_os_str().as_encoded_bytes()).context("invalid path")?;
+    // Unmount any previous overlay (ignore errors if nothing mounted).
+    unsafe { libc::umount2(dst.as_ptr(), libc::MNT_DETACH) };
+    let ret = unsafe {
+        libc::mount(
+            src_c.as_ptr(),
+            dst.as_ptr(),
+            std::ptr::null(),
+            libc::MS_BIND,
+            std::ptr::null(),
+        )
+    };
+    if ret != 0 {
+        anyhow::bail!(
+            "bind mount {} -> {:?} failed: {}",
+            src.display(),
+            dst,
+            std::io::Error::last_os_error()
+        );
+    }
+    Ok(())
+}
+
+/// Applies DNS overlay mounts (hosts + resolv.conf) in the current thread.
+fn apply_dns_overlay(overlay: &DnsOverlay) {
+    if let Err(e) = bind_mount(&overlay.hosts_path, c"/etc/hosts") {
+        debug!(error = %e, "dns overlay: hosts bind mount failed");
+    }
+    if let Err(e) = bind_mount(&overlay.resolv_path, c"/etc/resolv.conf") {
+        debug!(error = %e, "dns overlay: resolv.conf bind mount failed");
+    }
+}
+
+fn sync_worker_main(
+    target: File,
+    rx: mpsc::Receiver<SyncMsg>,
+    span: tracing::Span,
+    dns_overlay: Option<DnsOverlay>,
+) {
     let _guard = span.entered();
     if let Err(err) = setns(&target, CloneFlags::CLONE_NEWNET) {
         debug!(error = %err, "sync netns worker: setns failed");
         return;
+    }
+    // Private mount namespace so bind-mounted overlays only affect this thread.
+    if let Err(err) = unshare(CloneFlags::CLONE_NEWNS) {
+        debug!(error = %err, "sync netns worker: unshare(CLONE_NEWNS) failed");
+    }
+    if let Some(ref overlay) = dns_overlay {
+        apply_dns_overlay(overlay);
     }
     while let Ok(msg) = rx.recv() {
         match msg {
@@ -137,6 +200,8 @@ struct Worker {
     async_join: Mutex<Option<thread::JoinHandle<()>>>,
     /// Lazy sync worker.
     sync_worker: Mutex<Option<SyncWorker>>,
+    /// DNS overlay paths for /etc/hosts and /etc/resolv.conf.
+    dns_overlay: Option<DnsOverlay>,
 }
 
 impl Worker {
@@ -150,6 +215,7 @@ impl Worker {
             cancel_token: CancellationToken::new(),
             async_join: Mutex::new(None),
             sync_worker: Mutex::new(None),
+            dns_overlay: None,
         }
     }
 
@@ -168,6 +234,7 @@ impl Worker {
         let cancel = self.cancel_token.clone();
         let (handle_tx, handle_rx) = std::sync::mpsc::channel();
 
+        let dns_overlay = self.dns_overlay.clone();
         let join = thread::spawn(move || {
             let _guard = span.entered();
             if let Err(err) = setns(&target, CloneFlags::CLONE_NEWNET) {
@@ -175,11 +242,25 @@ impl Worker {
                 let _ = handle_tx.send(Err(anyhow!("setns failed: {err}")));
                 return;
             }
+            // Private mount namespace so bind-mounted overlays only affect this thread.
+            if let Err(err) = unshare(CloneFlags::CLONE_NEWNS) {
+                debug!(error = %err, "async netns worker: unshare(CLONE_NEWNS) failed");
+            }
+            if let Some(ref overlay) = dns_overlay {
+                apply_dns_overlay(overlay);
+            }
 
-            let rt = match tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-            {
+            let mut builder = tokio::runtime::Builder::new_current_thread();
+            builder.enable_all();
+            // on_thread_start covers blocking pool threads spawned by spawn_blocking.
+            // Each gets its own mount namespace with the DNS overlay.
+            if let Some(overlay) = dns_overlay {
+                builder.on_thread_start(move || {
+                    let _ = unshare(CloneFlags::CLONE_NEWNS);
+                    apply_dns_overlay(&overlay);
+                });
+            }
+            let rt = match builder.build() {
                 Ok(rt) => rt,
                 Err(err) => {
                     error!(error = %err, "async netns worker: runtime build failed");
@@ -238,7 +319,12 @@ impl Worker {
     fn sync_tx(&self) -> Result<mpsc::SyncSender<SyncMsg>> {
         let mut guard = self.sync_worker.lock().expect("sync worker mutex poisoned");
         if guard.is_none() {
-            *guard = Some(SyncWorker::spawn(&self.ns_fd, &self.parent_span, &self.ns)?);
+            *guard = Some(SyncWorker::spawn(
+                &self.ns_fd,
+                &self.parent_span,
+                &self.ns,
+                self.dns_overlay.clone(),
+            )?);
         }
         Ok(guard.as_ref().unwrap().tx.clone())
     }
@@ -343,6 +429,17 @@ impl NetnsManager {
     fn remove_worker(&self, name: &str) {
         let mut workers = self.workers.lock().expect("netns worker map poisoned");
         workers.remove(name); // Worker::drop cancels token + joins threads
+    }
+
+    /// Sets the DNS overlay paths for a namespace. Must be called before workers
+    /// are lazily started — the overlay is applied at worker thread startup.
+    pub fn set_dns_overlay(&self, ns: &str, overlay: DnsOverlay) -> Result<()> {
+        let mut workers = self.workers.lock().expect("netns worker map poisoned");
+        let worker = workers
+            .get_mut(ns)
+            .ok_or_else(|| anyhow!("namespace '{ns}' not registered"))?;
+        worker.dns_overlay = Some(overlay);
+        Ok(())
     }
 
     // ── Async spawn ─────────────────────────────────────────────────
