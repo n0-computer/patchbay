@@ -432,7 +432,6 @@ impl NetnsManager {
             .try_clone()
             .with_context(|| format!("clone ns fd for '{ns}'"))
     }
-
 }
 
 #[cfg(test)]

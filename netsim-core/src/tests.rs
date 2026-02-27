@@ -156,15 +156,19 @@ async fn probe_reflexive_addr(
     };
     match proto {
         Proto::Udp => dev.run_sync(move || probe_udp_from(reflector, bind_addr)),
-        Proto::Tcp => {
-            dev.spawn(move |_| async move { probe_tcp(reflector).await })
-                .await
-                .context("probe_tcp task panicked")?
-        }
+        Proto::Tcp => dev
+            .spawn(move |_| async move { probe_tcp(reflector).await })
+            .await
+            .context("probe_tcp task panicked")?,
     }
 }
 
-async fn probe_reflexive(dev: &Device, proto: Proto, bind: BindMode, ctx: &NatTestCtx) -> Result<ObservedAddr> {
+async fn probe_reflexive(
+    dev: &Device,
+    proto: Proto,
+    bind: BindMode,
+    ctx: &NatTestCtx,
+) -> Result<ObservedAddr> {
     probe_reflexive_addr(dev, proto, bind, ctx.dev_ip, ctx.r_dc).await
 }
 
@@ -1940,14 +1944,16 @@ async fn link_down_up_connectivity() -> Result<()> {
                 Proto::Udp => {
                     dc.spawn_reflector(r)?;
                     tokio::time::sleep(Duration::from_millis(200)).await;
-                    dev.run_sync(move || probe_udp_from(r, bind)).context("before link_down")?;
+                    dev.run_sync(move || probe_udp_from(r, bind))
+                        .context("before link_down")?;
                     dev_handle.link_down("eth0").await?;
                     if dev.run_sync(move || probe_udp_from(r, bind)).is_ok() {
                         bail!("probe should fail after link_down");
                     }
                     dev_handle.link_up("eth0").await?;
                     tokio::time::sleep(Duration::from_millis(100)).await;
-                    dev.run_sync(move || probe_udp_from(r, bind)).context("after link_up")?;
+                    dev.run_sync(move || probe_udp_from(r, bind))
+                        .context("after link_up")?;
                 }
                 Proto::Tcp => {
                     // Persistent echo server: handles all connections for the whole test.
@@ -2261,13 +2267,11 @@ async fn rate_limit_tcp_download() -> Result<()> {
         .build()
         .await?;
 
-    dc.impair_downlink(
-        Some(Impair::Manual {
-            rate: 2000,
-            loss: 0.0,
-            latency: 0,
-        }),
-    )?;
+    dc.impair_downlink(Some(Impair::Manual {
+        rate: 2000,
+        loss: 0.0,
+        latency: 0,
+    }))?;
 
     let dev_ip = dev_id.ip();
     let addr = SocketAddr::new(IpAddr::V4(dev_ip), 17_400);
@@ -2331,13 +2335,11 @@ async fn rate_limit_udp_download() -> Result<()> {
         .build()
         .await?;
 
-    dc.impair_downlink(
-        Some(Impair::Manual {
-            rate: 2000,
-            loss: 0.0,
-            latency: 0,
-        }),
-    )?;
+    dc.impair_downlink(Some(Impair::Manual {
+        rate: 2000,
+        loss: 0.0,
+        latency: 0,
+    }))?;
 
     let dc_ip = dc.uplink_ip().context("no dc uplink ip")?;
     let r = SocketAddr::new(IpAddr::V4(dc_ip), 17_600);
@@ -2374,13 +2376,11 @@ async fn rate_limit_asymmetric() -> Result<()> {
         .build()
         .await?;
 
-    dc.impair_downlink(
-        Some(Impair::Manual {
-            rate: 4000,
-            loss: 0.0,
-            latency: 0,
-        }),
-    )?;
+    dc.impair_downlink(Some(Impair::Manual {
+        rate: 4000,
+        loss: 0.0,
+        latency: 0,
+    }))?;
 
     let dc_ip = dc.uplink_ip().context("no dc uplink ip")?;
     let up_addr = SocketAddr::new(IpAddr::V4(dc_ip), 17_700);
@@ -2470,13 +2470,11 @@ async fn rate_limit_two_hops_stack() -> Result<()> {
         .build()
         .await?;
 
-    dc.impair_downlink(
-        Some(Impair::Manual {
-            rate: 2000,
-            loss: 0.0,
-            latency: 0,
-        }),
-    )?;
+    dc.impair_downlink(Some(Impair::Manual {
+        rate: 2000,
+        loss: 0.0,
+        latency: 0,
+    }))?;
 
     let dc_ip = dc.uplink_ip().context("no dc uplink ip")?;
     let addr = SocketAddr::new(IpAddr::V4(dc_ip), 17_900);
@@ -2517,7 +2515,8 @@ async fn loss_udp_moderate() -> Result<()> {
     dc.spawn_reflector(r)?;
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    let (_, received) = dev.run_sync(move || udp_send_recv_count(r, 100, 64, Duration::from_secs(3)))?;
+    let (_, received) =
+        dev.run_sync(move || udp_send_recv_count(r, 100, 64, Duration::from_secs(3)))?;
     assert!(
         received >= 20,
         "expected ≥ 20 received at 50% loss, got {received}"
@@ -2553,7 +2552,8 @@ async fn loss_udp_high() -> Result<()> {
     dc.spawn_reflector(r)?;
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    let (_, received) = dev.run_sync(move || udp_send_recv_count(r, 100, 64, Duration::from_secs(3)))?;
+    let (_, received) =
+        dev.run_sync(move || udp_send_recv_count(r, 100, 64, Duration::from_secs(3)))?;
     assert!(
         received <= 30,
         "expected ≤ 30 received at 90% loss, got {received}"
@@ -2628,13 +2628,11 @@ async fn loss_udp_both_directions() -> Result<()> {
         .build()
         .await?;
 
-    dc.impair_downlink(
-        Some(Impair::Manual {
-            rate: 0,
-            loss: 30.0,
-            latency: 0,
-        }),
-    )?;
+    dc.impair_downlink(Some(Impair::Manual {
+        rate: 0,
+        loss: 30.0,
+        latency: 0,
+    }))?;
 
     let dc_ip = dc.uplink_ip().context("no dc uplink ip")?;
     let r = SocketAddr::new(IpAddr::V4(dc_ip), 18_300);
@@ -2642,7 +2640,8 @@ async fn loss_udp_both_directions() -> Result<()> {
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     // Round-trip delivery ≈ (1-0.3)×(1-0.3) = 49 %; expect < 80.
-    let (_, received) = dev.run_sync(move || udp_send_recv_count(r, 100, 64, Duration::from_secs(3)))?;
+    let (_, received) =
+        dev.run_sync(move || udp_send_recv_count(r, 100, 64, Duration::from_secs(3)))?;
     assert!(
         received <= 80,
         "expected < 80 echoes with bidirectional loss, got {received}"
@@ -2671,13 +2670,11 @@ async fn latency_download_direction() -> Result<()> {
 
     let base = dev.run_sync(move || crate::test_utils::udp_rtt(r))?;
 
-    dc.impair_downlink(
-        Some(Impair::Manual {
-            rate: 0,
-            loss: 0.0,
-            latency: 50,
-        }),
-    )?;
+    dc.impair_downlink(Some(Impair::Manual {
+        rate: 0,
+        loss: 0.0,
+        latency: 50,
+    }))?;
 
     let impaired = dev.run_sync(move || crate::test_utils::udp_rtt(r))?;
     assert!(
@@ -2706,13 +2703,11 @@ async fn latency_upload_and_download() -> Result<()> {
         .build()
         .await?;
 
-    dc.impair_downlink(
-        Some(Impair::Manual {
-            rate: 0,
-            loss: 0.0,
-            latency: 30,
-        }),
-    )?;
+    dc.impair_downlink(Some(Impair::Manual {
+        rate: 0,
+        loss: 0.0,
+        latency: 30,
+    }))?;
 
     let dc_ip = dc.uplink_ip().context("no dc uplink ip")?;
     let r = SocketAddr::new(IpAddr::V4(dc_ip), 18_500);

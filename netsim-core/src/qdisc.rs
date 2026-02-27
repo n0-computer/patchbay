@@ -25,10 +25,7 @@ pub(crate) fn apply_impair(ifname: &str, limits: ImpairLimits) -> Result<()> {
 ///
 /// Each `IpNet` entry maps to either a v4 or v6 tc filter on the same HTB class tree.
 /// Caller must already be in the target ns.
-pub(crate) fn apply_region_latency_dual(
-    ifname: &str,
-    filters: &[(IpNet, u32)],
-) -> Result<()> {
+pub(crate) fn apply_region_latency_dual(ifname: &str, filters: &[(IpNet, u32)]) -> Result<()> {
     if filters.is_empty() {
         return Ok(());
     }
@@ -181,12 +178,7 @@ impl<'a> Qdisc<'a> {
         Ok(())
     }
 
-    fn add_netem_class(
-        &self,
-        class_id: &str,
-        handle: &str,
-        latency_ms: u32,
-    ) -> Result<()> {
+    fn add_netem_class(&self, class_id: &str, handle: &str, latency_ms: u32) -> Result<()> {
         let mut cmd = Command::new("tc");
         cmd.args([
             "qdisc",

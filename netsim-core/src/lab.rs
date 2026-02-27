@@ -20,8 +20,7 @@ use tracing::{debug, debug_span, Instrument as _};
 
 use crate::{
     core::{
-        self, apply_nat, apply_nat_v6, apply_or_remove_impair, run_nft_in,
-        setup_device_async,
+        self, apply_nat, apply_nat_v6, apply_or_remove_impair, run_nft_in, setup_device_async,
         setup_root_ns_async, setup_router_async, CoreConfig, DownstreamPool, IfaceBuild,
         NetworkCore, NodeId, RouterSetupData,
     },
@@ -199,7 +198,6 @@ impl Lab {
     pub fn prefix(&self) -> String {
         self.inner.lock().unwrap().cfg.prefix.clone()
     }
-
 
     /// Parses `lab.toml`, builds the network, and returns a ready-to-use lab.
     pub async fn load(path: impl AsRef<Path>) -> Result<Self> {
@@ -732,7 +730,6 @@ impl Default for Lab {
     }
 }
 
-
 // ─────────────────────────────────────────────
 // RouterBuilder
 // ─────────────────────────────────────────────
@@ -817,8 +814,7 @@ impl RouterBuilder {
             let has_v4 = self.ip_support.has_v4();
             let has_v6 = self.ip_support.has_v6();
             let sub_switch =
-                inner
-                    .add_switch(&format!("{}-sub", self.name), None, None, None, None);
+                inner.add_switch(&format!("{}-sub", self.name), None, None, None, None);
             inner.connect_router_downlink(id, sub_switch)?;
             match self.upstream {
                 None => {
@@ -833,8 +829,7 @@ impl RouterBuilder {
                         None
                     };
                     let ix_sw = inner.ix_sw();
-                    inner
-                        .connect_router_uplink(id, ix_sw, ix_ip, ix_ip_v6)?;
+                    inner.connect_router_uplink(id, ix_sw, ix_ip, ix_ip_v6)?;
                 }
                 Some(parent_id) => {
                     let parent_downlink = inner
@@ -851,12 +846,7 @@ impl RouterBuilder {
                     } else {
                         None
                     };
-                    inner.connect_router_uplink(
-                        id,
-                        parent_downlink,
-                        uplink_ip_v4,
-                        uplink_ip_v6,
-                    )?;
+                    inner.connect_router_uplink(id, parent_downlink, uplink_ip_v4, uplink_ip_v6)?;
                 }
             }
 
@@ -1253,9 +1243,7 @@ impl Device {
     /// Returns the IPv6 address of the default interface, if assigned.
     pub fn ip6(&self) -> Option<Ipv6Addr> {
         let inner = self.lab.lock().unwrap();
-        inner
-            .device(self.id)
-            .and_then(|d| d.default_iface().ip_v6)
+        inner.device(self.id).and_then(|d| d.default_iface().ip_v6)
     }
 
     /// Returns a snapshot of the named interface, if it exists.
@@ -1274,9 +1262,7 @@ impl Device {
     /// Returns a snapshot of the default interface.
     pub fn default_iface(&self) -> DeviceIface {
         let inner = self.lab.lock().unwrap();
-        let dev = inner
-            .device(self.id)
-            .expect("device handle has valid id");
+        let dev = inner.device(self.id).expect("device handle has valid id");
         let iface = dev.default_iface();
         DeviceIface {
             ifname: iface.ifname.clone(),
@@ -1434,7 +1420,10 @@ impl Device {
         T: Send + 'static,
     {
         let inner = self.lab.lock().unwrap();
-        let ns = &inner.device(self.id).expect("device handle has valid id").ns;
+        let ns = &inner
+            .device(self.id)
+            .expect("device handle has valid id")
+            .ns;
         let rt = inner.rt_handle_for(ns).expect("namespace has async worker");
         let handle = self.clone();
         rt.spawn(f(handle))
@@ -1501,7 +1490,10 @@ impl Device {
     /// Spawns a UDP reflector in this device's network namespace.
     pub fn spawn_reflector(&self, bind: SocketAddr) -> Result<()> {
         let inner = self.lab.lock().unwrap();
-        let ns = &inner.device(self.id).ok_or_else(|| anyhow!("unknown device id"))?.ns;
+        let ns = &inner
+            .device(self.id)
+            .ok_or_else(|| anyhow!("unknown device id"))?
+            .ns;
         inner.spawn_reflector_in(ns, bind)
     }
 
@@ -1670,10 +1662,7 @@ impl Router {
     /// Returns the NAT mode.
     pub fn nat_mode(&self) -> NatMode {
         let inner = self.lab.lock().unwrap();
-        inner
-            .router(self.id)
-            .map(|r| r.cfg.nat)
-            .unwrap_or_default()
+        inner.router(self.id).map(|r| r.cfg.nat).unwrap_or_default()
     }
 
     /// Returns the uplink (WAN-side) IP, if connected.
@@ -1712,9 +1701,7 @@ impl Router {
     /// Returns the downstream IPv6 subnet CIDR, if allocated.
     pub fn downstream_cidr_v6(&self) -> Option<Ipv6Net> {
         let inner = self.lab.lock().unwrap();
-        inner
-            .router(self.id)
-            .and_then(|r| r.downstream_cidr_v6)
+        inner.router(self.id).and_then(|r| r.downstream_cidr_v6)
     }
 
     /// Returns the downstream IPv6 gateway address, if allocated.
@@ -1745,10 +1732,7 @@ impl Router {
         };
         run_nft_in(&netns, &ns, "flush table ip nat").ok();
         apply_nat(&netns, &ns, mode, &lan_if, &wan_if, wan_ip)?;
-        self.lab
-            .lock()
-            .unwrap()
-            .set_router_nat_mode(self.id, mode)
+        self.lab.lock().unwrap().set_router_nat_mode(self.id, mode)
     }
 
     /// Replaces IPv6 NAT rules on this router at runtime.
@@ -1826,7 +1810,10 @@ impl Router {
         T: Send + 'static,
     {
         let inner = self.lab.lock().unwrap();
-        let ns = &inner.router(self.id).expect("router handle has valid id").ns;
+        let ns = &inner
+            .router(self.id)
+            .expect("router handle has valid id")
+            .ns;
         let rt = inner.rt_handle_for(ns).expect("namespace has async worker");
         let handle = self.clone();
         rt.spawn(f(handle))
@@ -1886,7 +1873,11 @@ impl Router {
         let (ns, bridge, netns) = {
             let inner = self.lab.lock().unwrap();
             let r = inner.router(self.id).context("unknown router id")?;
-            (r.ns.clone(), r.downlink_bridge.clone(), Arc::clone(&inner.netns))
+            (
+                r.ns.clone(),
+                r.downlink_bridge.clone(),
+                Arc::clone(&inner.netns),
+            )
         };
         apply_or_remove_impair(&netns, &ns, &bridge, impair);
         Ok(())
@@ -1895,7 +1886,10 @@ impl Router {
     /// Spawns a UDP reflector in this router's network namespace.
     pub fn spawn_reflector(&self, bind: SocketAddr) -> Result<()> {
         let inner = self.lab.lock().unwrap();
-        let ns = &inner.router(self.id).ok_or_else(|| anyhow!("unknown router id"))?.ns;
+        let ns = &inner
+            .router(self.id)
+            .ok_or_else(|| anyhow!("unknown router id"))?
+            .ns;
         inner.spawn_reflector_in(ns, bind)
     }
 }
@@ -1952,7 +1946,9 @@ impl Ix {
     {
         let inner = self.lab.lock().unwrap();
         let ns = inner.root_ns();
-        let rt = inner.rt_handle_for(ns).expect("root namespace has async worker");
+        let rt = inner
+            .rt_handle_for(ns)
+            .expect("root namespace has async worker");
         let handle = self.clone();
         rt.spawn(f(handle))
     }
@@ -1966,10 +1962,7 @@ impl Ix {
     {
         let (ns, netns) = {
             let inner = self.lab.lock().unwrap();
-            (
-                inner.root_ns().to_string(),
-                Arc::clone(&inner.netns),
-            )
+            (inner.root_ns().to_string(), Arc::clone(&inner.netns))
         };
         netns.run_closure_in(&ns, f)
     }
@@ -1982,10 +1975,7 @@ impl Ix {
     {
         let (ns, netns) = {
             let inner = self.lab.lock().unwrap();
-            (
-                inner.root_ns().to_string(),
-                Arc::clone(&inner.netns),
-            )
+            (inner.root_ns().to_string(), Arc::clone(&inner.netns))
         };
         netns.spawn_thread_in(&ns, f)
     }
@@ -1994,10 +1984,7 @@ impl Ix {
     pub fn spawn_command(&self, mut cmd: Command) -> Result<std::process::Child> {
         let (ns, netns) = {
             let inner = self.lab.lock().unwrap();
-            (
-                inner.root_ns().to_string(),
-                Arc::clone(&inner.netns),
-            )
+            (inner.root_ns().to_string(), Arc::clone(&inner.netns))
         };
         netns.run_closure_in(&ns, move || {
             cmd.spawn().context("spawn command in namespace")
@@ -2011,7 +1998,6 @@ impl Ix {
         inner.spawn_reflector_in(ns, bind)
     }
 }
-
 
 // ─────────────────────────────────────────────
 // Helpers

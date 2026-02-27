@@ -360,7 +360,10 @@ impl NetworkCore {
     }
 
     /// Returns `(ns, downlink_bridge_name, wan_if_name, upstream_ip)` for a built router.
-    pub(crate) fn router_nat_params(&self, id: NodeId) -> Result<(String, String, String, Ipv4Addr)> {
+    pub(crate) fn router_nat_params(
+        &self,
+        id: NodeId,
+    ) -> Result<(String, String, String, Ipv4Addr)> {
         let router = self.routers.get(&id).context("unknown router id")?;
         let wan_if = router.wan_ifname(self.ix_sw);
         let upstream_ip = router
@@ -763,7 +766,6 @@ impl NetworkCore {
     pub(crate) fn all_router_ids(&self) -> Vec<NodeId> {
         self.routers.keys().copied().collect()
     }
-
 }
 
 // ─────────────────────────────────────────────
@@ -949,7 +951,14 @@ pub(crate) async fn setup_router_async(
                 let lan_pfx = Ipv6Net::new(dl_gw_v6, dl_prefix)
                     .unwrap_or_else(|_| Ipv6Net::new(dl_gw_v6, 64).unwrap());
                 debug!(nat_v6 = ?router.cfg.nat_v6, "router: apply NAT v6");
-                apply_nat_v6(netns, &router.ns, router.cfg.nat_v6, &ns_if, lan_pfx, wan_pfx)?;
+                apply_nat_v6(
+                    netns,
+                    &router.ns,
+                    router.cfg.nat_v6,
+                    &ns_if,
+                    lan_pfx,
+                    wan_pfx,
+                )?;
             }
         }
     } else {
@@ -1059,7 +1068,14 @@ pub(crate) async fn setup_router_async(
                 let lan_pfx = Ipv6Net::new(dl_gw_v6, dl_prefix)
                     .unwrap_or_else(|_| Ipv6Net::new(dl_gw_v6, 64).unwrap());
                 debug!(nat_v6 = ?router.cfg.nat_v6, "router: apply NAT v6");
-                apply_nat_v6(netns, &router.ns, router.cfg.nat_v6, &wan_if, lan_pfx, wan_pfx)?;
+                apply_nat_v6(
+                    netns,
+                    &router.ns,
+                    router.cfg.nat_v6,
+                    &wan_if,
+                    lan_pfx,
+                    wan_pfx,
+                )?;
             }
         }
     }
@@ -1434,12 +1450,7 @@ table ip nat {{
 }
 
 /// Applies an impairment preset or manual limits on `ifname` inside `ns`.
-pub(crate) fn apply_impair_in(
-    netns: &netns::NetnsManager,
-    ns: &str,
-    ifname: &str,
-    impair: Impair,
-) {
+pub(crate) fn apply_impair_in(netns: &netns::NetnsManager, ns: &str, ifname: &str, impair: Impair) {
     debug!(ns = %ns, ifname = %ifname, impair = ?impair, "tc: apply impairment");
     let limits = match impair {
         Impair::Wifi => qdisc::ImpairLimits {
@@ -1487,4 +1498,3 @@ pub(crate) fn apply_or_remove_impair(
         }
     }
 }
-
