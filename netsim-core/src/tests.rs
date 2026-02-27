@@ -2497,15 +2497,17 @@ async fn loss_udp_moderate() -> Result<()> {
     dc.spawn_reflector(r)?;
     tokio::time::sleep(Duration::from_millis(100)).await;
 
+    // Send 500 packets for a tighter statistical distribution at 50% loss.
+    // Expected ~250 received; bounds [100, 400] give wide margin.
     let (_, received) =
-        dev.run_sync(move || udp_send_recv_count(r, 100, 64, Duration::from_secs(3)))?;
+        dev.run_sync(move || udp_send_recv_count(r, 500, 64, Duration::from_secs(5)))?;
     assert!(
-        received >= 20,
-        "expected ≥ 20 received at 50% loss, got {received}"
+        received >= 100,
+        "expected ≥ 100 received at 50% loss (of 500 sent), got {received}"
     );
     assert!(
-        received <= 80,
-        "expected ≤ 80 received at 50% loss, got {received}"
+        received <= 400,
+        "expected ≤ 400 received at 50% loss (of 500 sent), got {received}"
     );
     Ok(())
 }
