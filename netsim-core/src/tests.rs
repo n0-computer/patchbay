@@ -3074,6 +3074,234 @@ async fn rate_presets() -> Result<()> {
     Ok(())
 }
 
+// ── DNS entries ─────────────────────────────────────────────────────
+
+/// Lab-wide dns_entry is visible in a spawned command's /etc/hosts.
+#[tokio::test(flavor = "current_thread")]
+#[traced_test]
+async fn dns_entry_visible_in_spawned_cmd() -> Result<()> {
+    let lab = Lab::new();
+    let dc = lab.add_router("dc").build().await?;
+    let dev = lab
+        .add_device("dev")
+        .iface("eth0", dc.id(), None)
+        .build()
+        .await?;
+
+    let dc_ip = dc.uplink_ip().context("dc uplink ip")?;
+    lab.dns_entry("myserver.test", IpAddr::V4(dc_ip))?;
+
+    // Spawn `getent hosts myserver.test` and check it resolves.
+    let mut cmd = std::process::Command::new("getent");
+    cmd.args(["hosts", "myserver.test"]);
+    cmd.stdout(std::process::Stdio::piped());
+    cmd.stderr(std::process::Stdio::piped());
+    let child = dev.spawn_command(cmd)?;
+    let output = child.wait_with_output().context("wait getent")?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    info!(%stdout, "getent output");
+    assert!(
+        output.status.success(),
+        "getent failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        stdout.contains(&dc_ip.to_string()),
+        "expected {dc_ip} in getent output: {stdout}"
+    );
+    Ok(())
+}
+
+/// Lab-wide dns_entry is visible from two different devices.
+#[tokio::test(flavor = "current_thread")]
+#[traced_test]
+async fn dns_entry_lab_wide() -> Result<()> {
+    let lab = Lab::new();
+    let dc = lab.add_router("dc").build().await?;
+    let dev1 = lab
+        .add_device("dev1")
+        .iface("eth0", dc.id(), None)
+        .build()
+        .await?;
+    let dev2 = lab
+        .add_device("dev2")
+        .iface("eth0", dc.id(), None)
+        .build()
+        .await?;
+
+    lab.dns_entry("shared.test", IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4)))?;
+
+    for dev in [&dev1, &dev2] {
+        let mut cmd = std::process::Command::new("getent");
+        cmd.args(["hosts", "shared.test"]);
+        cmd.stdout(std::process::Stdio::piped());
+        cmd.stderr(std::process::Stdio::piped());
+        let child = dev.spawn_command(cmd)?;
+        let output = child.wait_with_output()?;
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.contains("1.2.3.4"),
+            "device should see shared.test: {stdout}"
+        );
+    }
+    Ok(())
+}
+
+/// Device-specific dns_entry is only visible to that device.
+#[tokio::test(flavor = "current_thread")]
+#[traced_test]
+async fn dns_entry_device_specific() -> Result<()> {
+    let lab = Lab::new();
+    let dc = lab.add_router("dc").build().await?;
+    let dev1 = lab
+        .add_device("dev1")
+        .iface("eth0", dc.id(), None)
+        .build()
+        .await?;
+    let dev2 = lab
+        .add_device("dev2")
+        .iface("eth0", dc.id(), None)
+        .build()
+        .await?;
+
+    dev1.dns_entry("secret.test", IpAddr::V4(Ipv4Addr::new(10, 99, 0, 1)))?;
+
+    // dev1 should see it.
+    let mut cmd = std::process::Command::new("getent");
+    cmd.args(["hosts", "secret.test"]);
+    cmd.stdout(std::process::Stdio::piped());
+    cmd.stderr(std::process::Stdio::piped());
+    let child = dev1.spawn_command(cmd)?;
+    let output = child.wait_with_output()?;
+    assert!(
+        output.status.success(),
+        "dev1 should resolve secret.test"
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("10.99.0.1"));
+
+    // dev2 should NOT see it (no dns_entry for dev2, so no hosts overlay).
+    let mut cmd2 = std::process::Command::new("getent");
+    cmd2.args(["hosts", "secret.test"]);
+    cmd2.stdout(std::process::Stdio::piped());
+    cmd2.stderr(std::process::Stdio::piped());
+    let child2 = dev2.spawn_command(cmd2)?;
+    let output2 = child2.wait_with_output()?;
+    assert!(
+        !output2.status.success(),
+        "dev2 should NOT resolve secret.test"
+    );
+    Ok(())
+}
+
+/// In-process resolve() returns correct IPs for lab-wide + device entries.
+#[tokio::test(flavor = "current_thread")]
+#[traced_test]
+async fn dns_resolve_in_process() -> Result<()> {
+    let lab = Lab::new();
+    let dc = lab.add_router("dc").build().await?;
+    let dev = lab
+        .add_device("dev")
+        .iface("eth0", dc.id(), None)
+        .build()
+        .await?;
+
+    let ip1 = IpAddr::V4(Ipv4Addr::new(10, 0, 1, 1));
+    let ip2 = IpAddr::V4(Ipv4Addr::new(10, 0, 2, 2));
+
+    lab.dns_entry("global.test", ip1)?;
+    dev.dns_entry("local.test", ip2)?;
+
+    // Lab resolve sees global but not device-specific.
+    assert_eq!(lab.resolve("global.test"), Some(ip1));
+    assert_eq!(lab.resolve("local.test"), None);
+
+    // Device resolve sees both.
+    assert_eq!(dev.resolve("global.test"), Some(ip1));
+    assert_eq!(dev.resolve("local.test"), Some(ip2));
+
+    // Device-specific shadows global with same name.
+    let ip3 = IpAddr::V4(Ipv4Addr::new(10, 0, 3, 3));
+    dev.dns_entry("global.test", ip3)?;
+    assert_eq!(dev.resolve("global.test"), Some(ip3));
+    // Lab still returns the original.
+    assert_eq!(lab.resolve("global.test"), Some(ip1));
+
+    Ok(())
+}
+
+/// dns_entry added after build is visible in subsequent spawn_command.
+#[tokio::test(flavor = "current_thread")]
+#[traced_test]
+async fn dns_entry_after_build() -> Result<()> {
+    let lab = Lab::new();
+    let dc = lab.add_router("dc").build().await?;
+    let dev = lab
+        .add_device("dev")
+        .iface("eth0", dc.id(), None)
+        .build()
+        .await?;
+
+    // No entries yet — getent should fail (no hosts overlay injected).
+    let mut cmd = std::process::Command::new("getent");
+    cmd.args(["hosts", "late.test"]);
+    cmd.stdout(std::process::Stdio::piped());
+    cmd.stderr(std::process::Stdio::piped());
+    let child = dev.spawn_command(cmd)?;
+    let output = child.wait_with_output()?;
+    assert!(!output.status.success(), "should not resolve before dns_entry");
+
+    // Add entry after build.
+    lab.dns_entry("late.test", IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)))?;
+
+    // Now it should resolve.
+    let mut cmd2 = std::process::Command::new("getent");
+    cmd2.args(["hosts", "late.test"]);
+    cmd2.stdout(std::process::Stdio::piped());
+    cmd2.stderr(std::process::Stdio::piped());
+    let child2 = dev.spawn_command(cmd2)?;
+    let output2 = child2.wait_with_output()?;
+    let stdout = String::from_utf8_lossy(&output2.stdout);
+    assert!(
+        output2.status.success(),
+        "should resolve after dns_entry: {}",
+        String::from_utf8_lossy(&output2.stderr)
+    );
+    assert!(stdout.contains("192.168.1.1"));
+    Ok(())
+}
+
+/// Verify that the generated hosts file content is correct.
+#[tokio::test(flavor = "current_thread")]
+#[traced_test]
+async fn dns_hosts_file_content() -> Result<()> {
+    let lab = Lab::new();
+    let dc = lab.add_router("dc").build().await?;
+    let dev = lab
+        .add_device("dev")
+        .iface("eth0", dc.id(), None)
+        .build()
+        .await?;
+
+    lab.dns_entry("alpha.test", IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)))?;
+    dev.dns_entry("beta.test", IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)))?;
+
+    // Read the hosts file via cat in the device namespace.
+    let mut cmd = std::process::Command::new("cat");
+    cmd.arg("/etc/hosts");
+    cmd.stdout(std::process::Stdio::piped());
+    cmd.stderr(std::process::Stdio::piped());
+    let child = dev.spawn_command(cmd)?;
+    let output = child.wait_with_output()?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    info!(%stdout, "hosts file content");
+
+    assert!(stdout.contains("127.0.0.1\tlocalhost"), "should have localhost");
+    assert!(stdout.contains("::1\tlocalhost"), "should have ipv6 localhost");
+    assert!(stdout.contains("10.0.0.1\talpha.test"), "should have global entry");
+    assert!(stdout.contains("10.0.0.2\tbeta.test"), "should have device entry");
+    Ok(())
+}
+
 // ── IPv6 tests ──────────────────────────────────────────────────────
 
 /// Smoke test: dual-stack DC + device, v6 UDP roundtrip succeeds.
