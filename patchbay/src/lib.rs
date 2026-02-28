@@ -1,5 +1,9 @@
 //! patchbay — Linux network-namespace lab for NAT/routing experiments.
 //!
+//! Each router and device lives in its own Linux network namespace with real
+//! kernel networking (veth pairs, nftables NAT, tc netem impairment). The
+//! library handles namespace creation, IP allocation, and teardown.
+//!
 //! # Quick start (from TOML)
 //! ```no_run
 //! # use patchbay::Lab;
@@ -20,7 +24,7 @@
 //! # use patchbay::{Lab, Nat};
 //! # #[tokio::main(flavor = "current_thread")]
 //! # async fn main() -> anyhow::Result<()> {
-//! let lab = Lab::new();
+//! let lab = Lab::new().await;
 //! let isp = lab
 //!     .add_router("isp1")
 //!     .nat(Nat::Cgnat)
@@ -40,8 +44,8 @@
 //! # }
 //! ```
 //!
-//! namespace transitions are executed inside dedicated worker
-//! threads in the netns manager; callers can use any Tokio runtime flavor.
+//! Namespace transitions are executed inside dedicated worker threads; callers
+//! can use any Tokio runtime flavor.
 
 use anyhow::{anyhow, bail, Context, Result};
 
@@ -78,6 +82,14 @@ pub use crate::{
 pub use ipnet::Ipv4Net;
 
 /// Verifies the process has enough privileges to manage namespaces, routes, and raw sockets.
+///
+/// Checks for `CAP_NET_ADMIN`, `CAP_NET_RAW`, and `CAP_SYS_ADMIN` in the
+/// effective capability set. Returns `Ok(())` if the process is root or all
+/// capabilities are present.
+///
+/// # Errors
+///
+/// Returns an error listing the missing capabilities.
 pub fn check_caps() -> Result<()> {
     if nix::unistd::Uid::effective().is_root() {
         return Ok(());

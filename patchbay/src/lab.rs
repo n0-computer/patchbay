@@ -173,7 +173,10 @@ impl LinkCondition {
     }
 }
 
-/// Observed external address as reported by a STUN-like reflector.
+/// Observed external address as reported by a STUN-like UDP reflector.
+///
+/// This is the `ip:port` pair that the reflector sees after NAT translation.
+/// Alias for [`SocketAddr`].
 pub type ObservedAddr = SocketAddr;
 
 // ─────────────────────────────────────────────
@@ -203,17 +206,21 @@ impl Region {
     }
 }
 
-/// Parameters for an inter-region link.
+/// Parameters for an inter-region link passed to [`Lab::link_regions`].
 #[derive(Clone, Debug)]
 pub struct RegionLink {
+    /// One-way latency in milliseconds (RTT = 2x).
     pub latency_ms: u32,
+    /// Jitter in milliseconds (uniform distribution around `latency_ms`).
     pub jitter_ms: u32,
+    /// Packet loss percentage (0.0–100.0).
     pub loss_pct: f64,
+    /// Rate limit in Mbit/s (0 = unlimited).
     pub rate_mbit: u32,
 }
 
 impl RegionLink {
-    /// Good inter-region link with just latency.
+    /// Good inter-region link: only latency, no jitter or loss.
     pub fn good(latency_ms: u32) -> Self {
         Self {
             latency_ms,
@@ -223,7 +230,7 @@ impl RegionLink {
         }
     }
 
-    /// Degraded link with jitter and some loss.
+    /// Degraded link: jitter = latency/10, 0.5% loss, no rate limit.
     pub fn degraded(latency_ms: u32) -> Self {
         Self {
             latency_ms,
@@ -236,8 +243,11 @@ impl RegionLink {
 
 /// Pre-built regions from [`Lab::add_default_regions`].
 pub struct DefaultRegions {
+    /// US region (198.18.0.0/20).
     pub us: Region,
+    /// EU region (198.18.16.0/20).
     pub eu: Region,
+    /// Asia region (198.18.32.0/20).
     pub asia: Region,
 }
 
@@ -999,6 +1009,15 @@ impl Lab {
     }
 
     /// Restores a previously broken direct link between two regions.
+    ///
+    /// Reverses [`break_region_link`](Self::break_region_link): replaces the
+    /// indirect route through the intermediate region with the original direct
+    /// veth route.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the link is not currently broken or if the regions
+    /// are not connected.
     pub fn restore_region_link(&self, a: &Region, b: &Region) -> Result<()> {
         let link_key = Self::region_link_key(&a.name, &b.name);
         let (a_ns, b_ns, link_ip_a, link_ip_b) = {
@@ -1106,6 +1125,10 @@ impl Lab {
     pub fn set_region_latency(&self, _from: &str, _to: &str, _latency_ms: u32) {}
 
     /// Builds a map of `NETSIM_*` environment variables from the current lab state.
+    ///
+    /// Keys follow the pattern `NETSIM_IP_{DEVICE}` for the default interface
+    /// and `NETSIM_IP_{DEVICE}_{IFACE}` for all interfaces. Names are
+    /// uppercased with hyphens replaced by underscores.
     pub fn env_vars(&self) -> std::collections::HashMap<String, String> {
         let inner = self.inner.core.lock().unwrap();
         let mut map = std::collections::HashMap::new();

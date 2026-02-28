@@ -46,7 +46,11 @@ pub(crate) struct CoreConfig {
     pub span: tracing::Span,
 }
 
-/// Identifies a node in the topology graph.
+/// Opaque identifier for a node (device or router) in the topology graph.
+///
+/// Obtained from [`Device::id`](crate::Device::id), [`Router::id`](crate::Router::id),
+/// or builder methods.
+/// Cheaply copyable and usable as a hash-map key.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct NodeId(pub u64);
 

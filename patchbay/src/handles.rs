@@ -1,4 +1,13 @@
-//! Device, Router, and Ix handle types.
+//! Cloneable handles for interacting with lab nodes at runtime.
+//!
+//! [`Device`], [`Router`], and [`Ix`] are thin wrappers around a [`NodeId`] and
+//! an `Arc` to the lab interior. They are cheaply cloneable and safe to share
+//! across tasks and threads. All accessor methods briefly lock an internal mutex,
+//! copy the requested value, and return owned data — no borrow escapes the lock.
+//!
+//! Mutation methods (`set_nat_mode`, `set_link_condition`, etc.) are `async` and
+//! serialize per-node via a `tokio::sync::Mutex<()>` operation guard to prevent
+//! TOCTOU races when multiple tasks mutate the same node concurrently.
 
 use std::{
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
@@ -64,8 +73,15 @@ impl DeviceIface {
 
 /// Cloneable handle to a device in the lab topology.
 ///
-/// Holds a `NodeId` and an `Arc` to the lab interior. All accessor methods
+/// Holds a [`NodeId`] and an `Arc` to the lab interior. All accessor methods
 /// briefly lock the mutex, read a value, and return owned data.
+///
+/// # Panics
+///
+/// Most accessor methods (except [`name`](Self::name) and [`ns`](Self::ns))
+/// panic if the underlying device has been removed via [`Lab::remove_device`](crate::Lab::remove_device).
+/// Call [`Lab::device`](crate::Lab::device) to check existence first if the
+/// device may have been removed.
 pub struct Device {
     id: NodeId,
     lab: Arc<LabInner>,
@@ -172,6 +188,10 @@ impl Device {
     // ── Dynamic operations ──────────────────────────────────────────────
 
     /// Brings an interface administratively down.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the netlink operation fails.
     pub async fn link_down(&self, ifname: &str) -> Result<()> {
         let ns = self.lab.with_device(self.id, |d| d.ns.clone());
         let ifname = ifname.to_string();
@@ -218,6 +238,14 @@ impl Device {
     }
 
     /// Sets the active default route to a different interface.
+    ///
+    /// Replaces the kernel default route and re-applies any link impairment
+    /// configured on the target interface.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `to` is not a known interface on this device or if
+    /// the netlink route replacement fails.
     pub async fn set_default_route(&self, to: &str) -> Result<()> {
         let op = self.lab.with_device(self.id, |d| Arc::clone(&d.op));
         let _guard = op.lock().await;
@@ -247,6 +275,13 @@ impl Device {
     }
 
     /// Applies or removes a link-layer impairment on the named interface.
+    ///
+    /// Pass `Some(condition)` to apply `tc netem` rules, or `None` to remove
+    /// any existing impairment and restore the default qdisc.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the interface does not exist on this device.
     pub async fn set_link_condition(
         &self,
         ifname: &str,
@@ -279,10 +314,11 @@ impl Device {
 
     // ── Spawn / run ────────────────────────────────────────────────────
 
-    /// Spawns an async task in this device's network namespace.
+    /// Spawns an async task on this device's namespace tokio runtime.
     ///
-    /// The closure receives a cloned [`Device`] handle. Returns a
-    /// `JoinHandle` that resolves to the task's output.
+    /// The closure receives a cloned [`Device`] handle and can use
+    /// `tokio::net` for network I/O that will go through this device's
+    /// network namespace.
     pub fn spawn<F, Fut, T>(&self, f: F) -> tokio::task::JoinHandle<T>
     where
         F: FnOnce(Device) -> Fut + Send + 'static,
@@ -299,9 +335,10 @@ impl Device {
     }
 
     /// Runs a short-lived sync closure in this device's network namespace.
-    /// Blocks the caller until the closure returns.
     ///
-    /// Only for fast, non-blocking work. Never pass TCP/UDP I/O here.
+    /// Blocks the caller until the closure returns. Only for fast,
+    /// non-blocking work (sysctl writes, `Command::spawn`). **Never** perform
+    /// TCP/UDP I/O here — use [`spawn`](Self::spawn) with `tokio::net` instead.
     pub fn run_sync<F, R>(&self, f: F) -> Result<R>
     where
         F: FnOnce() -> Result<R> + Send + 'static,
@@ -312,6 +349,9 @@ impl Device {
     }
 
     /// Spawns a dedicated OS thread in this device's network namespace.
+    ///
+    /// The thread inherits the namespace's network stack and DNS overlays.
+    /// Use for long-running blocking work that cannot be made async.
     pub fn spawn_thread<F, R>(&self, f: F) -> Result<thread::JoinHandle<Result<R>>>
     where
         F: FnOnce() -> Result<R> + Send + 'static,
@@ -333,10 +373,11 @@ impl Device {
         })
     }
 
-    /// Spawns an async command in this device's network namespace.
+    /// Spawns a [`tokio::process::Command`] in this device's network namespace.
     ///
     /// The child is registered with the namespace's tokio reactor so that
     /// `.wait()` and `.wait_with_output()` work as non-blocking futures.
+    /// The sync worker's DNS bind-mounts are inherited by the child process.
     pub fn spawn_command_async(
         &self,
         mut cmd: tokio::process::Command,
@@ -350,6 +391,11 @@ impl Device {
     }
 
     /// Probes the NAT mapping seen by a reflector from this device.
+    ///
+    /// Sends a UDP probe to `reflector` and returns the [`ObservedAddr`] — the
+    /// `ip:port` as seen by the reflector after NAT translation.
+    ///
+    /// The local bind port is deterministic based on the device's [`NodeId`].
     pub fn probe_udp_mapping(&self, reflector: SocketAddr) -> Result<ObservedAddr> {
         let base = 40000u16;
         let port = base + ((self.id.0 % 20000) as u16);
@@ -364,7 +410,10 @@ impl Device {
         })
     }
 
-    /// Spawns a UDP reflector in this device's network namespace.
+    /// Spawns a STUN-like UDP reflector in this device's network namespace.
+    ///
+    /// The reflector echoes the sender's observed `ip:port` back, enabling
+    /// NAT mapping tests via [`probe_udp_mapping`](Self::probe_udp_mapping).
     pub fn spawn_reflector(&self, bind: SocketAddr) -> Result<()> {
         let ns = self.lab.with_device(self.id, |d| d.ns.clone());
         self.lab.spawn_reflector_in(&ns, bind)
@@ -385,8 +434,10 @@ impl Device {
         inner.dns.write_hosts_file(self.id)
     }
 
-    /// Resolves a name using this device's entries + lab-wide entries.
-    /// For in-process Rust code that can't see the bind-mounted `/etc/hosts`.
+    /// Resolves a name using this device's entries plus lab-wide entries.
+    ///
+    /// For in-process Rust code that cannot see the bind-mounted `/etc/hosts`.
+    /// Spawned child processes resolve names through glibc automatically.
     pub fn resolve(&self, name: &str) -> Option<std::net::IpAddr> {
         let inner = self.lab.core.lock().unwrap();
         inner.dns.resolve(Some(self.id), name)
@@ -398,6 +449,11 @@ impl Device {
     /// The interface name is preserved but the IP address changes (allocated from
     /// the new router's pool). The old veth pair is torn down and a fresh one is
     /// created.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `ifname` does not exist on this device, if
+    /// `to_router` is unknown, or if the target router has no downstream switch.
     pub async fn replug_iface(&self, ifname: &str, to_router: NodeId) -> Result<()> {
         use crate::core::{self, IfaceBuild};
 
@@ -498,9 +554,15 @@ impl Device {
     }
 
     /// Simulates DHCP renewal: allocates a new IP from the current router's pool,
-    /// replaces the old address on the interface, and returns the new IP.
+    /// replaces the old address on the interface, and returns the new address.
     ///
-    /// The default route remains unchanged (same gateway).
+    /// The default route remains unchanged (same gateway). The old address is
+    /// removed before the new one is added.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the interface has no IPv4 address or if the router's
+    /// address pool is exhausted.
     pub async fn renew_ip(&self, ifname: &str) -> Result<Ipv4Addr> {
         use crate::core;
 
@@ -575,7 +637,14 @@ impl Device {
 
 /// Cloneable handle to a router in the lab topology.
 ///
-/// Same pattern as [`Device`]: holds `NodeId` + `Arc<LabInner>`.
+/// Same pattern as [`Device`]: holds [`NodeId`] + `Arc<LabInner>`.
+///
+/// # Panics
+///
+/// Most accessor methods (except [`name`](Self::name) and [`ns`](Self::ns))
+/// panic if the underlying router has been removed via [`Lab::remove_router`](crate::Lab::remove_router).
+/// Call [`Lab::router`](crate::Lab::router) to check existence first if the
+/// router may have been removed.
 pub struct Router {
     id: NodeId,
     lab: Arc<LabInner>,
@@ -679,7 +748,14 @@ impl Router {
 
     /// Replaces NAT rules on this router at runtime.
     ///
-    /// Flushes the `ip nat` table then re-applies the new rules.
+    /// Flushes the `ip nat` and `ip filter` nftables tables, then re-applies
+    /// rules matching `mode`. The change takes effect immediately for new
+    /// connections; existing conntrack entries are not flushed (use
+    /// [`flush_nat_state`](Self::flush_nat_state) for that).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the router id is unknown or if nftables commands fail.
     pub async fn set_nat_mode(&self, mode: Nat) -> Result<()> {
         let op = self.lab.with_router(self.id, |r| Arc::clone(&r.op));
         let _guard = op.lock().await;
@@ -700,6 +776,14 @@ impl Router {
     }
 
     /// Replaces IPv6 NAT rules on this router at runtime.
+    ///
+    /// Flushes the `ip6 nat` nftables table, then applies rules matching
+    /// `mode` (NPTv6 prefix translation or stateful masquerade). Pass
+    /// [`NatV6Mode::None`] to remove all IPv6 NAT rules.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the router id is unknown or if nftables commands fail.
     pub async fn set_nat_v6_mode(&self, mode: NatV6Mode) -> Result<()> {
         let op = self.lab.with_router(self.id, |r| Arc::clone(&r.op));
         let _guard = op.lock().await;
@@ -744,7 +828,13 @@ impl Router {
 
     /// Flushes the conntrack table, forcing all active NAT mappings to expire.
     ///
-    /// Subsequent flows get new external port assignments. Requires `conntrack-tools`.
+    /// Subsequent flows get new external port assignments. Pair with
+    /// [`set_nat_mode`](Self::set_nat_mode) when testing mode transitions.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `conntrack -F` fails. Requires the `conntrack`
+    /// binary from `conntrack-tools`.
     pub async fn flush_nat_state(&self) -> Result<()> {
         let op = self.lab.with_router(self.id, |r| Arc::clone(&r.op));
         let _guard = op.lock().await;
@@ -769,9 +859,10 @@ impl Router {
 
     // ── Spawn / run ────────────────────────────────────────────────────
 
-    /// Spawns an async task in this router's network namespace.
+    /// Spawns an async task on this router's namespace tokio runtime.
     ///
-    /// The closure receives a cloned [`Router`] handle.
+    /// The closure receives a cloned [`Router`] handle and can use
+    /// `tokio::net` for network I/O through this router's namespace.
     pub fn spawn<F, Fut, T>(&self, f: F) -> tokio::task::JoinHandle<T>
     where
         F: FnOnce(Router) -> Fut + Send + 'static,
@@ -788,7 +879,9 @@ impl Router {
     }
 
     /// Runs a short-lived sync closure in this router's network namespace.
-    /// Blocks the caller until the closure returns.
+    ///
+    /// Blocks the caller until the closure returns. Only for fast,
+    /// non-blocking work. **Never** perform TCP/UDP I/O here.
     pub fn run_sync<F, R>(&self, f: F) -> Result<R>
     where
         F: FnOnce() -> Result<R> + Send + 'static,
@@ -799,6 +892,8 @@ impl Router {
     }
 
     /// Spawns a dedicated OS thread in this router's network namespace.
+    ///
+    /// The thread inherits the namespace's network stack and DNS overlays.
     pub fn spawn_thread<F, R>(&self, f: F) -> Result<thread::JoinHandle<Result<R>>>
     where
         F: FnOnce() -> Result<R> + Send + 'static,
@@ -808,7 +903,9 @@ impl Router {
         self.lab.netns.spawn_thread_in(&ns, f)
     }
 
-    /// Spawns a raw command in this router's network namespace.
+    /// Spawns a [`Command`] in this router's network namespace.
+    ///
+    /// The child inherits the namespace's DNS bind-mounts.
     pub fn spawn_command(&self, mut cmd: Command) -> Result<std::process::Child> {
         let ns = self.lab.with_router(self.id, |r| r.ns.clone());
         self.lab.netns.run_closure_in(&ns, move || {
@@ -816,7 +913,9 @@ impl Router {
         })
     }
 
-    /// Spawns an async command in this router's network namespace.
+    /// Spawns a [`tokio::process::Command`] in this router's network namespace.
+    ///
+    /// The child is registered with the namespace's tokio reactor.
     pub fn spawn_command_async(
         &self,
         mut cmd: tokio::process::Command,
@@ -829,8 +928,11 @@ impl Router {
         })
     }
 
-    /// Applies or removes impairment on this router's downlink bridge, affecting
-    /// download-direction traffic to all downstream devices.
+    /// Applies or removes impairment on this router's downlink bridge.
+    ///
+    /// Affects download-direction traffic to **all** downstream devices.
+    /// Pass `Some(condition)` to apply `tc netem` rules on the bridge, or
+    /// `None` to remove any existing impairment.
     pub async fn set_downlink_condition(&self, impair: Option<LinkCondition>) -> Result<()> {
         let op = self.lab.with_router(self.id, |r| Arc::clone(&r.op));
         let _guard = op.lock().await;
@@ -842,9 +944,14 @@ impl Router {
         Ok(())
     }
 
-    /// Sets (or removes) the firewall on this router at runtime.
+    /// Sets or removes the firewall on this router at runtime.
     ///
-    /// Pass [`Firewall::None`] to remove all firewall rules.
+    /// Removes any existing firewall rules before applying the new preset.
+    /// Pass [`Firewall::None`] to remove all firewall rules without adding new ones.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the router id is unknown or if nftables commands fail.
     pub async fn set_firewall(&self, fw: Firewall) -> Result<()> {
         let op = self.lab.with_router(self.id, |r| Arc::clone(&r.op));
         let _guard = op.lock().await;
@@ -859,7 +966,9 @@ impl Router {
         core::apply_firewall(&self.lab.netns, &ns, &fw).await
     }
 
-    /// Spawns a UDP reflector in this router's network namespace.
+    /// Spawns a STUN-like UDP reflector in this router's network namespace.
+    ///
+    /// See [`Device::spawn_reflector`] for details.
     pub fn spawn_reflector(&self, bind: SocketAddr) -> Result<()> {
         let ns = self.lab.with_router(self.id, |r| r.ns.clone());
         self.lab.spawn_reflector_in(&ns, bind)
@@ -870,7 +979,7 @@ impl Router {
 // Ix handle
 // ─────────────────────────────────────────────
 
-/// Handle to the IX (Internet Exchange) — the lab root namespace that hosts
+/// Handle to the Internet Exchange — the lab's root namespace that hosts
 /// the shared bridge connecting all IX-level routers.
 ///
 /// Same pattern as [`Device`] and [`Router`]: holds an `Arc` to the lab
@@ -913,7 +1022,9 @@ impl Ix {
         self.lab.core.lock().unwrap().cfg.ix_gw_v6
     }
 
-    /// Spawns an async task in the IX root namespace.
+    /// Spawns an async task on the IX root namespace's tokio runtime.
+    ///
+    /// The closure receives a cloned [`Ix`] handle.
     pub fn spawn<F, Fut, T>(&self, f: F) -> tokio::task::JoinHandle<T>
     where
         F: FnOnce(Ix) -> Fut + Send + 'static,
@@ -930,6 +1041,7 @@ impl Ix {
     }
 
     /// Runs a short-lived sync closure in the IX root namespace.
+    ///
     /// Blocks the caller until the closure returns.
     pub fn run_sync<F, R>(&self, f: F) -> Result<R>
     where
@@ -950,7 +1062,7 @@ impl Ix {
         self.lab.netns.spawn_thread_in(&ns, f)
     }
 
-    /// Spawns a raw command in the IX root namespace.
+    /// Spawns a [`Command`] in the IX root namespace.
     pub fn spawn_command(&self, mut cmd: Command) -> Result<std::process::Child> {
         let ns = self.lab.core.lock().unwrap().root_ns().to_string();
         self.lab.netns.run_closure_in(&ns, move || {
@@ -958,7 +1070,7 @@ impl Ix {
         })
     }
 
-    /// Spawns an async command in the IX root namespace.
+    /// Spawns a [`tokio::process::Command`] in the IX root namespace.
     pub fn spawn_command_async(
         &self,
         mut cmd: tokio::process::Command,
@@ -971,7 +1083,9 @@ impl Ix {
         })
     }
 
-    /// Spawns a UDP reflector in the IX root namespace.
+    /// Spawns a STUN-like UDP reflector in the IX root namespace.
+    ///
+    /// See [`Device::spawn_reflector`] for details.
     pub fn spawn_reflector(&self, bind: SocketAddr) -> Result<()> {
         let ns = self.lab.core.lock().unwrap().root_ns().to_string();
         self.lab.spawn_reflector_in(&ns, bind)
