@@ -28,9 +28,44 @@ Extract a small helper on each handle to reduce repetition.
 Rust crates for nftables via netlink (`nftnl`, `rustables`, `mnl`) exist but are
 immature with rough APIs. Not worth replacing `Command::new("nft")` for now.
 
+#### Dead `apply_region_latency_dual` + `Qdisc` methods (low)
+
+`qdisc.rs` contains `apply_region_latency_dual()` and the full `Qdisc` builder
+(htb root, classes, netem, filters). Written for per-destination latency shaping
+inside region routers but never wired up — the current approach uses simple netem
+on inter-region veths. Delete or wire up when revisiting virtual-time / advanced
+region latency.
+
+#### Region index overflow unchecked (low)
+
+`region_base(idx)` does `idx * 16` which overflows for idx ≥ 16.
+`add_region()` currently validates idx 1–15 so this can't happen, but the
+helper itself doesn't guard against it. Add a bounds check if regions ever
+become user-supplied.
+
+#### TOML config ignores regions (medium)
+
+`from_config()` parses `regions` from TOML but doesn't call `add_region()`
+or `link_regions()`. The TODO at lab.rs:826/849 is still open. Region
+topologies can only be built programmatically.
+
+#### `ip route replace` shelling in break/restore (low)
+
+`break_region_link()` and `restore_region_link()` use `Command::new("ip")`
+to replace routes. These could use the netlink API (`nl_run` + `Netlink`)
+for consistency, but the sync `run_closure_in` path avoids async overhead
+for these rare operations.
+
 ---
 
 ## Completed
+
+50. **`RouterBuilder::error` helper** — extracted `RouterBuilder::error()` constructor to deduplicate the 15-field struct literal in `add_router()` error paths ✅
+51. **Replace `parse().unwrap()` with direct construction** — added `net4()`, `net6()`, `region_base()` helpers in lab.rs; all address/CIDR literals now use constructors instead of string parsing ✅
+52. **Combine consecutive `nl_run` blocks** — merged v4 + v6 return-route `nl_run` calls in `setup_router_async` into single block ✅
+53. **Remove dead region code** — deleted unused `alloc_region_host`, `region_cidr`, `all_routers`; removed unused `RegionInfo.next_host`, `RegionLinkData.ifname_a/ifname_b`, `Region.lab` fields ✅
+54. **Consolidate test helpers** — removed `probe_udp_from`, `spawn_tcp_echo_in`, sync `udp_send_recv_count`; all callers migrated to `test_utils::probe_udp`, `spawn_tcp_echo_server`, async `udp_send_recv_count` with paced sending; fixes `loss_udp_moderate` ✅
+55. **Fix doc typo** — removed `(aka LinkCondition)` redundancy from lab.rs module doc ✅
 
 41. **`ObservedAddr` wrapper** — converted from wrapper struct to `pub type ObservedAddr = SocketAddr`; removed `.observed` field access from all call sites ✅
 42. **`DeviceIface::ip()` returns `Option`** — `Device::ip()` and `DeviceIface::ip()` now return `Option<Ipv4Addr>`; v6-only devices return `None` instead of `Ipv4Addr::UNSPECIFIED` ✅

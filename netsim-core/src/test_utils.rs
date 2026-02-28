@@ -102,11 +102,10 @@ pub fn udp_rtt(reflector: SocketAddr) -> Result<Duration> {
 ///
 /// Use inside `handle.spawn(|_| async move { udp_rtt_async(r).await })`.
 pub async fn udp_rtt_async(reflector: SocketAddr) -> Result<Duration> {
-    let bind: SocketAddr = if reflector.is_ipv4() {
-        "0.0.0.0:0".parse().unwrap()
-    } else {
-        "[::]:0".parse().unwrap()
-    };
+    let bind = SocketAddr::new(
+        if reflector.is_ipv4() { IpAddr::V4(Ipv4Addr::UNSPECIFIED) } else { IpAddr::V6(Ipv6Addr::UNSPECIFIED) },
+        0,
+    );
     let sock = tokio::net::UdpSocket::bind(bind).await?;
     let mut buf = [0u8; 256];
     let start = Instant::now();

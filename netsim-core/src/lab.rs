@@ -1,4 +1,4 @@
-//! High-level lab API: [`Lab`], [`DeviceBuilder`], [`Nat`], [`LinkCondition`] (aka `LinkCondition`), [`ObservedAddr`].
+//! High-level lab API: [`Lab`], [`DeviceBuilder`], [`Nat`], [`LinkCondition`], [`ObservedAddr`].
 
 use std::{
     collections::HashMap,
@@ -30,6 +30,22 @@ use crate::{
 pub use crate::qdisc::LinkLimits;
 
 pub(crate) static LAB_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+// ── address construction helpers ─────────────────────────────────────
+
+/// Constructs a /`prefix` network from components, e.g. `net4(198, 18, 0, 0, 24)`.
+fn net4(a: u8, b: u8, c: u8, d: u8, prefix: u8) -> Ipv4Net {
+    Ipv4Net::new(Ipv4Addr::new(a, b, c, d), prefix).expect("valid prefix len")
+}
+
+fn net6(addr: Ipv6Addr, prefix: u8) -> Ipv6Net {
+    Ipv6Net::new(addr, prefix).expect("valid prefix len")
+}
+
+/// Base address for a region's /20 block: `198.18.{idx*16}.0`.
+fn region_base(idx: u8) -> Ipv4Addr {
+    Ipv4Addr::new(198, 18, idx.checked_mul(16).expect("region idx overflow"), 0)
+}
 
 // ─────────────────────────────────────────────
 // Public types
@@ -690,7 +706,6 @@ pub struct Region {
     name: String,
     idx: u8,
     router_id: NodeId,
-    lab: Arc<Mutex<NetworkCore>>,
 }
 
 impl Region {
@@ -783,12 +798,12 @@ impl Lab {
             bridge_tag,
             ix_br: format!("br-p{}{}-1", pid_tag, uniq),
             ix_gw,
-            ix_cidr: "198.18.0.0/24".parse().expect("valid ix cidr"),
-            private_cidr: "10.0.0.0/16".parse().expect("valid private cidr"),
-            public_cidr: "198.18.1.0/24".parse().expect("valid public cidr"),
-            ix_gw_v6: "2001:db8::1".parse().expect("valid ix gw v6"),
-            ix_cidr_v6: "2001:db8::/32".parse().expect("valid ix cidr v6"),
-            private_cidr_v6: "fd10::/48".parse().expect("valid private cidr v6"),
+            ix_cidr: net4(198, 18, 0, 0, 24),
+            private_cidr: net4(10, 0, 0, 0, 16),
+            public_cidr: net4(198, 18, 1, 0, 24),
+            ix_gw_v6: Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1),
+            ix_cidr_v6: net6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 0), 32),
+            private_cidr_v6: net6(Ipv6Addr::new(0xfd10, 0, 0, 0, 0, 0, 0, 0), 48),
             span: lab_span,
         })
         .expect("Lab::new: failed to create DNS entries directory");
@@ -1000,42 +1015,20 @@ impl Lab {
         let inner = self.inner.lock().unwrap();
         let lab_span = inner.cfg.span.clone();
         if name.starts_with("region_") {
-            return RouterBuilder {
-                inner: Arc::clone(&self.inner),
+            return RouterBuilder::error(
+                Arc::clone(&self.inner),
                 lab_span,
-                name: name.to_string(),
-                region: None,
-                upstream: None,
-                nat: Nat::None,
-                ip_support: IpSupport::V4Only,
-                nat_v6: NatV6Mode::None,
-                downstream_cidr: None,
-                downlink_condition: None,
-                mtu: None,
-                block_icmp_frag_needed: false,
-                firewall: Firewall::None,
-                result: Err(anyhow!(
-                    "router names starting with 'region_' are reserved"
-                )),
-            };
+                name,
+                anyhow!("router names starting with 'region_' are reserved"),
+            );
         }
         if inner.router_id_by_name(name).is_some() {
-            return RouterBuilder {
-                inner: Arc::clone(&self.inner),
+            return RouterBuilder::error(
+                Arc::clone(&self.inner),
                 lab_span,
-                name: name.to_string(),
-                region: None,
-                upstream: None,
-                nat: Nat::None,
-                ip_support: IpSupport::V4Only,
-                nat_v6: NatV6Mode::None,
-                downstream_cidr: None,
-                downlink_condition: None,
-                mtu: None,
-                block_icmp_frag_needed: false,
-                firewall: Firewall::None,
-                result: Err(anyhow!("router '{}' already exists", name)),
-            };
+                name,
+                anyhow!("router '{}' already exists", name),
+            );
         }
         RouterBuilder {
             inner: Arc::clone(&self.inner),
@@ -1172,12 +1165,7 @@ impl Lab {
             );
 
             // Downstream switch: region's first /24 as override CIDR.
-            let region_bridge_cidr: Ipv4Net = format!(
-                "198.18.{}.0/24",
-                idx as u16 * 16
-            )
-            .parse()
-            .context("region bridge CIDR")?;
+            let region_bridge_cidr = net4(198, 18, idx * 16, 0, 24);
             let sub_switch = inner.add_switch(
                 &format!("{region_router_name}-sub"),
                 None,
@@ -1203,7 +1191,6 @@ impl Lab {
                 crate::core::RegionInfo {
                     idx,
                     router_id: id,
-                    next_host: 10,
                     next_downstream: 1,
                 },
             );
@@ -1264,9 +1251,7 @@ impl Lab {
         setup_router_async(&netns, &setup_data).await?;
 
         // Phase 3: Add /20 aggregate route in root NS for the region.
-        let region_net: Ipv4Addr = format!("198.18.{}.0", idx as u16 * 16)
-            .parse()
-            .context("region aggregate net")?;
+        let region_net = region_base(idx);
         let via = setup_data.router.upstream_ip.context("region router has no IX IP")?;
         let root_ns = setup_data.root_ns.clone();
         core::nl_run(&netns, &root_ns, move |h: Netlink| async move {
@@ -1279,7 +1264,6 @@ impl Lab {
             name: name.to_string(),
             idx,
             router_id: id,
-            lab: Arc::clone(&self.inner),
         })
     }
 
@@ -1330,24 +1314,15 @@ impl Lab {
             ip_a = ipa;
             ip_b = ipb;
 
-            let ifname_a = format!("vr-{}-{}", a.name, b.name);
-            let ifname_b = format!("vr-{}-{}", b.name, a.name);
             // Store IPs in sorted key order: ip_a belongs to link_key.0, ip_b to link_key.1.
             let (stored_ip_a, stored_ip_b) = if a.name < b.name {
                 (ip_a, ip_b)
             } else {
                 (ip_b, ip_a)
             };
-            let (stored_if_a, stored_if_b) = if a.name < b.name {
-                (ifname_a.clone(), ifname_b.clone())
-            } else {
-                (ifname_b.clone(), ifname_a.clone())
-            };
             inner.region_links.insert(
                 link_key.clone(),
                 crate::core::RegionLinkData {
-                    ifname_a: stored_if_a,
-                    ifname_b: stored_if_b,
                     ip_a: stored_ip_a,
                     ip_b: stored_ip_b,
                     broken: false,
@@ -1374,7 +1349,7 @@ impl Lab {
 
         // Configure side A: assign IP, bring up, add route to B's /20.
         let veth_a3 = veth_a.clone();
-        let b_region_net: Ipv4Addr = format!("198.18.{}.0", b_idx as u16 * 16).parse()?;
+        let b_region_net = region_base(b_idx);
         core::nl_run(&netns, &a_ns, move |h: Netlink| async move {
             h.add_addr4(&veth_a3, ip_a, 30).await?;
             h.set_link_up(&veth_a3).await?;
@@ -1385,7 +1360,7 @@ impl Lab {
 
         // Configure side B: assign IP, bring up, add route to A's /20.
         let veth_b3 = veth_b.clone();
-        let a_region_net: Ipv4Addr = format!("198.18.{}.0", a_idx as u16 * 16).parse()?;
+        let a_region_net = region_base(a_idx);
         core::nl_run(&netns, &b_ns, move |h: Netlink| async move {
             h.add_addr4(&veth_b3, ip_b, 30).await?;
             h.set_link_up(&veth_b3).await?;
@@ -1484,7 +1459,7 @@ impl Lab {
         let netns = Arc::clone(&inner.netns);
 
         // On region_a: replace route to b's /20 via m (on a↔m veth)
-        let b_net: Ipv4Addr = format!("198.18.{}.0", b.idx as u16 * 16).parse()?;
+        let b_net = region_base(b.idx);
         let a_via = m_ip_on_ma;
         netns.run_closure_in(&a_ns, move || {
             let status = Command::new("ip")
@@ -1498,7 +1473,7 @@ impl Lab {
         })?;
 
         // On region_b: replace route to a's /20 via m (on b↔m veth)
-        let a_net: Ipv4Addr = format!("198.18.{}.0", a.idx as u16 * 16).parse()?;
+        let a_net = region_base(a.idx);
         let b_via = m_ip_on_mb;
         netns.run_closure_in(&b_ns, move || {
             let status = Command::new("ip")
@@ -1542,7 +1517,7 @@ impl Lab {
         let netns = Arc::clone(&inner.netns);
 
         // Direct route on a: b's /20 via b's IP on the a↔b veth.
-        let b_net: Ipv4Addr = format!("198.18.{}.0", b.idx as u16 * 16).parse()?;
+        let b_net = region_base(b.idx);
         let b_direct_ip = if link_key.0 == a.name {
             link.ip_b
         } else {
@@ -1566,7 +1541,7 @@ impl Lab {
         })?;
 
         // Direct route on b: a's /20 via a's IP on the a↔b veth.
-        let a_net: Ipv4Addr = format!("198.18.{}.0", a.idx as u16 * 16).parse()?;
+        let a_net = region_base(a.idx);
         let a_direct_ip = if link_key.0 == a.name {
             link.ip_a
         } else {
@@ -1855,6 +1830,26 @@ pub struct RouterBuilder {
 }
 
 impl RouterBuilder {
+    /// Creates a builder in an error state; `build()` will return this error.
+    fn error(inner: Arc<Mutex<NetworkCore>>, lab_span: tracing::Span, name: &str, err: anyhow::Error) -> Self {
+        Self {
+            inner,
+            lab_span,
+            name: name.to_string(),
+            region: None,
+            upstream: None,
+            nat: Nat::None,
+            ip_support: IpSupport::V4Only,
+            nat_v6: NatV6Mode::None,
+            downstream_cidr: None,
+            downlink_condition: None,
+            mtu: None,
+            block_icmp_frag_needed: false,
+            firewall: Firewall::None,
+            result: Err(err),
+        }
+    }
+
     /// Places this router in a region, connecting it to the region's bridge.
     ///
     /// The router becomes a sub-router of the region router. For `Nat::None`
@@ -3129,7 +3124,7 @@ impl Router {
             let wan_if = router.wan_ifname(inner.ix_sw()).to_string();
             let lan_prefix = router
                 .downstream_cidr_v6
-                .unwrap_or_else(|| "fd10::/64".parse().unwrap());
+                .unwrap_or(net6(Ipv6Addr::new(0xfd10, 0, 0, 0, 0, 0, 0, 0), 64));
             let wan_prefix = {
                 let up_ip = router.upstream_ip_v6.unwrap_or(Ipv6Addr::UNSPECIFIED);
                 let up_prefix = if router.uplink == Some(inner.ix_sw()) {

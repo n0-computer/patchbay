@@ -348,8 +348,6 @@ pub(crate) struct RegionInfo {
     pub idx: u8,
     /// NodeId of the region's internal router.
     pub router_id: NodeId,
-    /// Next host offset for allocating IPs on the region bridge (.10, .11, ...).
-    pub next_host: u8,
     /// Next downstream /24 offset within the region's /20 (1, 2, ... up to 15).
     pub next_downstream: u8,
 }
@@ -357,10 +355,6 @@ pub(crate) struct RegionInfo {
 /// Stored data for one inter-region link.
 #[derive(Clone, Debug)]
 pub(crate) struct RegionLinkData {
-    /// Veth interface name inside region A's namespace.
-    pub ifname_a: String,
-    /// Veth interface name inside region B's namespace.
-    pub ifname_b: String,
     /// IP of A's end of the /30.
     pub ip_a: Ipv4Addr,
     /// IP of B's end of the /30.
@@ -974,22 +968,6 @@ impl NetworkCore {
         Ok(idx)
     }
 
-    /// Allocates the next host IP on a region's bridge subnet.
-    /// Region `idx` → bridge at 198.18.{idx*16}.0/24, hosts start at .10.
-    pub(crate) fn alloc_region_host(&mut self, region_name: &str) -> Result<Ipv4Addr> {
-        let region = self
-            .regions
-            .get_mut(region_name)
-            .ok_or_else(|| anyhow!("unknown region '{}'", region_name))?;
-        let host = region.next_host;
-        if host == 0 || host == 255 {
-            bail!("region '{}' host pool exhausted", region_name);
-        }
-        region.next_host = host + 1;
-        let base_third = region.idx as u16 * 16;
-        Ok(Ipv4Addr::new(198, 18, base_third as u8, host))
-    }
-
     /// Allocates the next public downstream /24 from a region's /20 pool.
     /// Region `idx` → downstream starts at 198.18.{idx*16 + 1}.0/24.
     pub(crate) fn alloc_region_public_cidr(&mut self, region_name: &str) -> Result<Ipv4Net> {
@@ -1027,21 +1005,9 @@ impl NetworkCore {
         Ok((ip_a, ip_b))
     }
 
-    /// Returns the /20 CIDR for a region (e.g. region idx 1 → 198.18.16.0/20).
-    pub(crate) fn region_cidr(idx: u8) -> Ipv4Net {
-        let third = idx as u16 * 16;
-        Ipv4Net::new(Ipv4Addr::new(198, 18, third as u8, 0), 20)
-            .expect("valid region /20")
-    }
-
     /// Returns an iterator over all devices in the topology.
     pub(crate) fn all_devices(&self) -> impl Iterator<Item = &DeviceData> {
         self.devices.values()
-    }
-
-    /// Returns an iterator over all routers in the topology.
-    pub(crate) fn all_routers(&self) -> impl Iterator<Item = &RouterData> {
-        self.routers.values()
     }
 
     /// Returns all device node ids.
@@ -1388,18 +1354,17 @@ pub(crate) async fn setup_router_async(
         .await?;
     }
 
-    // Return route in lab root for public downstreams.
-    if let Some((net, prefix_len, via)) = data.return_route {
+    // Return route in lab root for public downstreams (v4 + v6).
+    if data.return_route.is_some() || data.return_route_v6.is_some() {
+        let rr4 = data.return_route;
+        let rr6 = data.return_route_v6;
         nl_run(netns, &data.root_ns, move |h: Netlink| async move {
-            h.add_route_v4(net, prefix_len, via).await.ok();
-            Ok(())
-        })
-        .await
-        .ok();
-    }
-    if let Some((net6, prefix6, via6)) = data.return_route_v6 {
-        nl_run(netns, &data.root_ns, move |h: Netlink| async move {
-            h.add_route_v6(net6, prefix6, via6).await.ok();
+            if let Some((net, prefix_len, via)) = rr4 {
+                h.add_route_v4(net, prefix_len, via).await.ok();
+            }
+            if let Some((net6, prefix6, via6)) = rr6 {
+                h.add_route_v6(net6, prefix6, via6).await.ok();
+            }
             Ok(())
         })
         .await
