@@ -6,36 +6,6 @@ Higher-level suggestions that were not applied directly.
 
 ## Open
 
-#### `ObservedAddr` wrapper (low)
-
-`ObservedAddr` wraps a single `pub observed: SocketAddr` field. This could be a
-simple type alias (`type ObservedAddr = SocketAddr`) or the field could be used
-directly. The wrapper adds indirection without additional invariants.
-
-#### `DeviceIface::ip()` returns `Ipv4Addr`, not `Option` (low)
-
-For `V6Only` devices, `ip()` returns `Ipv4Addr::UNSPECIFIED` instead of `None`.
-This violates the "make impossible states unrepresentable" idiom. Consider
-returning `Option<Ipv4Addr>` or providing separate `ipv4()` / `ipv6()` getters.
-
-### Code Smells
-
-#### `ensure_root_ns` race condition (medium)
-
-Two concurrent `build()` calls can both read `root_ns_initialized == false`
-(extracted under the lock), then both call `ensure_root_ns()` outside the lock.
-`setup_root_ns_async` deletes and recreates the IX bridge, so a concurrent
-call would tear down work done by the first.
-
-In practice this doesn't fire (tests are single-threaded), but it's latent.
-Fix: use `tokio::sync::OnceCell` or `AtomicBool` with compare-and-swap.
-
-#### Suppressed stderr on all `tc` commands (low)
-
-Every `Qdisc` method sets `stderr(Stdio::null())`. When `tc` fails, the exit
-code is checked but the diagnostic message is lost. Consider capturing stderr
-and including it in the error.
-
 #### `add_host` hardcodes /24 assumption (low)
 
 `add_host(cidr, host)` replaces only the last octet, which only works for /24
@@ -61,6 +31,16 @@ immature with rough APIs. Not worth replacing `Command::new("nft")` for now.
 ---
 
 ## Completed
+
+41. **`ObservedAddr` wrapper** — converted from wrapper struct to `pub type ObservedAddr = SocketAddr`; removed `.observed` field access from all call sites ✅
+42. **`DeviceIface::ip()` returns `Option`** — `Device::ip()` and `DeviceIface::ip()` now return `Option<Ipv4Addr>`; v6-only devices return `None` instead of `Ipv4Addr::UNSPECIFIED` ✅
+43. **`ensure_root_ns` race condition** — eliminated by making `Lab::new()` async; root namespace setup runs eagerly in the constructor; removed all lazy-init machinery ✅
+44. **Suppressed stderr on `tc` commands** — `qdisc.rs` now captures stderr via `Stdio::piped()` + `.output()` and includes it in error messages on failure ✅
+45. **API cleanup: rename `Impair` → `LinkCondition`** — enum, fields, methods, and presets all renamed; `ImpairLimits` → `LinkLimits` ✅
+46. **Remove deprecated aliases** — removed `NatMode`, `switch_route`, `set_impair`, `switch_uplink`, `rebind_nats`, `impair_downlink`, `impair_link`; removed serde alias `destination-independent` ✅
+47. **Unify NAT API** — removed `RouterBuilder::nat_config()` and `Router::set_nat_config()`; added `impl From<NatConfig> for Nat` so users pass `Nat::Custom(cfg)` ✅
+48. **`spawn_command_async`** — added on Device, Router, and Ix; uses `tokio::process::Command` with rt enter guard for reactor context ✅
+49. **Real PMTU blackhole test** — `pmtu_blackhole_drops_large_packets` verifies MTU + `block_icmp_frag_needed` silently drops oversized UDP packets ✅
 
 35. **Duplicate docstring in `apply_nat_for_router`** — removed duplicate line ✅
 36. **Dead `replace_default_route_v6`** — removed unused method from `netlink.rs` ✅

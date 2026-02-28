@@ -12,7 +12,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, instrument, Instrument as _};
 
 use crate::{
-    netlink::Netlink, netns, qdisc, ConntrackTimeouts, Impair, IpSupport, Nat, NatConfig,
+    netlink::Netlink, netns, qdisc, ConntrackTimeouts, LinkCondition, IpSupport, Nat, NatConfig,
     NatFiltering, NatMapping, NatV6Mode,
 };
 
@@ -97,7 +97,7 @@ pub(crate) struct DeviceIfaceData {
     /// Assigned IPv6 address.
     pub ip_v6: Option<Ipv6Addr>,
     /// Optional link impairment applied via `tc netem`.
-    pub impair: Option<Impair>,
+    pub impair: Option<LinkCondition>,
     /// Unique index used to name the root-namespace veth ends.
     pub(crate) idx: u64,
 }
@@ -218,7 +218,7 @@ pub(crate) struct IfaceBuild {
     pub(crate) gw_ip_v6: Option<Ipv6Addr>,
     pub(crate) dev_ip_v6: Option<Ipv6Addr>,
     pub(crate) prefix_len_v6: u8,
-    pub(crate) impair: Option<Impair>,
+    pub(crate) impair: Option<LinkCondition>,
     pub(crate) ifname: String,
     pub(crate) is_default: bool,
     pub(crate) idx: u64,
@@ -361,8 +361,6 @@ pub(crate) struct NetworkCore {
     routers: HashMap<NodeId, RouterData>,
     switches: HashMap<NodeId, Switch>,
     nodes_by_name: HashMap<String, NodeId>,
-    /// Whether root namespace and IX bridge have been set up.
-    pub(crate) root_ns_initialized: bool,
 }
 
 impl Drop for NetworkCore {
@@ -396,7 +394,6 @@ impl NetworkCore {
             routers: HashMap::new(),
             switches: HashMap::new(),
             nodes_by_name: HashMap::new(),
-            root_ns_initialized: false,
         };
         let ix_sw = core.add_switch(
             "ix",
@@ -613,7 +610,7 @@ impl NetworkCore {
         device: NodeId,
         ifname: &str,
         router: NodeId,
-        impair: Option<Impair>,
+        impair: Option<LinkCondition>,
     ) -> Result<Option<Ipv4Addr>> {
         let downlink = self
             .routers
@@ -1533,6 +1530,7 @@ pub(crate) fn run_nft_in(netns: &netns::NetnsManager, ns: &str, rules: &str) -> 
 /// APDF adds a forward filter that only allows established/related flows.
 fn generate_nat_rules(cfg: &NatConfig, wan_if: &str, wan_ip: Ipv4Addr) -> String {
     let use_fullcone_map = cfg.mapping == NatMapping::EndpointIndependent;
+    let hairpin = cfg.hairpin;
 
     let map_decl = if use_fullcone_map {
         r#"    map fullcone {
@@ -1548,25 +1546,55 @@ fn generate_nat_rules(cfg: &NatConfig, wan_if: &str, wan_ip: Ipv4Addr) -> String
     // Prerouting: for EIM, DNAT via fullcone map so inbound UDP reaches
     // the correct internal host.  For EDM, an empty prerouting chain is
     // still needed for conntrack reverse-NAT on reply packets.
+    //
+    // With hairpin: match on `ip daddr <wan_ip>` instead of `iif "<wan>"` so
+    // packets from the LAN side destined to the router's public IP also get
+    // DNAT'd.
     let prerouting_rules = if use_fullcone_map {
+        if hairpin {
+            format!(
+                r#"        ip daddr {ip} meta l4proto udp dnat to udp dport map @fullcone"#,
+                ip = wan_ip
+            )
+        } else {
+            format!(
+                r#"        iif "{wan}" meta l4proto udp dnat to udp dport map @fullcone"#,
+                wan = wan_if
+            )
+        }
+    } else if hairpin {
+        // EDM + hairpin: redirect traffic destined for the WAN IP back.
         format!(
-            r#"        iif "{wan}" meta l4proto udp dnat to udp dport map @fullcone"#,
-            wan = wan_if
+            r#"        ip daddr {ip} redirect"#,
+            ip = wan_ip,
         )
     } else {
         String::new()
     };
 
     // Postrouting: EIM uses snat + fullcone map update. EDM uses masquerade random.
+    // With hairpin: masquerade DNAT'd packets so the return path goes through
+    // the router (otherwise the LAN peer replies directly, confusing conntrack).
+    let hairpin_masq = if hairpin {
+        "        ct status dnat masquerade\n".to_string()
+    } else {
+        String::new()
+    };
+
     let postrouting_rules = if use_fullcone_map {
         format!(
-            r#"        oif "{wan}" meta l4proto udp update @fullcone {{ udp sport timeout 300s : ip saddr . udp sport }}
+            r#"{hairpin}        oif "{wan}" meta l4proto udp update @fullcone {{ udp sport timeout 300s : ip saddr . udp sport }}
         oif "{wan}" snat to {ip}"#,
+            hairpin = hairpin_masq,
             wan = wan_if,
             ip = wan_ip,
         )
     } else {
-        format!(r#"        oif "{wan}" masquerade random"#, wan = wan_if)
+        format!(
+            r#"{hairpin}        oif "{wan}" masquerade random"#,
+            hairpin = hairpin_masq,
+            wan = wan_if,
+        )
     };
 
     let postrouting_priority = if use_fullcone_map { "srcnat" } else { "100" };
@@ -1731,7 +1759,7 @@ table ip nat {{
 }
 
 /// Applies an impairment preset or manual limits on `ifname` inside `ns`.
-pub(crate) fn apply_impair_in(netns: &netns::NetnsManager, ns: &str, ifname: &str, impair: Impair) {
+pub(crate) fn apply_impair_in(netns: &netns::NetnsManager, ns: &str, ifname: &str, impair: LinkCondition) {
     debug!(ns = %ns, ifname = %ifname, impair = ?impair, "tc: apply impairment");
     let limits = impair.to_limits();
     let ifname = ifname.to_string();
@@ -1745,7 +1773,7 @@ pub(crate) fn apply_or_remove_impair(
     netns: &netns::NetnsManager,
     ns: &str,
     ifname: &str,
-    impair: Option<Impair>,
+    impair: Option<LinkCondition>,
 ) {
     match impair {
         Some(imp) => apply_impair_in(netns, ns, ifname, imp),

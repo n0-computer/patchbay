@@ -2,7 +2,7 @@
 
 netsim lets you build realistic network topologies out of Linux network
 namespaces and run real code against them. You define routers, devices, NAT
-policies, and link impairments through a Rust builder API, and the library
+policies, and link conditions through a Rust builder API, and the library
 wires everything up with veth pairs, nftables rules, and tc qdisc
 scheduling. Each node gets its own namespace with a private network stack,
 so processes running inside see what they would see on a separate machine.
@@ -14,11 +14,14 @@ address allocation, NAT configuration, and cleanup automatically.
 
 ## Quick example
 
-See the [`simple.rs`](netsim-core/examples/simple.rs) example for the runnable version.
+See the [`simple.rs`](netsim/examples/simple.rs) example for the runnable version.
 
 ```rust
-// Create a lab with a global "internet switch" to which routers are connected.
-let lab = Lab::new();
+// We need to enter a user namespace before any threads are spawned.
+netsim_core::init_userns().expect("failed to enter user namespace");
+
+// Create a lab (async — sets up the root namespace and IX bridge).
+let lab = Lab::new().await;
 
 // A "datacenter" router: downstream devices get "public" IPs.
 let dc = lab.add_router("dc").region("eu").build().await?;
@@ -26,14 +29,14 @@ let dc = lab.add_router("dc").region("eu").build().await?;
 // A "home" router with a NAT: downstream devices get private IPs.
 let home = lab
     .add_router("home")
-    .nat(NatMode::DestinationIndependent)
+    .nat(Nat::Home)
     .build()
     .await?;
 
 // A device behind the home router, with a lossy WiFi link.
 let dev = lab
     .add_device("laptop")
-    .iface("eth0", home.id(), Some(Impair::Wifi))
+    .iface("eth0", home.id(), Some(LinkCondition::Wifi))
     .build()
     .await?;
 
@@ -47,7 +50,7 @@ let server = lab
 // Run a command inside a device's network namespace.
 let mut child = dev.spawn_command({
     let mut cmd = std::process::Command::new("ping");
-    cmd.args(["-c1", &server.ip().to_string()]);
+    cmd.args(["-c1", &server.ip().unwrap().to_string()]);
     cmd
 })?;
 
@@ -66,7 +69,7 @@ let client_task = dev.spawn(async move |_| {
 ## Requirements
 
 - Linux (bare-metal, VM, or CI container)
-- `tc` and `nft` in PATH (for link impairment and NAT rules)
+- `tc` and `nft` in PATH (for link conditions and NAT rules)
 - Unprivileged user namespaces enabled (default on most distros):
 
   ```bash
@@ -106,11 +109,11 @@ to the sync worker. This means callers never need to worry about `setns` —
 the workers handle namespace entry.
 
 **NAT.** Routers support four IPv4 NAT modes (`None`, `Cgnat`,
-`DestinationIndependent`, `DestinationDependent`) and three IPv6 modes
+`Home`, `Symmetric`) and three IPv6 modes
 (`None`, `Nptv6`, `Masquerade`), configured via nftables rules.
 
-**Link impairment.** `tc netem` and `tc tbf` provide packet loss, latency,
-and rate limiting. Apply presets (`Impair::Wifi`, `Impair::Mobile`) or
+**Link conditions.** `tc netem` and `tc tbf` provide packet loss, latency,
+and rate limiting. Apply presets (`LinkCondition::Wifi`, `LinkCondition::Mobile4G`) or
 custom values at build time or dynamically.
 
 **Cleanup.** Namespace file descriptors are held in-process. When the `Lab`
@@ -121,7 +124,7 @@ is dropped, workers are shut down and namespaces disappear automatically.
 ### Building a topology
 
 ```rust
-let lab = Lab::new();
+let lab = Lab::new().await;
 
 // Routers
 let dc = lab.add_router("dc")
@@ -130,14 +133,14 @@ let dc = lab.add_router("dc")
 
 let home = lab.add_router("home")
     .upstream(dc.id())           // chain behind dc
-    .nat(NatMode::DestinationIndependent)
+    .nat(Nat::Home)
     .ip_support(IpSupport::DualStack)
     .nat_v6(NatV6Mode::Nptv6)
     .build().await?;
 
 // Devices
 let dev = lab.add_device("phone")
-    .iface("wlan0", home.id(), Some(Impair::Wifi))
+    .iface("wlan0", home.id(), Some(LinkCondition::Wifi))
     .iface("eth0", dc.id(), None)
     .default_via("wlan0")
     .build().await?;
@@ -160,9 +163,16 @@ let sock = dev.run_sync(|| {
     Ok(std::net::UdpSocket::bind("0.0.0.0:0")?)
 })?;
 
-// Spawn an OS command
+// Spawn an OS command (sync)
 let child = dev.spawn_command({
     let mut cmd = std::process::Command::new("curl");
+    cmd.arg("http://203.0.113.10");
+    cmd
+})?;
+
+// Spawn an OS command (async — returns tokio::process::Child)
+let child = dev.spawn_command_async({
+    let mut cmd = tokio::process::Command::new("curl");
     cmd.arg("http://203.0.113.10");
     cmd
 })?;
@@ -178,32 +188,32 @@ let handle = dev.spawn_thread(|| {
 
 ```rust
 // Switch a device's uplink to a different router at runtime
-dev.switch_uplink("wlan0", other_router.id()).await?;
+dev.replug_iface("wlan0", other_router.id()).await?;
 
 // Switch default route between interfaces
-dev.switch_route("eth0").await?;
+dev.set_default_route("eth0").await?;
 
 // Link down / up
 dev.link_down("wlan0").await?;
 dev.link_up("wlan0").await?;
 
-// Change impairment dynamically
-dev.set_impair("wlan0", Some(Impair::Manual {
+// Change link condition dynamically
+dev.set_link_condition("wlan0", Some(LinkCondition::Manual {
     rate: 1000,      // kbit/s
     loss: 5.0,       // percent
     latency: 100,    // ms one-way
 }))?;
 
 // Change NAT mode at runtime
-router.set_nat_mode(NatMode::DestinationDependent)?;
-router.rebind_nats()?;  // flush conntrack
+router.set_nat_mode(Nat::Symmetric)?;
+router.flush_nat_state()?;  // flush conntrack
 ```
 
 ### Handles
 
 `Device`, `Router`, and `Ix` are lightweight cloneable handles. All three
-provide `spawn`, `run_sync`, `spawn_thread`, `spawn_command`, and
-`spawn_reflector` for running code in their namespace.
+provide `spawn`, `run_sync`, `spawn_thread`, `spawn_command`,
+`spawn_command_async`, and `spawn_reflector` for running code in their namespace.
 
 ## TOML configuration
 
@@ -216,7 +226,7 @@ region = "eu"
 
 [[router]]
 name = "home"
-nat = "destination-independent"
+nat = "home"
 
 [device.laptop.eth0]
 gateway = "home"
@@ -229,7 +239,7 @@ latencies = { us = 80 }
 
 | Crate | Description |
 |-------|-------------|
-| `netsim-core` | Core library: topology builder, namespace management, NAT, impairment |
+| `netsim-core` | Core library: topology builder, namespace management, NAT, link conditions |
 | `netsim` | CLI runner for TOML-defined simulations with step sequencing |
 | `netsim-vm` | QEMU VM wrapper for running simulations on macOS |
 | `netsim-utils` | Shared utilities |
@@ -237,7 +247,7 @@ latencies = { us = 80 }
 ## TOML simulation runner
 
 The `netsim` binary runs simulations defined in TOML files with a step-based
-execution model: spawn processes, apply impairments, wait for captures, and
+execution model: spawn processes, apply link conditions, wait for captures, and
 assert on outputs.
 
 ```bash

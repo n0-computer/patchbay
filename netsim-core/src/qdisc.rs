@@ -7,7 +7,7 @@ use ipnet::IpNet;
 ///
 /// All fields default to zero (no impairment). Set only the fields you need.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub struct ImpairLimits {
+pub struct LinkLimits {
     /// Rate limit in kbit/s (0 = unlimited).
     pub rate_kbit: u32,
     /// Packet loss percentage (0.0–100.0).
@@ -25,7 +25,7 @@ pub struct ImpairLimits {
 }
 
 /// Applies netem impairment on `ifname`. Caller must already be in the target ns.
-pub(crate) fn apply_impair(ifname: &str, limits: ImpairLimits) -> Result<()> {
+pub(crate) fn apply_impair(ifname: &str, limits: LinkLimits) -> Result<()> {
     remove_qdisc(ifname);
     let qdisc = Qdisc::new(ifname);
     qdisc.add_netem_root(limits)?;
@@ -86,7 +86,7 @@ impl<'a> Qdisc<'a> {
         let _ = cmd.status();
     }
 
-    fn add_netem_root(&self, limits: ImpairLimits) -> Result<()> {
+    fn add_netem_root(&self, limits: LinkLimits) -> Result<()> {
         let mut args: Vec<String> = vec![
             "qdisc",
             "add",
@@ -128,7 +128,6 @@ impl<'a> Qdisc<'a> {
         let mut cmd = Command::new("tc");
         let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
         cmd.args(&arg_refs);
-        cmd.stderr(std::process::Stdio::null());
         ensure_success(cmd, "tc qdisc netem add")?;
         Ok(())
     }
@@ -152,7 +151,6 @@ impl<'a> Qdisc<'a> {
             "latency",
             "400ms",
         ]);
-        cmd.stderr(std::process::Stdio::null());
         ensure_success(cmd, "tc qdisc tbf add")?;
         Ok(())
     }
@@ -173,7 +171,6 @@ impl<'a> Qdisc<'a> {
             "r2q",
             "1000",
         ]);
-        cmd.stderr(std::process::Stdio::null());
         ensure_success(cmd, "tc qdisc htb add")?;
         Ok(())
     }
@@ -193,7 +190,6 @@ impl<'a> Qdisc<'a> {
             "rate",
             "1000mbit",
         ]);
-        cmd.stderr(std::process::Stdio::null());
         ensure_success(cmd, "tc class htb add base")?;
         Ok(())
     }
@@ -213,7 +209,6 @@ impl<'a> Qdisc<'a> {
             "rate",
             "1000mbit",
         ]);
-        cmd.stderr(std::process::Stdio::null());
         ensure_success(cmd, "tc class htb add")?;
         Ok(())
     }
@@ -233,7 +228,6 @@ impl<'a> Qdisc<'a> {
             "delay",
             &format!("{}ms", latency_ms),
         ]);
-        cmd.stderr(std::process::Stdio::null());
         ensure_success(cmd, "tc qdisc netem class add")?;
         Ok(())
     }
@@ -259,7 +253,6 @@ impl<'a> Qdisc<'a> {
             "flowid",
             class_id,
         ]);
-        cmd.stderr(std::process::Stdio::null());
         ensure_success(cmd, "tc filter add")?;
         Ok(())
     }
@@ -285,17 +278,20 @@ impl<'a> Qdisc<'a> {
             "flowid",
             class_id,
         ]);
-        cmd.stderr(std::process::Stdio::null());
         ensure_success(cmd, "tc filter v6 add")?;
         Ok(())
     }
 }
 
 fn ensure_success(mut cmd: Command, context: &str) -> Result<()> {
-    let status = cmd.status().with_context(|| format!("{context}: spawn"))?;
-    if status.success() {
+    let out = cmd
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .with_context(|| format!("{context}: spawn"))?;
+    if out.status.success() {
         Ok(())
     } else {
-        bail!("{} failed", context);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        bail!("{context} failed: {stderr}");
     }
 }

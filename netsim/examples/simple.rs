@@ -1,5 +1,5 @@
 use anyhow::Result;
-use netsim_core::{Impair, Lab, Nat};
+use netsim_core::{LinkCondition, Lab, Nat};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 fn main() -> Result<()> {
@@ -12,7 +12,7 @@ fn main() -> Result<()> {
 #[tokio::main]
 async fn async_main() -> Result<()> {
     // Create a lab with a global "internet switch" to which routers are connected.
-    let lab = Lab::new();
+    let lab = Lab::new().await;
 
     // A "datacenter" router: downstream devices get "public" IPs.
     let dc = lab.add_router("dc").region("eu").build().await?;
@@ -23,7 +23,7 @@ async fn async_main() -> Result<()> {
     // A device behind the home router, with a lossy WiFi link.
     let dev = lab
         .add_device("laptop")
-        .iface("eth0", home.id(), Some(Impair::Wifi))
+        .iface("eth0", home.id(), Some(LinkCondition::Wifi))
         .build()
         .await?;
 
@@ -37,7 +37,7 @@ async fn async_main() -> Result<()> {
     // Run a command inside a device's network namespace.
     let mut child = dev.spawn_command({
         let mut cmd = std::process::Command::new("ping");
-        cmd.args(["-c1", &server.ip().to_string()]);
+        cmd.args(["-c1", &server.ip().unwrap().to_string()]);
         cmd
     })?;
     tokio::task::spawn_blocking(move || child.wait().expect("command failed")).await?;
@@ -47,7 +47,7 @@ async fn async_main() -> Result<()> {
     //
     // Through this, you can use all async rust networking primitives,
     // but they run fully isolated to the networking stack of a simulated device.
-    let addr = std::net::SocketAddr::from((server.ip(), 8080));
+    let addr = std::net::SocketAddr::from((server.ip().unwrap(), 8080));
     let server_task = server.spawn(async move |_| {
         let listener = tokio::net::TcpListener::bind(addr).await?;
         let (mut stream, peer) = listener.accept().await?;

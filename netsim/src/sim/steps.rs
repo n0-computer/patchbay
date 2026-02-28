@@ -11,7 +11,7 @@ use std::{
 };
 
 use anyhow::{anyhow, bail, Context, Result};
-use netsim_core::Impair;
+use netsim_core::LinkCondition;
 
 use crate::sim::{
     capture::CaptureStore, env::SimEnv, report::StepResultRecord, runner::SimState, CaptureSpec,
@@ -24,7 +24,7 @@ pub(crate) fn step_action(step: &Step) -> &'static str {
         Step::Spawn { .. } => "spawn",
         Step::Wait { .. } => "wait",
         Step::WaitFor { .. } => "wait-for",
-        Step::SetImpair { .. } => "set-impair",
+        Step::SetLinkCondition { .. } => "set-link-condition",
         Step::SetDefaultRoute { .. } | Step::SwitchRoute { .. } => "switch-route",
         Step::LinkDown { .. } => "link-down",
         Step::LinkUp { .. } => "link-up",
@@ -49,7 +49,7 @@ pub(crate) fn step_device(step: &Step) -> Option<&str> {
     match step {
         Step::Run { device, .. } => Some(device),
         Step::Spawn { device, .. } => device.as_deref(),
-        Step::SetImpair { device, .. } => Some(device),
+        Step::SetLinkCondition { device, .. } => Some(device),
         Step::SetDefaultRoute { device, .. } | Step::SwitchRoute { device, .. } => Some(device),
         Step::LinkDown { device, .. } => Some(device),
         Step::LinkUp { device, .. } => Some(device),
@@ -359,13 +359,13 @@ pub(crate) async fn execute_step(state: &mut SimState, step: &Step) -> Result<()
             // If id is not found, assume it completed inline — no-op.
         }
 
-        // ── set-impair ────────────────────────────────────────────────────
-        Step::SetImpair {
+        // ── set-link-condition ────────────────────────────────────────────
+        Step::SetLinkCondition {
             device,
             interface,
-            impair,
+            condition,
         } => {
-            let impair = parse_impair(impair)?;
+            let condition = parse_link_condition(condition)?;
             let dev = state
                 .lab
                 .device_by_name(device)
@@ -374,7 +374,7 @@ pub(crate) async fn execute_step(state: &mut SimState, step: &Step) -> Result<()
                 Some(n) => n.to_string(),
                 None => dev.default_iface().name().to_string(),
             };
-            dev.set_link_condition(&ifname, impair)?;
+            dev.set_link_condition(&ifname, condition)?;
         }
 
         // ── switch-route / set-default-route ──────────────────────────────
@@ -780,15 +780,15 @@ pub(crate) fn parse_duration(s: &str) -> Result<Duration> {
     bail!("unknown duration format: {:?}", s);
 }
 
-fn parse_impair(value: &Option<toml::Value>) -> Result<Option<Impair>> {
+fn parse_link_condition(value: &Option<toml::Value>) -> Result<Option<LinkCondition>> {
     match value {
         None => Ok(None),
         Some(v) => {
-            let impair: Impair = v
+            let cond: LinkCondition = v
                 .clone()
                 .try_into()
                 .map_err(|e: toml::de::Error| anyhow!("{}", e))?;
-            Ok(Some(impair))
+            Ok(Some(cond))
         }
     }
 }

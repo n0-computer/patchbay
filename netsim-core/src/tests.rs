@@ -103,9 +103,7 @@ fn probe_udp_from(reflector: SocketAddr, bind: SocketAddr) -> Result<ObservedAdd
                 let addr_str = s
                     .strip_prefix("OBSERVED ")
                     .ok_or_else(|| anyhow!("unexpected reflector reply: {:?}", s))?;
-                return Ok(ObservedAddr {
-                    observed: addr_str.parse().context("parse observed addr")?,
-                });
+                return Ok(addr_str.parse().context("parse observed addr")?);
             }
             Err(e)
                 if matches!(
@@ -138,9 +136,7 @@ async fn probe_tcp(target: SocketAddr) -> Result<ObservedAddr> {
     let addr_str = s
         .strip_prefix("OBSERVED ")
         .ok_or_else(|| anyhow!("unexpected tcp reflector reply: {:?}", s))?;
-    Ok(ObservedAddr {
-        observed: addr_str.parse().context("parse observed addr")?,
-    })
+    Ok(addr_str.parse().context("parse observed addr")?)
 }
 
 async fn probe_reflexive_addr(
@@ -296,7 +292,7 @@ async fn build_nat_case(
     wiring: UplinkWiring,
     port_base: u16,
 ) -> Result<(Lab, NatTestCtx)> {
-    let lab = Lab::new();
+    let lab = Lab::new().await;
     let dc = lab.add_router("dc").region("eu").build().await?;
     let upstream = match wiring {
         UplinkWiring::DirectIx => None,
@@ -338,7 +334,7 @@ async fn build_nat_case(
 
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    let dev_ip = dev.ip();
+    let dev_ip = dev.ip().unwrap();
     let expected_ip = match (nat_mode, wiring) {
         (_, UplinkWiring::ViaCgnatIsp) => lab
             .router_by_name("isp")
@@ -361,7 +357,7 @@ async fn build_nat_case(
 }
 
 async fn build_dual_nat_lab(mode_a: Nat, mode_b: Nat, port_base: u16) -> Result<DualNatLab> {
-    let lab = Lab::new();
+    let lab = Lab::new().await;
     let dc = lab.add_router("dc").region("eu").build().await?;
     let nat_a = lab.add_router("nat-a").nat(mode_a).build().await?;
     let nat_b = lab.add_router("nat-b").nat(mode_b).build().await?;
@@ -397,7 +393,7 @@ async fn build_single_nat_case(
     wiring: UplinkWiring,
     port_base: u16,
 ) -> Result<(Lab, String, SocketAddr, SocketAddr, Ipv4Addr)> {
-    let lab = Lab::new();
+    let lab = Lab::new().await;
     let dc = lab.add_router("dc").region("eu").build().await?;
     let upstream = match wiring {
         UplinkWiring::DirectIx => None,
@@ -438,7 +434,7 @@ async fn build_single_nat_case(
             .context("missing isp")?
             .uplink_ip()
             .context("no uplink ip")?,
-        (Nat::None, _) => dev.ip(),
+        (Nat::None, _) => dev.ip().unwrap(),
         _ => nat.uplink_ip().context("no uplink ip")?,
     };
     Ok((lab, dev_ns, r_dc, r_ix, expected_ip))
@@ -530,7 +526,7 @@ async fn tcp_roundtrip(target: SocketAddr) -> Result<()> {
 #[traced_test]
 async fn nat_dest_independent_keeps_port() -> Result<()> {
     check_caps()?;
-    let lab = Lab::new();
+    let lab = Lab::new().await;
     let isp = lab.add_router("isp1").region("eu").build().await?;
     let dc = lab.add_router("dc1").region("eu").build().await?;
     let home = lab
@@ -560,10 +556,10 @@ async fn nat_dest_independent_keeps_port() -> Result<()> {
     let o1 = dev1.probe_udp_mapping(r1)?;
     let o2 = dev1.probe_udp_mapping(r2)?;
 
-    assert_eq!(o1.observed.ip(), o2.observed.ip(), "external IP differs");
+    assert_eq!(o1.ip(), o2.ip(), "external IP differs");
     assert_eq!(
-        o1.observed.port(),
-        o2.observed.port(),
+        o1.port(),
+        o2.port(),
         "EIM: external port must be stable across destinations",
     );
     Ok(())
@@ -573,7 +569,7 @@ async fn nat_dest_independent_keeps_port() -> Result<()> {
 #[traced_test]
 async fn nat_dest_dependent_changes_port() -> Result<()> {
     check_caps()?;
-    let lab = Lab::new();
+    let lab = Lab::new().await;
     let isp = lab.add_router("isp1").region("eu").build().await?;
     let dc = lab.add_router("dc1").region("eu").build().await?;
     let home = lab
@@ -603,10 +599,10 @@ async fn nat_dest_dependent_changes_port() -> Result<()> {
     println!("o1 {o1:?}");
     println!("o2 {o2:?}");
 
-    assert_eq!(o1.observed.ip(), o2.observed.ip(), "external IP differs");
+    assert_eq!(o1.ip(), o2.ip(), "external IP differs");
     assert_ne!(
-        o1.observed.port(),
-        o2.observed.port(),
+        o1.port(),
+        o2.port(),
         "EDM: external port must change per destination",
     );
     Ok(())
@@ -616,7 +612,7 @@ async fn nat_dest_dependent_changes_port() -> Result<()> {
 #[traced_test]
 async fn cgnat_hides_behind_isp_public_ip() -> Result<()> {
     check_caps()?;
-    let lab = Lab::new();
+    let lab = Lab::new().await;
     let isp = lab
         .add_router("isp1")
         .region("eu")
@@ -646,7 +642,7 @@ async fn cgnat_hides_behind_isp_public_ip() -> Result<()> {
     let isp_public = IpAddr::V4(isp.uplink_ip().context("no uplink ip")?);
 
     assert_eq!(
-        o.observed.ip(),
+        o.ip(),
         isp_public,
         "with CGNAT the observed IP must be the ISP's IX IP",
     );
@@ -657,7 +653,7 @@ async fn cgnat_hides_behind_isp_public_ip() -> Result<()> {
 #[traced_test]
 async fn iroh_nat_like_nodes_report_public_203_mapped_addrs() -> Result<()> {
     check_caps()?;
-    let lab = Lab::new();
+    let lab = Lab::new().await;
     let dc = lab.add_router("dc").region("eu").build().await?;
     let isp = lab
         .add_router("isp")
@@ -697,11 +693,11 @@ async fn iroh_nat_like_nodes_report_public_203_mapped_addrs() -> Result<()> {
     let fetcher_obs = fetcher.probe_udp_mapping(reflector)?;
     let isp_public = isp.uplink_ip().context("no uplink ip")?;
 
-    let provider_ip = match provider_obs.observed.ip() {
+    let provider_ip = match provider_obs.ip() {
         IpAddr::V4(ip) => ip,
         IpAddr::V6(ip) => bail!("expected provider observed IPv4 address, got {ip}"),
     };
-    let fetcher_ip = match fetcher_obs.observed.ip() {
+    let fetcher_ip = match fetcher_obs.ip() {
         IpAddr::V4(ip) => ip,
         IpAddr::V6(ip) => bail!("expected fetcher observed IPv4 address, got {ip}"),
     };
@@ -710,14 +706,12 @@ async fn iroh_nat_like_nodes_report_public_203_mapped_addrs() -> Result<()> {
         provider_ip.octets()[0],
         203,
         "provider STUN report should be public 203.* mapped IP, got {}",
-        provider_obs.observed
-    );
+        provider_obs    );
     assert_eq!(
         fetcher_ip.octets()[0],
         203,
         "fetcher STUN report should be public 203.* mapped IP, got {}",
-        fetcher_obs.observed
-    );
+        fetcher_obs    );
     assert_eq!(
         provider_ip, isp_public,
         "provider should be mapped behind ISP public address"
@@ -727,12 +721,12 @@ async fn iroh_nat_like_nodes_report_public_203_mapped_addrs() -> Result<()> {
         "fetcher should be mapped behind ISP public address"
     );
     assert_ne!(
-        provider_obs.observed.port(),
+        provider_obs.port(),
         0,
         "provider mapped port should be non-zero"
     );
     assert_ne!(
-        fetcher_obs.observed.port(),
+        fetcher_obs.port(),
         0,
         "fetcher mapped port should be non-zero"
     );
@@ -771,7 +765,7 @@ gateway = "lan1"
 #[traced_test]
 async fn smoke_ping_gateway() -> Result<()> {
     check_caps()?;
-    let lab = Lab::new();
+    let lab = Lab::new().await;
     let isp = lab.add_router("isp1").region("eu").build().await?;
     let home = lab
         .add_router("home1")
@@ -795,7 +789,7 @@ async fn smoke_ping_gateway() -> Result<()> {
 #[traced_test]
 async fn smoke_udp_dc_roundtrip() -> Result<()> {
     check_caps()?;
-    let lab = Lab::new();
+    let lab = Lab::new().await;
     let isp = lab.add_router("isp1").region("eu").build().await?;
     let dc = lab.add_router("dc1").region("eu").build().await?;
     let home = lab
@@ -824,7 +818,7 @@ async fn smoke_udp_dc_roundtrip() -> Result<()> {
 #[traced_test]
 async fn smoke_tcp_dc_roundtrip() -> Result<()> {
     check_caps()?;
-    let lab = Lab::new();
+    let lab = Lab::new().await;
     let isp = lab.add_router("isp1").region("eu").build().await?;
     let dc = lab.add_router("dc1").region("eu").build().await?;
     let home = lab
@@ -857,7 +851,7 @@ async fn smoke_tcp_dc_roundtrip() -> Result<()> {
 #[traced_test]
 async fn smoke_ping_home_to_isp() -> Result<()> {
     check_caps()?;
-    let lab = Lab::new();
+    let lab = Lab::new().await;
     let isp = lab.add_router("isp1").region("eu").build().await?;
     let home = lab
         .add_router("home1")
@@ -876,7 +870,7 @@ async fn smoke_ping_home_to_isp() -> Result<()> {
 #[traced_test]
 async fn smoke_ping_isp_to_ix_and_dc() -> Result<()> {
     check_caps()?;
-    let lab = Lab::new();
+    let lab = Lab::new().await;
     let isp = lab.add_router("isp1").region("eu").build().await?;
     let dc = lab.add_router("dc1").region("eu").build().await?;
 
@@ -892,7 +886,7 @@ async fn smoke_ping_isp_to_ix_and_dc() -> Result<()> {
 #[traced_test]
 async fn smoke_nat_homes_can_ping_public_relay_device() -> Result<()> {
     check_caps()?;
-    let lab = Lab::new();
+    let lab = Lab::new().await;
 
     let dc = lab.add_router("dc").build().await?;
     let lan_provider = lab
@@ -918,7 +912,7 @@ async fn smoke_nat_homes_can_ping_public_relay_device() -> Result<()> {
         .build()
         .await?;
 
-    let relay_ip = relay.ip();
+    let relay_ip = relay.ip().unwrap();
     let relay_ip_str = relay_ip.to_string();
     let relay_ip_str2 = relay_ip_str.clone();
     provider.run_sync(move || ping(&relay_ip_str))?;
@@ -953,7 +947,7 @@ async fn nat_matrix_public_connectivity_and_reflexive_ip() -> Result<()> {
         let _ = dev.run_sync(move || crate::test_utils::udp_roundtrip(r_dc))?;
         let observed = dev.probe_udp_mapping(r_dc)?;
         assert_eq!(
-            observed.observed.ip(),
+            observed.ip(),
             IpAddr::V4(expected_ip),
             "unexpected reflexive IP for mode={mode:?} wiring={}",
             wiring.label()
@@ -985,13 +979,13 @@ async fn nat_mapping_port_behavior_by_mode_and_wiring() -> Result<()> {
             let o2 = dev.probe_udp_mapping(r_ix)?;
 
             assert_eq!(
-                o1.observed.ip(),
+                o1.ip(),
                 IpAddr::V4(expected_ip),
                 "unexpected reflexive IP for mode={mode:?} wiring={}",
                 wiring.label()
             );
             assert_eq!(
-                o2.observed.ip(),
+                o2.ip(),
                 IpAddr::V4(expected_ip),
                 "unexpected reflexive IP for mode={mode:?} wiring={}",
                 wiring.label()
@@ -999,14 +993,14 @@ async fn nat_mapping_port_behavior_by_mode_and_wiring() -> Result<()> {
 
             match mode {
                 Nat::Home => assert_eq!(
-                    o1.observed.port(),
-                    o2.observed.port(),
+                    o1.port(),
+                    o2.port(),
                     "expected stable external port for mode={mode:?} wiring={}",
                     wiring.label()
                 ),
                 Nat::Corporate => assert_ne!(
-                    o1.observed.port(),
-                    o2.observed.port(),
+                    o1.port(),
+                    o2.port(),
                     "expected destination-dependent external port for mode={mode:?} wiring={}",
                     wiring.label()
                 ),
@@ -1021,7 +1015,7 @@ async fn nat_mapping_port_behavior_by_mode_and_wiring() -> Result<()> {
 #[traced_test]
 async fn nat_private_reachability_isolated_public_reachable() -> Result<()> {
     check_caps()?;
-    let lab = Lab::new();
+    let lab = Lab::new().await;
     let dc = lab.add_router("dc").region("eu").build().await?;
     let nat_a = lab.add_router("nat-a").nat(Nat::Home).build().await?;
     let nat_b = lab.add_router("nat-b").nat(Nat::Home).build().await?;
@@ -1047,10 +1041,10 @@ async fn nat_private_reachability_isolated_public_reachable() -> Result<()> {
         .build()
         .await?;
 
-    let a2_ip = a2.ip();
-    let b1_ip = b1.ip();
-    let a1_ip = a1.ip();
-    let relay_ip = relay.ip();
+    let a2_ip = a2.ip().unwrap();
+    let b1_ip = b1.ip().unwrap();
+    let a1_ip = a1.ip().unwrap();
+    let relay_ip = relay.ip().unwrap();
 
     let a2_ip_str = a2_ip.to_string();
     let b1_ip_str = b1_ip.to_string();
@@ -1080,9 +1074,9 @@ async fn nat_private_reachability_isolated_public_reachable() -> Result<()> {
     let a1_map = a1.probe_udp_mapping(reflector)?;
     let a2_map = a2.probe_udp_mapping(reflector)?;
     let b1_map = b1.probe_udp_mapping(reflector)?;
-    assert_eq!(a1_map.observed.ip(), IpAddr::V4(nat_a_public));
-    assert_eq!(a2_map.observed.ip(), IpAddr::V4(nat_a_public));
-    assert_eq!(b1_map.observed.ip(), IpAddr::V4(nat_b_public));
+    assert_eq!(a1_map.ip(), IpAddr::V4(nat_a_public));
+    assert_eq!(a2_map.ip(), IpAddr::V4(nat_a_public));
+    assert_eq!(b1_map.ip(), IpAddr::V4(nat_b_public));
     Ok(())
 }
 
@@ -1090,7 +1084,7 @@ async fn nat_private_reachability_isolated_public_reachable() -> Result<()> {
 #[traced_test]
 async fn smoke_device_to_device_same_lan() -> Result<()> {
     check_caps()?;
-    let lab = Lab::new();
+    let lab = Lab::new().await;
     let isp = lab.add_router("isp1").region("eu").build().await?;
     let home = lab
         .add_router("home1")
@@ -1109,7 +1103,7 @@ async fn smoke_device_to_device_same_lan() -> Result<()> {
         .build()
         .await?;
 
-    let dev2_ip_str = dev2.ip().to_string();
+    let dev2_ip_str = dev2.ip().unwrap().to_string();
     dev1.run_sync(move || ping(&dev2_ip_str))?;
     Ok(())
 }
@@ -1118,7 +1112,7 @@ async fn smoke_device_to_device_same_lan() -> Result<()> {
 #[traced_test]
 async fn latency_directional_between_regions() -> Result<()> {
     check_caps()?;
-    let lab = Lab::new();
+    let lab = Lab::new().await;
     lab.set_region_latency("eu", "us", 30);
     lab.set_region_latency("us", "eu", 70);
     let dc_eu = lab.add_router("dc-eu").region("eu").build().await?;
@@ -1168,7 +1162,7 @@ async fn latency_directional_between_regions() -> Result<()> {
 #[traced_test]
 async fn latency_inter_region_dc_to_dc() -> Result<()> {
     check_caps()?;
-    let lab = Lab::new();
+    let lab = Lab::new().await;
     lab.set_region_latency("eu", "us", 50);
     lab.set_region_latency("us", "eu", 50);
     let dc_eu = lab.add_router("dc-eu").region("eu").build().await?;
@@ -1197,8 +1191,8 @@ async fn latency_inter_region_dc_to_dc() -> Result<()> {
 async fn latency_device_impair_adds_delay() -> Result<()> {
     check_caps()?;
 
-    async fn measure(impair: Option<Impair>) -> Result<Duration> {
-        let lab = Lab::new();
+    async fn measure(impair: Option<LinkCondition>) -> Result<Duration> {
+        let lab = Lab::new().await;
         lab.set_region_latency("eu", "us", 40);
         lab.set_region_latency("us", "eu", 40);
         let dc_eu = lab.add_router("dc-eu").region("eu").build().await?;
@@ -1218,7 +1212,7 @@ async fn latency_device_impair_adds_delay() -> Result<()> {
     }
 
     let base = measure(None).await?;
-    let impaired = measure(Some(Impair::Mobile4G)).await?;
+    let impaired = measure(Some(LinkCondition::Mobile4G)).await?;
     assert!(
         impaired >= base + Duration::from_millis(30),
         "expected impaired RTT >= base + 30ms, base={base:?} impaired={impaired:?}"
@@ -1230,7 +1224,7 @@ async fn latency_device_impair_adds_delay() -> Result<()> {
 #[traced_test]
 async fn latency_manual_impair_applies() -> Result<()> {
     check_caps()?;
-    let lab = Lab::new();
+    let lab = Lab::new().await;
     let dc_eu = lab.add_router("dc-eu").region("eu").build().await?;
     let dc_us = lab.add_router("dc-us").region("us").build().await?;
     lab.set_region_latency("eu", "us", 20);
@@ -1240,7 +1234,7 @@ async fn latency_manual_impair_applies() -> Result<()> {
         .iface(
             "eth0",
             dc_eu.id(),
-            Some(Impair::Manual(ImpairLimits {
+            Some(LinkCondition::Manual(LinkLimits {
                 rate_kbit: 10_000,
                 latency_ms: 60,
                 ..Default::default()
@@ -1266,7 +1260,7 @@ async fn latency_manual_impair_applies() -> Result<()> {
 #[traced_test]
 async fn isp_home_wan_pool_selection() -> Result<()> {
     check_caps()?;
-    let lab = Lab::new();
+    let lab = Lab::new().await;
     let isp_public = lab.add_router("isp-public").region("eu").build().await?;
     let isp_cgnat = lab
         .add_router("isp-cgnat")
@@ -1306,7 +1300,7 @@ async fn isp_home_wan_pool_selection() -> Result<()> {
 #[traced_test]
 async fn dynamic_set_impair_changes_rtt() -> Result<()> {
     check_caps()?;
-    let lab = Lab::new();
+    let lab = Lab::new().await;
     let dc = lab.add_router("dc1").region("eu").build().await?;
     let dev = lab
         .add_device("dev1")
@@ -1323,7 +1317,7 @@ async fn dynamic_set_impair_changes_rtt() -> Result<()> {
 
     let dev_handle = lab.device_by_name("dev1").unwrap();
     let default_if = dev_handle.default_iface().name().to_string();
-    dev_handle.set_link_condition(&default_if, Some(Impair::Mobile4G))?;
+    dev_handle.set_link_condition(&default_if, Some(LinkCondition::Mobile4G))?;
     let impaired_rtt = dev.run_sync(move || crate::test_utils::udp_rtt(r))?;
     assert!(
         impaired_rtt >= base_rtt + Duration::from_millis(10),
@@ -1343,7 +1337,7 @@ async fn dynamic_set_impair_changes_rtt() -> Result<()> {
 #[traced_test]
 async fn dynamic_link_down_up_connectivity() -> Result<()> {
     check_caps()?;
-    let lab = Lab::new();
+    let lab = Lab::new().await;
     let dc = lab.add_router("dc1").region("eu").build().await?;
     let dev = lab
         .add_device("dev1")
@@ -1378,13 +1372,13 @@ async fn dynamic_link_down_up_connectivity() -> Result<()> {
 #[traced_test]
 async fn dynamic_switch_route_changes_path() -> Result<()> {
     check_caps()?;
-    let lab = Lab::new();
+    let lab = Lab::new().await;
     let dc = lab.add_router("dc1").region("eu").build().await?;
     let isp = lab.add_router("isp1").region("eu").build().await?;
     let dev = lab
         .add_device("dev1")
         .iface("eth0", dc.id(), None)
-        .iface("eth1", isp.id(), Some(Impair::Mobile4G))
+        .iface("eth1", isp.id(), Some(LinkCondition::Mobile4G))
         .default_via("eth0")
         .build()
         .await?;
@@ -1423,14 +1417,14 @@ impair = { rate = 5000, loss = 1.5, latency = 40 }
     let parsed: config::LabConfig = toml::from_str(cfg)?;
     let dev1 = parsed.device.get("dev1").context("missing dev1")?;
     let eth0 = dev1.get("eth0").context("missing eth0")?;
-    let impair: Impair = eth0
+    let impair: LinkCondition = eth0
         .get("impair")
         .context("missing impair")?
         .clone()
         .try_into()
         .map_err(|e: toml::de::Error| anyhow!("{}", e))?;
     match impair {
-        Impair::Manual(limits) => {
+        LinkCondition::Manual(limits) => {
             assert_eq!(limits.rate_kbit, 5000);
             assert!((limits.loss_pct - 1.5).abs() < f32::EPSILON);
             assert_eq!(limits.latency_ms, 40);
@@ -1466,7 +1460,7 @@ gateway = "dc1"
 #[tokio::test(flavor = "current_thread")]
 #[traced_test]
 async fn tcp_reflector_basic() -> Result<()> {
-    let lab = Lab::new();
+    let lab = Lab::new().await;
     let dc = lab.add_router("dc").build().await?;
     let dev = lab
         .add_device("dev")
@@ -1485,7 +1479,7 @@ async fn tcp_reflector_basic() -> Result<()> {
         .spawn(move |_| async move { probe_tcp(r).await })
         .await
         .context("probe_tcp task panicked")??;
-    assert_ne!(obs.observed.port(), 0, "expected non-zero port");
+    assert_ne!(obs.port(), 0, "expected non-zero port");
     Ok(())
 }
 
@@ -1520,8 +1514,8 @@ async fn reflexive_ip_all_combos() -> Result<()> {
                 let result: Result<()> = async {
                     let (_lab, ctx) = build_nat_case(mode, wiring, port_base).await?;
                     let obs = probe_reflexive(&ctx.dev, proto, bind, &ctx).await?;
-                    if obs.observed.ip() != IpAddr::V4(ctx.expected_ip) {
-                        bail!("expected {} got {}", ctx.expected_ip, obs.observed.ip());
+                    if obs.ip() != IpAddr::V4(ctx.expected_ip) {
+                        bail!("expected {} got {}", ctx.expected_ip, obs.ip());
                     }
                     Ok(())
                 }
@@ -1562,11 +1556,11 @@ async fn port_mapping_eim_stable() -> Result<()> {
             let dev = lab.device_by_name("dev").unwrap();
             let o1 = dev.probe_udp_mapping(ctx.r_dc)?;
             let o2 = dev.probe_udp_mapping(ctx.r_ix)?;
-            if o1.observed.port() != o2.observed.port() {
+            if o1.port() != o2.port() {
                 bail!(
                     "EIM: external port changed: r_dc={} r_ix={}",
-                    o1.observed.port(),
-                    o2.observed.port()
+                    o1.port(),
+                    o2.port()
                 );
             }
             Ok(())
@@ -1595,11 +1589,11 @@ async fn port_mapping_edm_changes() -> Result<()> {
             let dev = lab.device_by_name("dev").unwrap();
             let o1 = dev.probe_udp_mapping(ctx.r_dc)?;
             let o2 = dev.probe_udp_mapping(ctx.r_ix)?;
-            if o1.observed.port() == o2.observed.port() {
+            if o1.port() == o2.port() {
                 bail!(
                     "EDM: external port must change: r_dc={} r_ix={}",
-                    o1.observed.port(),
-                    o2.observed.port()
+                    o1.port(),
+                    o2.port()
                 );
             }
             Ok(())
@@ -1639,13 +1633,13 @@ async fn switch_route_reflexive_ip() -> Result<()> {
         for bind in BindMode::iter() {
             // SpecificIp must use the IP of the currently-active interface;
             // device_ip() returns the default_via interface IP, which changes on switch_route.
-            let dev_ip = dev.ip();
+            let dev_ip = dev.ip().unwrap();
             let obs = probe_reflexive_addr(&dev, proto, bind, dev_ip, reflector).await;
             match obs {
-                Ok(o) if o.observed.ip() == IpAddr::V4(wan_a) => {}
+                Ok(o) if o.ip() == IpAddr::V4(wan_a) => {}
                 Ok(o) => failures.push(format!(
                     "{proto}/{bind} before switch: expected {wan_a} got {}",
-                    o.observed.ip()
+                    o.ip()
                 )),
                 Err(e) => failures.push(format!("{proto}/{bind} before switch: {e:#}")),
             }
@@ -1653,13 +1647,13 @@ async fn switch_route_reflexive_ip() -> Result<()> {
             dev.set_default_route("eth1").await?;
             tokio::time::sleep(Duration::from_millis(50)).await;
 
-            let dev_ip = dev.ip();
+            let dev_ip = dev.ip().unwrap();
             let obs = probe_reflexive_addr(&dev, proto, bind, dev_ip, reflector).await;
             match obs {
-                Ok(o) if o.observed.ip() == IpAddr::V4(wan_b) => {}
+                Ok(o) if o.ip() == IpAddr::V4(wan_b) => {}
                 Ok(o) => failures.push(format!(
                     "{proto}/{bind} after switch: expected {wan_b} got {}",
-                    o.observed.ip()
+                    o.ip()
                 )),
                 Err(e) => failures.push(format!("{proto}/{bind} after switch: {e:#}")),
             }
@@ -1691,7 +1685,7 @@ async fn switch_route_multiple() -> Result<()> {
 
     let o = dev.run_sync(move || crate::test_utils::udp_roundtrip(reflector))?;
     assert_eq!(
-        o.observed.ip(),
+        o.ip(),
         IpAddr::V4(wan_a),
         "expected nat_a WAN on eth0"
     );
@@ -1700,7 +1694,7 @@ async fn switch_route_multiple() -> Result<()> {
     tokio::time::sleep(Duration::from_millis(50)).await;
     let o = dev.run_sync(move || crate::test_utils::udp_roundtrip(reflector))?;
     assert_eq!(
-        o.observed.ip(),
+        o.ip(),
         IpAddr::V4(wan_b),
         "expected nat_b WAN on eth1"
     );
@@ -1709,7 +1703,7 @@ async fn switch_route_multiple() -> Result<()> {
     tokio::time::sleep(Duration::from_millis(50)).await;
     let o = dev.run_sync(move || crate::test_utils::udp_roundtrip(reflector))?;
     assert_eq!(
-        o.observed.ip(),
+        o.ip(),
         IpAddr::V4(wan_a),
         "expected nat_a WAN after switch back"
     );
@@ -1766,7 +1760,7 @@ async fn switch_route_udp_reflexive_change() -> Result<()> {
 
     let before = dev.run_sync(move || crate::test_utils::udp_roundtrip(reflector))?;
     assert_eq!(
-        before.observed.ip(),
+        before.ip(),
         IpAddr::V4(wan_a),
         "before switch: expected nat_a WAN"
     );
@@ -1776,13 +1770,13 @@ async fn switch_route_udp_reflexive_change() -> Result<()> {
 
     let after = dev.run_sync(move || crate::test_utils::udp_roundtrip(reflector))?;
     assert_eq!(
-        after.observed.ip(),
+        after.ip(),
         IpAddr::V4(wan_b),
         "after switch: expected nat_b WAN"
     );
     assert_ne!(
-        before.observed.ip(),
-        after.observed.ip(),
+        before.ip(),
+        after.ip(),
         "reflexive IP must change after route switch"
     );
     Ok(())
@@ -1793,7 +1787,7 @@ async fn switch_route_udp_reflexive_change() -> Result<()> {
 #[tokio::test(flavor = "current_thread")]
 #[traced_test]
 async fn switch_uplink_udp_smoke() -> Result<()> {
-    let lab = Lab::new();
+    let lab = Lab::new().await;
     let dc = lab.add_router("dc").build().await?;
     let nat_a = lab.add_router("nat-a").nat(Nat::Home).build().await?;
     let nat_b = lab.add_router("nat-b").nat(Nat::Home).build().await?;
@@ -1826,7 +1820,7 @@ async fn switch_uplink_udp_smoke() -> Result<()> {
 #[tokio::test(flavor = "current_thread")]
 #[traced_test]
 async fn switch_uplink_reflexive_ip_changes() -> Result<()> {
-    let lab = Lab::new();
+    let lab = Lab::new().await;
     let dc = lab.add_router("dc").build().await?;
     let nat_a = lab.add_router("nat-a").nat(Nat::Home).build().await?;
     let nat_b = lab.add_router("nat-b").nat(Nat::Home).build().await?;
@@ -1846,7 +1840,7 @@ async fn switch_uplink_reflexive_ip_changes() -> Result<()> {
 
     let before = dev.run_sync(move || crate::test_utils::udp_roundtrip(reflector))?;
     assert_eq!(
-        before.observed.ip(),
+        before.ip(),
         IpAddr::V4(wan_a),
         "before switch: expected nat_a WAN IP"
     );
@@ -1856,13 +1850,13 @@ async fn switch_uplink_reflexive_ip_changes() -> Result<()> {
 
     let after = dev.run_sync(move || crate::test_utils::udp_roundtrip(reflector))?;
     assert_eq!(
-        after.observed.ip(),
+        after.ip(),
         IpAddr::V4(wan_b),
         "after switch: expected nat_b WAN IP"
     );
     assert_ne!(
-        before.observed.ip(),
-        after.observed.ip(),
+        before.ip(),
+        after.ip(),
         "reflexive IP must change after uplink switch"
     );
     Ok(())
@@ -1871,7 +1865,7 @@ async fn switch_uplink_reflexive_ip_changes() -> Result<()> {
 #[tokio::test(flavor = "current_thread")]
 #[traced_test]
 async fn custom_downstream_cidr() -> Result<()> {
-    let lab = Lab::new();
+    let lab = Lab::new().await;
     let dc = lab.add_router("dc").build().await?;
     let custom = lab
         .add_router("custom")
@@ -1898,7 +1892,7 @@ async fn custom_downstream_cidr() -> Result<()> {
         .build()
         .await?;
     assert_eq!(
-        dev.ip(),
+        dev.ip().unwrap(),
         Ipv4Addr::new(172, 30, 99, 2),
         "first device should get 172.30.99.2"
     );
@@ -1924,7 +1918,7 @@ async fn link_down_up_connectivity() -> Result<()> {
     let mut failures = Vec::new();
     for proto in Proto::iter() {
         let result: Result<()> = async {
-            let lab = Lab::new();
+            let lab = Lab::new().await;
             let dc = lab.add_router("dc").build().await?;
             let dev = lab
                 .add_device("dev")
@@ -2014,13 +2008,13 @@ async fn nat_rebind_mode_port() -> Result<()> {
             let dev = lab.device_by_name("dev").unwrap();
             let o1 = dev.probe_udp_mapping(ctx.r_dc)?;
             let o2 = dev.probe_udp_mapping(ctx.r_ix)?;
-            let port_stable = o1.observed.port() == o2.observed.port();
+            let port_stable = o1.port() == o2.port();
             if port_stable != expect_stable {
                 bail!(
                     "{from}→{to}: expected stable={expect_stable} got stable={port_stable} \
                          (r_dc port={}, r_ix port={})",
-                    o1.observed.port(),
-                    o2.observed.port()
+                    o1.port(),
+                    o2.port()
                 );
             }
             Ok(())
@@ -2061,8 +2055,8 @@ async fn nat_rebind_mode_ip() -> Result<()> {
                 Nat::None => IpAddr::V4(ctx.dev_ip),
                 _ => unreachable!(),
             };
-            if o.observed.ip() != expected {
-                bail!("{from}→{to}: expected {expected} got {}", o.observed.ip());
+            if o.ip() != expected {
+                bail!("{from}→{to}: expected {expected} got {}", o.ip());
             }
             Ok(())
         }
@@ -2099,8 +2093,8 @@ async fn nat_rebind_conntrack_flush() -> Result<()> {
     tokio::time::sleep(Duration::from_millis(50)).await;
     let o2 = ctx.dev.run_sync(move || probe_udp_from(r_dc, bind))?;
     assert_ne!(
-        o1.observed.port(),
-        o2.observed.port(),
+        o1.port(),
+        o2.port(),
         "expected new external port after conntrack flush"
     );
     Ok(())
@@ -2111,7 +2105,7 @@ async fn nat_rebind_conntrack_flush() -> Result<()> {
 #[tokio::test(flavor = "current_thread")]
 #[traced_test]
 async fn devices_same_nat_share_ip() -> Result<()> {
-    let lab = Lab::new();
+    let lab = Lab::new().await;
     let dc = lab.add_router("dc").build().await?;
     let nat = lab.add_router("nat").nat(Nat::Home).build().await?;
     let dev_a = lab
@@ -2133,8 +2127,8 @@ async fn devices_same_nat_share_ip() -> Result<()> {
     let oa = dev_a.run_sync(move || crate::test_utils::udp_roundtrip(r))?;
     let ob = dev_b.run_sync(move || crate::test_utils::udp_roundtrip(r))?;
     assert_eq!(
-        oa.observed.ip(),
-        ob.observed.ip(),
+        oa.ip(),
+        ob.ip(),
         "devices behind the same NAT must share the same external IP"
     );
     Ok(())
@@ -2143,7 +2137,7 @@ async fn devices_same_nat_share_ip() -> Result<()> {
 #[tokio::test(flavor = "current_thread")]
 #[traced_test]
 async fn devices_diff_nat_isolate() -> Result<()> {
-    let lab = Lab::new();
+    let lab = Lab::new().await;
     let dc = lab.add_router("dc").build().await?;
     let nat_a = lab.add_router("nat-a").nat(Nat::Home).build().await?;
     let nat_b = lab.add_router("nat-b").nat(Nat::Home).build().await?;
@@ -2163,8 +2157,8 @@ async fn devices_diff_nat_isolate() -> Result<()> {
     dc.spawn_reflector(r)?;
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    let ip_a = dev_a.ip();
-    let ip_b = dev_b.ip();
+    let ip_a = dev_a.ip().unwrap();
+    let ip_b = dev_b.ip().unwrap();
     let ip_a_str = ip_a.to_string();
     let ip_b_str = ip_b.to_string();
     let dc_ip_str = dc_ip.to_string();
@@ -2178,16 +2172,162 @@ async fn devices_diff_nat_isolate() -> Result<()> {
     let oa = dev_a.run_sync(move || crate::test_utils::udp_roundtrip(r))?;
     let ob = dev_b.run_sync(move || crate::test_utils::udp_roundtrip(r))?;
     assert_ne!(
-        oa.observed.ip(),
-        ob.observed.ip(),
+        oa.ip(),
+        ob.ip(),
         "devices behind different NATs must have different external IPs"
     );
     Ok(())
 }
 
-// ── 5h: Hairpinning — TODO ───────────────────────────────────────────
-// Implementing ct-dnat-based hairpin in nftables requires per-port DNAT
-// rules derived from the live conntrack table. Deferred.
+// ── 5h: Hairpinning ─────────────────────────────────────────────────
+
+/// Two devices behind a FullCone router (hairpin=true). Device A creates a
+/// mapping via a DC reflector, then device B sends to A's external addr:port.
+/// With hairpin, the router DNAT's the packet to A and masquerades the return.
+#[tokio::test(flavor = "current_thread")]
+#[traced_test]
+async fn hairpin_fullcone_udp() -> Result<()> {
+    let lab = Lab::new().await;
+    let dc = lab.add_router("dc").build().await?;
+    let r = lab.add_router("r").nat(Nat::FullCone).build().await?;
+    let a = lab
+        .add_device("a")
+        .iface("eth0", r.id(), None)
+        .build()
+        .await?;
+    let b = lab
+        .add_device("b")
+        .iface("eth0", r.id(), None)
+        .build()
+        .await?;
+
+    let dc_ip = dc.uplink_ip().context("dc has no ip")?;
+    let reflector = SocketAddr::new(IpAddr::V4(dc_ip), 9100);
+    dc.spawn_reflector(reflector)?;
+
+    // A sends outbound to create a fullcone mapping.
+    let a_ext = a.probe_udp_mapping(reflector)?;
+
+    // A listens for UDP on its private port (same port the mapping was created from).
+    let a_local_port = a_ext.port();
+    let a_ip = a.ip().unwrap();
+    let a_listen = SocketAddr::new(IpAddr::V4(a_ip), a_local_port);
+    a.spawn_reflector(a_listen)?;
+
+    // B sends to A's external address (router's public IP + A's mapped port).
+    // With hairpin, the router should DNAT this to A's private IP.
+    let reply = b.run_sync(move || {
+        let sock = std::net::UdpSocket::bind("0.0.0.0:0")?;
+        sock.set_read_timeout(Some(Duration::from_secs(2)))?;
+        sock.send_to(b"PROBE", a_ext)?;
+        let mut buf = [0u8; 512];
+        let (n, _) = sock.recv_from(&mut buf)?;
+        Ok(String::from_utf8_lossy(&buf[..n]).to_string())
+    })?;
+    assert!(
+        reply.starts_with("OBSERVED "),
+        "expected reflector reply, got: {reply:?}"
+    );
+    Ok(())
+}
+
+/// Two devices behind a Home router (hairpin=false). Same setup as above
+/// but the LAN→WAN-IP traffic should NOT be forwarded.
+#[tokio::test(flavor = "current_thread")]
+#[traced_test]
+async fn hairpin_home_blocked() -> Result<()> {
+    let lab = Lab::new().await;
+    let dc = lab.add_router("dc").build().await?;
+    let r = lab.add_router("r").nat(Nat::Home).build().await?;
+    let a = lab
+        .add_device("a")
+        .iface("eth0", r.id(), None)
+        .build()
+        .await?;
+    let b = lab
+        .add_device("b")
+        .iface("eth0", r.id(), None)
+        .build()
+        .await?;
+
+    let dc_ip = dc.uplink_ip().context("dc has no ip")?;
+    let reflector = SocketAddr::new(IpAddr::V4(dc_ip), 9101);
+    dc.spawn_reflector(reflector)?;
+
+    // A creates a mapping.
+    let a_ext = a.probe_udp_mapping(reflector)?;
+
+    // B tries to reach A via the external addr — should time out.
+    let result = b.run_sync(move || {
+        let sock = std::net::UdpSocket::bind("0.0.0.0:0")?;
+        sock.set_read_timeout(Some(Duration::from_millis(500)))?;
+        sock.send_to(b"PROBE", a_ext)?;
+        let mut buf = [0u8; 512];
+        match sock.recv_from(&mut buf) {
+            Ok(_) => bail!("unexpected reply — hairpin should be blocked"),
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock || e.kind() == std::io::ErrorKind::TimedOut => {
+                Ok(())
+            }
+            Err(e) => Err(e.into()),
+        }
+    });
+    assert!(result.is_ok(), "expected timeout, got: {result:?}");
+    Ok(())
+}
+
+/// Custom NAT config with EIM + APDF + hairpin enabled.
+#[tokio::test(flavor = "current_thread")]
+#[traced_test]
+async fn hairpin_custom_enabled() -> Result<()> {
+    let lab = Lab::new().await;
+    let dc = lab.add_router("dc").build().await?;
+    let r = lab
+        .add_router("r")
+        .nat(Nat::Custom(
+            NatConfig::builder()
+                .mapping(NatMapping::EndpointIndependent)
+                .filtering(NatFiltering::AddressAndPortDependent)
+                .hairpin(true)
+                .build(),
+        ))
+        .build()
+        .await?;
+    let a = lab
+        .add_device("a")
+        .iface("eth0", r.id(), None)
+        .build()
+        .await?;
+    let b = lab
+        .add_device("b")
+        .iface("eth0", r.id(), None)
+        .build()
+        .await?;
+
+    let dc_ip = dc.uplink_ip().context("dc has no ip")?;
+    let reflector = SocketAddr::new(IpAddr::V4(dc_ip), 9102);
+    dc.spawn_reflector(reflector)?;
+
+    let a_ext = a.probe_udp_mapping(reflector)?;
+
+    let a_local_port = a_ext.port();
+    let a_ip = a.ip().unwrap();
+    let a_listen = SocketAddr::new(IpAddr::V4(a_ip), a_local_port);
+    a.spawn_reflector(a_listen)?;
+
+    let reply = b.run_sync(move || {
+        let sock = std::net::UdpSocket::bind("0.0.0.0:0")?;
+        sock.set_read_timeout(Some(Duration::from_secs(2)))?;
+        sock.send_to(b"PROBE", a_ext)?;
+        let mut buf = [0u8; 512];
+        let (n, _) = sock.recv_from(&mut buf)?;
+        Ok(String::from_utf8_lossy(&buf[..n]).to_string())
+    })?;
+    assert!(
+        reply.starts_with("OBSERVED "),
+        "expected reflector reply, got: {reply:?}"
+    );
+    Ok(())
+}
 
 // ── 5i: Rate limiting ────────────────────────────────────────────────
 
@@ -2199,14 +2339,14 @@ fn join_sink(join: thread::JoinHandle<Result<()>>) -> Result<()> {
 #[tokio::test(flavor = "current_thread")]
 #[traced_test]
 async fn rate_limit_tcp_upload() -> Result<()> {
-    let lab = Lab::new();
+    let lab = Lab::new().await;
     let dc = lab.add_router("dc").build().await?;
     let dev = lab
         .add_device("dev")
         .iface(
             "eth0",
             dc.id(),
-            Some(Impair::Manual(ImpairLimits {
+            Some(LinkCondition::Manual(LinkLimits {
                 rate_kbit: 2000,
                 loss_pct: 0.0,
                 latency_ms: 0,
@@ -2232,7 +2372,7 @@ async fn rate_limit_tcp_upload() -> Result<()> {
 #[tokio::test(flavor = "current_thread")]
 #[traced_test]
 async fn rate_limit_tcp_download() -> Result<()> {
-    let lab = Lab::new();
+    let lab = Lab::new().await;
     let dc = lab.add_router("dc").build().await?;
     let dev_id = lab
         .add_device("dev")
@@ -2240,14 +2380,14 @@ async fn rate_limit_tcp_download() -> Result<()> {
         .build()
         .await?;
 
-    dc.set_downlink_condition(Some(Impair::Manual(ImpairLimits {
+    dc.set_downlink_condition(Some(LinkCondition::Manual(LinkLimits {
         rate_kbit: 2000,
         loss_pct: 0.0,
         latency_ms: 0,
         ..Default::default()
     })))?;
 
-    let dev_ip = dev_id.ip();
+    let dev_ip = dev_id.ip().unwrap();
     let addr = SocketAddr::new(IpAddr::V4(dev_ip), 17_400);
 
     // Client (DC) writes to server (device) — bytes travel the download path.
@@ -2265,14 +2405,14 @@ async fn rate_limit_tcp_download() -> Result<()> {
 #[traced_test]
 async fn rate_limit_udp_upload() -> Result<()> {
     use std::time::Instant;
-    let lab = Lab::new();
+    let lab = Lab::new().await;
     let dc = lab.add_router("dc").build().await?;
     let dev = lab
         .add_device("dev")
         .iface(
             "eth0",
             dc.id(),
-            Some(Impair::Manual(ImpairLimits {
+            Some(LinkCondition::Manual(LinkLimits {
                 rate_kbit: 2000,
                 loss_pct: 0.0,
                 latency_ms: 0,
@@ -2302,7 +2442,7 @@ async fn rate_limit_udp_upload() -> Result<()> {
 #[traced_test]
 async fn rate_limit_udp_download() -> Result<()> {
     use std::time::Instant;
-    let lab = Lab::new();
+    let lab = Lab::new().await;
     let dc = lab.add_router("dc").build().await?;
     let dev_id = lab
         .add_device("dev")
@@ -2310,7 +2450,7 @@ async fn rate_limit_udp_download() -> Result<()> {
         .build()
         .await?;
 
-    dc.set_downlink_condition(Some(Impair::Manual(ImpairLimits {
+    dc.set_downlink_condition(Some(LinkCondition::Manual(LinkLimits {
         rate_kbit: 2000,
         loss_pct: 0.0,
         latency_ms: 0,
@@ -2336,14 +2476,14 @@ async fn rate_limit_udp_download() -> Result<()> {
 #[tokio::test(flavor = "current_thread")]
 #[traced_test]
 async fn rate_limit_asymmetric() -> Result<()> {
-    let lab = Lab::new();
+    let lab = Lab::new().await;
     let dc = lab.add_router("dc").build().await?;
     let dev_id = lab
         .add_device("dev")
         .iface(
             "eth0",
             dc.id(),
-            Some(Impair::Manual(ImpairLimits {
+            Some(LinkCondition::Manual(LinkLimits {
                 rate_kbit: 1000,
                 loss_pct: 0.0,
                 latency_ms: 0,
@@ -2353,7 +2493,7 @@ async fn rate_limit_asymmetric() -> Result<()> {
         .build()
         .await?;
 
-    dc.set_downlink_condition(Some(Impair::Manual(ImpairLimits {
+    dc.set_downlink_condition(Some(LinkCondition::Manual(LinkLimits {
         rate_kbit: 4000,
         loss_pct: 0.0,
         latency_ms: 0,
@@ -2362,7 +2502,7 @@ async fn rate_limit_asymmetric() -> Result<()> {
 
     let dc_ip = dc.uplink_ip().context("no dc uplink ip")?;
     let up_addr = SocketAddr::new(IpAddr::V4(dc_ip), 17_700);
-    let dev_ip = dev_id.ip();
+    let dev_ip = dev_id.ip().unwrap();
     let down_addr = SocketAddr::new(IpAddr::V4(dev_ip), 17_710);
 
     let sink_up = dc.spawn_thread(move || tcp_sink(up_addr))?;
@@ -2389,7 +2529,7 @@ async fn rate_limit_asymmetric() -> Result<()> {
 #[tokio::test(flavor = "current_thread")]
 #[traced_test]
 async fn rate_limit_multihop_bottleneck() -> Result<()> {
-    let lab = Lab::new();
+    let lab = Lab::new().await;
     let dc = lab.add_router("dc").build().await?;
     let isp = lab.add_router("isp").build().await?;
     let nat = lab
@@ -2407,7 +2547,7 @@ async fn rate_limit_multihop_bottleneck() -> Result<()> {
     lab.set_link_condition(
         nat.id(),
         isp.id(),
-        Some(Impair::Manual(ImpairLimits {
+        Some(LinkCondition::Manual(LinkLimits {
             rate_kbit: 1000,
             loss_pct: 0.0,
             latency_ms: 0,
@@ -2433,14 +2573,14 @@ async fn rate_limit_multihop_bottleneck() -> Result<()> {
 #[tokio::test(flavor = "current_thread")]
 #[traced_test]
 async fn rate_limit_two_hops_stack() -> Result<()> {
-    let lab = Lab::new();
+    let lab = Lab::new().await;
     let dc = lab.add_router("dc").build().await?;
     let dev = lab
         .add_device("dev")
         .iface(
             "eth0",
             dc.id(),
-            Some(Impair::Manual(ImpairLimits {
+            Some(LinkCondition::Manual(LinkLimits {
                 rate_kbit: 2000,
                 loss_pct: 0.0,
                 latency_ms: 0,
@@ -2450,7 +2590,7 @@ async fn rate_limit_two_hops_stack() -> Result<()> {
         .build()
         .await?;
 
-    dc.set_downlink_condition(Some(Impair::Manual(ImpairLimits {
+    dc.set_downlink_condition(Some(LinkCondition::Manual(LinkLimits {
         rate_kbit: 2000,
         loss_pct: 0.0,
         latency_ms: 0,
@@ -2475,14 +2615,14 @@ async fn rate_limit_two_hops_stack() -> Result<()> {
 #[tokio::test(flavor = "current_thread")]
 #[traced_test]
 async fn loss_udp_moderate() -> Result<()> {
-    let lab = Lab::new();
+    let lab = Lab::new().await;
     let dc = lab.add_router("dc").build().await?;
     let dev = lab
         .add_device("dev")
         .iface(
             "eth0",
             dc.id(),
-            Some(Impair::Manual(ImpairLimits {
+            Some(LinkCondition::Manual(LinkLimits {
                 rate_kbit: 0,
                 loss_pct: 50.0,
                 latency_ms: 0,
@@ -2515,14 +2655,14 @@ async fn loss_udp_moderate() -> Result<()> {
 #[tokio::test(flavor = "current_thread")]
 #[traced_test]
 async fn loss_udp_high() -> Result<()> {
-    let lab = Lab::new();
+    let lab = Lab::new().await;
     let dc = lab.add_router("dc").build().await?;
     let dev = lab
         .add_device("dev")
         .iface(
             "eth0",
             dc.id(),
-            Some(Impair::Manual(ImpairLimits {
+            Some(LinkCondition::Manual(LinkLimits {
                 rate_kbit: 0,
                 loss_pct: 90.0,
                 latency_ms: 0,
@@ -2549,14 +2689,14 @@ async fn loss_udp_high() -> Result<()> {
 #[tokio::test(flavor = "current_thread")]
 #[traced_test]
 async fn loss_tcp_integrity() -> Result<()> {
-    let lab = Lab::new();
+    let lab = Lab::new().await;
     let dc = lab.add_router("dc").build().await?;
     let dev = lab
         .add_device("dev")
         .iface(
             "eth0",
             dc.id(),
-            Some(Impair::Manual(ImpairLimits {
+            Some(LinkCondition::Manual(LinkLimits {
                 rate_kbit: 0,
                 loss_pct: 5.0,
                 latency_ms: 0,
@@ -2598,14 +2738,14 @@ async fn loss_tcp_integrity() -> Result<()> {
 #[tokio::test(flavor = "current_thread")]
 #[traced_test]
 async fn loss_udp_both_directions() -> Result<()> {
-    let lab = Lab::new();
+    let lab = Lab::new().await;
     let dc = lab.add_router("dc").build().await?;
     let dev = lab
         .add_device("dev")
         .iface(
             "eth0",
             dc.id(),
-            Some(Impair::Manual(ImpairLimits {
+            Some(LinkCondition::Manual(LinkLimits {
                 rate_kbit: 0,
                 loss_pct: 30.0,
                 latency_ms: 0,
@@ -2615,7 +2755,7 @@ async fn loss_udp_both_directions() -> Result<()> {
         .build()
         .await?;
 
-    dc.set_downlink_condition(Some(Impair::Manual(ImpairLimits {
+    dc.set_downlink_condition(Some(LinkCondition::Manual(LinkLimits {
         rate_kbit: 0,
         loss_pct: 30.0,
         latency_ms: 0,
@@ -2643,7 +2783,7 @@ async fn loss_udp_both_directions() -> Result<()> {
 #[traced_test]
 #[ignore = "hangs — download-direction impair path needs async worker fix"]
 async fn latency_download_direction() -> Result<()> {
-    let lab = Lab::new();
+    let lab = Lab::new().await;
     let dc = lab.add_router("dc").build().await?;
     let dev = lab
         .add_device("dev")
@@ -2658,7 +2798,7 @@ async fn latency_download_direction() -> Result<()> {
 
     let base = dev.run_sync(move || crate::test_utils::udp_rtt(r))?;
 
-    dc.set_downlink_condition(Some(Impair::Manual(ImpairLimits {
+    dc.set_downlink_condition(Some(LinkCondition::Manual(LinkLimits {
         rate_kbit: 0,
         loss_pct: 0.0,
         latency_ms: 50,
@@ -2676,14 +2816,14 @@ async fn latency_download_direction() -> Result<()> {
 #[tokio::test(flavor = "current_thread")]
 #[traced_test]
 async fn latency_upload_and_download() -> Result<()> {
-    let lab = Lab::new();
+    let lab = Lab::new().await;
     let dc = lab.add_router("dc").build().await?;
     let dev = lab
         .add_device("dev")
         .iface(
             "eth0",
             dc.id(),
-            Some(Impair::Manual(ImpairLimits {
+            Some(LinkCondition::Manual(LinkLimits {
                 rate_kbit: 0,
                 loss_pct: 0.0,
                 latency_ms: 20,
@@ -2693,7 +2833,7 @@ async fn latency_upload_and_download() -> Result<()> {
         .build()
         .await?;
 
-    dc.set_downlink_condition(Some(Impair::Manual(ImpairLimits {
+    dc.set_downlink_condition(Some(LinkCondition::Manual(LinkLimits {
         rate_kbit: 0,
         loss_pct: 0.0,
         latency_ms: 30,
@@ -2717,7 +2857,7 @@ async fn latency_upload_and_download() -> Result<()> {
 #[tokio::test(flavor = "current_thread")]
 #[traced_test]
 async fn latency_device_plus_region() -> Result<()> {
-    let lab = Lab::new();
+    let lab = Lab::new().await;
     lab.set_region_latency("eu", "us", 40);
     lab.set_region_latency("us", "eu", 40);
     let dc_eu = lab.add_router("dc-eu").region("eu").build().await?;
@@ -2727,7 +2867,7 @@ async fn latency_device_plus_region() -> Result<()> {
         .iface(
             "eth0",
             dc_eu.id(),
-            Some(Impair::Manual(ImpairLimits {
+            Some(LinkCondition::Manual(LinkLimits {
                 rate_kbit: 0,
                 loss_pct: 0.0,
                 latency_ms: 30,
@@ -2769,7 +2909,7 @@ async fn latency_device_plus_region() -> Result<()> {
 #[tokio::test(flavor = "current_thread")]
 #[traced_test]
 async fn latency_multihop_chain() -> Result<()> {
-    let lab = Lab::new();
+    let lab = Lab::new().await;
     let dc = lab.add_router("dc").build().await?;
     let isp = lab.add_router("isp").build().await?;
     let nat = lab
@@ -2783,7 +2923,7 @@ async fn latency_multihop_chain() -> Result<()> {
         .iface(
             "eth0",
             nat.id(),
-            Some(Impair::Manual(ImpairLimits {
+            Some(LinkCondition::Manual(LinkLimits {
                 rate_kbit: 0,
                 loss_pct: 0.0,
                 latency_ms: 20,
@@ -2796,7 +2936,7 @@ async fn latency_multihop_chain() -> Result<()> {
     lab.set_link_condition(
         nat.id(),
         isp.id(),
-        Some(Impair::Manual(ImpairLimits {
+        Some(LinkCondition::Manual(LinkLimits {
             rate_kbit: 0,
             loss_pct: 0.0,
             latency_ms: 30,
@@ -2823,14 +2963,14 @@ async fn latency_multihop_chain() -> Result<()> {
 #[tokio::test(flavor = "current_thread")]
 #[traced_test]
 async fn rate_dynamic_decrease() -> Result<()> {
-    let lab = Lab::new();
+    let lab = Lab::new().await;
     let dc = lab.add_router("dc").build().await?;
     let dev = lab
         .add_device("dev")
         .iface(
             "eth0",
             dc.id(),
-            Some(Impair::Manual(ImpairLimits {
+            Some(LinkCondition::Manual(LinkLimits {
                 rate_kbit: 5000,
                 loss_pct: 0.0,
                 latency_ms: 0,
@@ -2853,7 +2993,7 @@ async fn rate_dynamic_decrease() -> Result<()> {
     let default_if = dev_handle.default_iface().name().to_string();
     dev_handle.set_link_condition(
         &default_if,
-        Some(Impair::Manual(ImpairLimits {
+        Some(LinkCondition::Manual(LinkLimits {
             rate_kbit: 500,
             loss_pct: 0.0,
             latency_ms: 0,
@@ -2886,14 +3026,14 @@ async fn rate_dynamic_decrease() -> Result<()> {
 #[tokio::test(flavor = "current_thread")]
 #[traced_test]
 async fn rate_dynamic_remove() -> Result<()> {
-    let lab = Lab::new();
+    let lab = Lab::new().await;
     let dc = lab.add_router("dc").build().await?;
     let dev = lab
         .add_device("dev")
         .iface(
             "eth0",
             dc.id(),
-            Some(Impair::Manual(ImpairLimits {
+            Some(LinkCondition::Manual(LinkLimits {
                 rate_kbit: 1000,
                 loss_pct: 0.0,
                 latency_ms: 0,
@@ -2933,7 +3073,7 @@ async fn rate_dynamic_remove() -> Result<()> {
 #[tokio::test(flavor = "current_thread")]
 #[traced_test]
 async fn latency_dynamic_add_remove() -> Result<()> {
-    let lab = Lab::new();
+    let lab = Lab::new().await;
     let dc = lab.add_router("dc").build().await?;
     let dev = lab
         .add_device("dev")
@@ -2952,7 +3092,7 @@ async fn latency_dynamic_add_remove() -> Result<()> {
     let default_if = dev_handle.default_iface().name().to_string();
     dev_handle.set_link_condition(
         &default_if,
-        Some(Impair::Manual(ImpairLimits {
+        Some(LinkCondition::Manual(LinkLimits {
             rate_kbit: 0,
             loss_pct: 0.0,
             latency_ms: 100,
@@ -2977,20 +3117,20 @@ async fn latency_dynamic_add_remove() -> Result<()> {
 #[tokio::test(flavor = "current_thread")]
 #[traced_test]
 async fn rate_presets() -> Result<()> {
-    let cases: Vec<(Impair, u64, f32)> = vec![
-        (Impair::Lan, 0, 0.0),
-        (Impair::Wifi, 5, 0.0),
-        (Impair::WifiBad, 40, 2.0),
-        (Impair::Mobile4G, 25, 0.0),
-        (Impair::Mobile3G, 100, 2.0),
-        (Impair::Satellite, 40, 1.0),
-        (Impair::SatelliteGeo, 300, 0.0),
+    let cases: Vec<(LinkCondition, u64, f32)> = vec![
+        (LinkCondition::Lan, 0, 0.0),
+        (LinkCondition::Wifi, 5, 0.0),
+        (LinkCondition::WifiBad, 40, 2.0),
+        (LinkCondition::Mobile4G, 25, 0.0),
+        (LinkCondition::Mobile3G, 100, 2.0),
+        (LinkCondition::Satellite, 40, 1.0),
+        (LinkCondition::SatelliteGeo, 300, 0.0),
     ];
     let mut port_base = 19_100u16;
     let mut failures = Vec::new();
     for (preset, min_latency_ms, loss_pct) in cases {
         let result: Result<()> = async {
-            let lab = Lab::new();
+            let lab = Lab::new().await;
             let dc = lab.add_router("dc").build().await?;
             let dev = lab
                 .add_device("dev")
@@ -3034,13 +3174,13 @@ async fn rate_presets() -> Result<()> {
 #[test]
 fn impair_presets_to_limits() {
     let presets = [
-        Impair::Lan,
-        Impair::Wifi,
-        Impair::WifiBad,
-        Impair::Mobile4G,
-        Impair::Mobile3G,
-        Impair::Satellite,
-        Impair::SatelliteGeo,
+        LinkCondition::Lan,
+        LinkCondition::Wifi,
+        LinkCondition::WifiBad,
+        LinkCondition::Mobile4G,
+        LinkCondition::Mobile3G,
+        LinkCondition::Satellite,
+        LinkCondition::SatelliteGeo,
     ];
     for preset in presets {
         let limits = preset.to_limits();
@@ -3060,9 +3200,9 @@ fn impair_presets_to_limits() {
         );
     }
     // Lan must be zero impairment.
-    assert_eq!(Impair::Lan.to_limits(), ImpairLimits::default());
+    assert_eq!(LinkCondition::Lan.to_limits(), LinkLimits::default());
     // Manual round-trips.
-    let custom = ImpairLimits {
+    let custom = LinkLimits {
         rate_kbit: 1000,
         loss_pct: 5.0,
         latency_ms: 100,
@@ -3071,17 +3211,17 @@ fn impair_presets_to_limits() {
         duplicate_pct: 0.5,
         corrupt_pct: 0.1,
     };
-    assert_eq!(Impair::Manual(custom).to_limits(), custom);
+    assert_eq!(LinkCondition::Manual(custom).to_limits(), custom);
 }
 
 #[tokio::test(flavor = "current_thread")]
 #[traced_test]
 async fn downlink_condition_builder() -> Result<()> {
     check_caps()?;
-    let lab = Lab::new();
+    let lab = Lab::new().await;
     let dc = lab
         .add_router("dc")
-        .downlink_condition(Impair::Manual(ImpairLimits {
+        .downlink_condition(LinkCondition::Manual(LinkLimits {
             latency_ms: 50,
             ..Default::default()
         }))
@@ -3113,7 +3253,7 @@ async fn downlink_condition_builder() -> Result<()> {
 #[tokio::test(flavor = "current_thread")]
 #[traced_test]
 async fn dns_entry_visible_in_spawned_cmd() -> Result<()> {
-    let lab = Lab::new();
+    let lab = Lab::new().await;
     let dc = lab.add_router("dc").build().await?;
     let dev = lab
         .add_device("dev")
@@ -3149,7 +3289,7 @@ async fn dns_entry_visible_in_spawned_cmd() -> Result<()> {
 #[tokio::test(flavor = "current_thread")]
 #[traced_test]
 async fn dns_entry_lab_wide() -> Result<()> {
-    let lab = Lab::new();
+    let lab = Lab::new().await;
     let dc = lab.add_router("dc").build().await?;
     let dev1 = lab
         .add_device("dev1")
@@ -3184,7 +3324,7 @@ async fn dns_entry_lab_wide() -> Result<()> {
 #[tokio::test(flavor = "current_thread")]
 #[traced_test]
 async fn dns_entry_device_specific() -> Result<()> {
-    let lab = Lab::new();
+    let lab = Lab::new().await;
     let dc = lab.add_router("dc").build().await?;
     let dev1 = lab
         .add_device("dev1")
@@ -3227,7 +3367,7 @@ async fn dns_entry_device_specific() -> Result<()> {
 #[tokio::test(flavor = "current_thread")]
 #[traced_test]
 async fn dns_resolve_in_process() -> Result<()> {
-    let lab = Lab::new();
+    let lab = Lab::new().await;
     let dc = lab.add_router("dc").build().await?;
     let dev = lab
         .add_device("dev")
@@ -3263,7 +3403,7 @@ async fn dns_resolve_in_process() -> Result<()> {
 #[tokio::test(flavor = "current_thread")]
 #[traced_test]
 async fn dns_entry_after_build() -> Result<()> {
-    let lab = Lab::new();
+    let lab = Lab::new().await;
     let dc = lab.add_router("dc").build().await?;
     let dev = lab
         .add_device("dev")
@@ -3307,7 +3447,7 @@ async fn dns_entry_after_build() -> Result<()> {
 #[tokio::test(flavor = "current_thread")]
 #[traced_test]
 async fn dns_hosts_file_content() -> Result<()> {
-    let lab = Lab::new();
+    let lab = Lab::new().await;
     let dc = lab.add_router("dc").build().await?;
     let dev = lab
         .add_device("dev")
@@ -3354,7 +3494,7 @@ async fn dns_hosts_file_content() -> Result<()> {
 #[tokio::test(flavor = "current_thread")]
 #[traced_test]
 async fn dns_std_to_socket_addrs_in_process() -> Result<()> {
-    let lab = Lab::new();
+    let lab = Lab::new().await;
     let dc = lab.add_router("dc").build().await?;
     let dev = lab
         .add_device("dev")
@@ -3407,7 +3547,7 @@ async fn dns_std_to_socket_addrs_in_process() -> Result<()> {
 #[tokio::test(flavor = "current_thread")]
 #[traced_test]
 async fn dns_tokio_lookup() -> Result<()> {
-    let lab = Lab::new();
+    let lab = Lab::new().await;
     let dc = lab.add_router("dc").build().await?;
     let dev = lab
         .add_device("dev")
@@ -3442,7 +3582,7 @@ async fn dns_tokio_lookup() -> Result<()> {
 async fn dns_hickory_system_resolver() -> Result<()> {
     use hickory_resolver::TokioResolver;
 
-    let lab = Lab::new();
+    let lab = Lab::new().await;
     let dc = lab.add_router("dc").build().await?;
     let dev = lab
         .add_device("dev")
@@ -3472,7 +3612,7 @@ async fn dns_hickory_system_resolver() -> Result<()> {
 #[tokio::test(flavor = "current_thread")]
 #[traced_test]
 async fn dns_set_nameserver() -> Result<()> {
-    let lab = Lab::new();
+    let lab = Lab::new().await;
     let dc = lab.add_router("dc").build().await?;
     let dev = lab
         .add_device("dev")
@@ -3505,7 +3645,7 @@ async fn dns_set_nameserver() -> Result<()> {
 #[traced_test]
 async fn smoke_dual_stack_roundtrip() -> Result<()> {
     check_caps()?;
-    let lab = Lab::new();
+    let lab = Lab::new().await;
     let dc = lab
         .add_router("dc")
         .region("eu")
@@ -3519,11 +3659,7 @@ async fn smoke_dual_stack_roundtrip() -> Result<()> {
         .await?;
 
     // Verify device got both v4 and v6 addresses.
-    assert_ne!(
-        dev.ip(),
-        Ipv4Addr::UNSPECIFIED,
-        "device should have v4 addr"
-    );
+    assert!(dev.ip().is_some(), "device should have v4 addr");
     assert!(dev.ip6().is_some(), "device should have v6 addr");
 
     // v4 roundtrip
@@ -3533,8 +3669,8 @@ async fn smoke_dual_stack_roundtrip() -> Result<()> {
     tokio::time::sleep(Duration::from_millis(100)).await;
     let o_v4 = dev.run_sync(move || crate::test_utils::udp_roundtrip(r_v4))?;
     assert_eq!(
-        o_v4.observed.ip(),
-        IpAddr::V4(dev.ip()),
+        o_v4.ip(),
+        IpAddr::V4(dev.ip().unwrap()),
         "v4 reflexive should be device IP (no NAT)"
     );
 
@@ -3544,7 +3680,7 @@ async fn smoke_dual_stack_roundtrip() -> Result<()> {
     dc.spawn_reflector(r_v6)?;
     tokio::time::sleep(Duration::from_millis(100)).await;
     let o_v6 = dev.run_sync(move || crate::test_utils::udp_roundtrip(r_v6))?;
-    assert!(o_v6.observed.ip().is_ipv6(), "v6 reflexive should be IPv6");
+    assert!(o_v6.ip().is_ipv6(), "v6 reflexive should be IPv6");
 
     Ok(())
 }
@@ -3554,7 +3690,7 @@ async fn smoke_dual_stack_roundtrip() -> Result<()> {
 #[traced_test]
 async fn smoke_v6_only_roundtrip() -> Result<()> {
     check_caps()?;
-    let lab = Lab::new();
+    let lab = Lab::new().await;
     let dc = lab
         .add_router("dc")
         .ip_support(IpSupport::V6Only)
@@ -3569,9 +3705,8 @@ async fn smoke_v6_only_roundtrip() -> Result<()> {
     // Device must have v6 but no v4.
     let dev_ip6 = dev.ip6().expect("device should have v6 addr");
     assert!(!dev_ip6.is_unspecified(), "v6 addr must not be unspecified");
-    assert_eq!(
-        dev.ip(),
-        Ipv4Addr::UNSPECIFIED,
+    assert!(
+        dev.ip().is_none(),
         "V6Only device should have no v4 addr"
     );
     assert!(
@@ -3585,7 +3720,7 @@ async fn smoke_v6_only_roundtrip() -> Result<()> {
     dc.spawn_reflector(r_v6)?;
     tokio::time::sleep(Duration::from_millis(100)).await;
     let o = dev.run_sync(move || crate::test_utils::udp_roundtrip(r_v6))?;
-    assert!(o.observed.ip().is_ipv6(), "reflexive should be v6");
+    assert!(o.ip().is_ipv6(), "reflexive should be v6");
     Ok(())
 }
 
@@ -3594,7 +3729,7 @@ async fn smoke_v6_only_roundtrip() -> Result<()> {
 #[traced_test]
 async fn nat_v6_masquerade() -> Result<()> {
     check_caps()?;
-    let lab = Lab::new();
+    let lab = Lab::new().await;
     let dc = lab
         .add_router("dc")
         .ip_support(IpSupport::DualStack)
@@ -3629,7 +3764,7 @@ async fn nat_v6_masquerade() -> Result<()> {
     // With masquerade, the reflexive address should be the router's WAN IP.
     let home_wan_v6 = home.uplink_ip_v6().expect("home v6 uplink");
     assert_eq!(
-        o.observed.ip(),
+        o.ip(),
         IpAddr::V6(home_wan_v6),
         "v6 masquerade: reflexive should be router WAN IP"
     );
@@ -3641,7 +3776,7 @@ async fn nat_v6_masquerade() -> Result<()> {
 #[traced_test]
 async fn router_v6_accessors() -> Result<()> {
     check_caps()?;
-    let lab = Lab::new();
+    let lab = Lab::new().await;
     let dc = lab
         .add_router("dc")
         .ip_support(IpSupport::DualStack)
@@ -3680,7 +3815,7 @@ async fn router_v6_accessors() -> Result<()> {
 #[traced_test]
 async fn device_v6_accessors() -> Result<()> {
     check_caps()?;
-    let lab = Lab::new();
+    let lab = Lab::new().await;
     let dc = lab
         .add_router("dc")
         .ip_support(IpSupport::DualStack)
@@ -3712,7 +3847,7 @@ async fn device_v6_accessors() -> Result<()> {
 #[traced_test]
 async fn v6_only_no_v4() -> Result<()> {
     check_caps()?;
-    let lab = Lab::new();
+    let lab = Lab::new().await;
     let dc = lab
         .add_router("dc")
         .ip_support(IpSupport::V6Only)
@@ -3730,7 +3865,7 @@ async fn v6_only_no_v4() -> Result<()> {
     dc.spawn_reflector(r_v6)?;
     tokio::time::sleep(Duration::from_millis(100)).await;
     let o = dev.run_sync(move || crate::test_utils::udp_roundtrip(r_v6))?;
-    assert!(o.observed.ip().is_ipv6(), "reflexive should be v6");
+    assert!(o.ip().is_ipv6(), "reflexive should be v6");
 
     // v4 ping to the IX gateway should fail (no v4 routes).
     let res = dev.run_sync(|| ping("203.0.113.1"));
@@ -3744,7 +3879,7 @@ async fn v6_only_no_v4() -> Result<()> {
 #[traced_test]
 async fn dual_stack_public_addrs() -> Result<()> {
     check_caps()?;
-    let lab = Lab::new();
+    let lab = Lab::new().await;
     let dc = lab
         .add_router("dc")
         .ip_support(IpSupport::DualStack)
@@ -3769,10 +3904,10 @@ async fn dual_stack_public_addrs() -> Result<()> {
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     let o_v4 = dev.run_sync(move || crate::test_utils::udp_roundtrip(r_v4))?;
-    assert!(o_v4.observed.ip().is_ipv4(), "v4 reflexive should be v4");
+    assert!(o_v4.ip().is_ipv4(), "v4 reflexive should be v4");
 
     let o_v6 = dev.run_sync(move || crate::test_utils::udp_roundtrip(r_v6))?;
-    assert!(o_v6.observed.ip().is_ipv6(), "v6 reflexive should be v6");
+    assert!(o_v6.ip().is_ipv6(), "v6 reflexive should be v6");
 
     Ok(())
 }
@@ -3782,7 +3917,7 @@ async fn dual_stack_public_addrs() -> Result<()> {
 #[traced_test]
 async fn nat_v6_none_global() -> Result<()> {
     check_caps()?;
-    let lab = Lab::new();
+    let lab = Lab::new().await;
     let dc = lab
         .add_router("dc")
         .ip_support(IpSupport::DualStack)
@@ -3817,7 +3952,7 @@ async fn nat_v6_none_global() -> Result<()> {
     // No v6 NAT → reflexive ip should be the device's own ULA address.
     let dev_ip6 = dev.ip6().expect("device v6 addr");
     assert_eq!(
-        o_v6.observed.ip(),
+        o_v6.ip(),
         IpAddr::V6(dev_ip6),
         "v6 reflexive should be device's own v6 address (no NAT)"
     );
@@ -3830,7 +3965,7 @@ async fn nat_v6_none_global() -> Result<()> {
 #[traced_test]
 async fn latency_v6_region() -> Result<()> {
     check_caps()?;
-    let lab = Lab::new();
+    let lab = Lab::new().await;
     lab.set_region_latency("eu", "us", 65);
     lab.set_region_latency("us", "eu", 65);
 
@@ -3868,7 +4003,7 @@ async fn latency_v6_region() -> Result<()> {
 #[traced_test]
 async fn latency_dual_stack_region() -> Result<()> {
     check_caps()?;
-    let lab = Lab::new();
+    let lab = Lab::new().await;
     lab.set_region_latency("eu", "us", 65);
     lab.set_region_latency("us", "eu", 65);
 
@@ -3919,7 +4054,7 @@ async fn latency_dual_stack_region() -> Result<()> {
 #[tokio::test]
 #[traced_test]
 async fn netsim_basic_holepunch() -> Result<()> {
-    let lab = Lab::default();
+    let lab = Lab::new().await;
     let nat_mode = Nat::FullCone;
     let dc = lab.add_router("dc").build().await?;
     let nat1 = lab.add_router("nat1").nat(nat_mode).build().await?;
@@ -3931,7 +4066,7 @@ async fn netsim_basic_holepunch() -> Result<()> {
     let (stun_tx, stun_rx) = oneshot::channel();
     let _task_relay = stun.spawn({
         async move |ctx| {
-            let addr = SocketAddr::from((ctx.ip(), 9999));
+            let addr = SocketAddr::from((ctx.ip().unwrap(), 9999));
             ctx.spawn_reflector(addr)?;
             stun_tx.send(addr).unwrap();
             anyhow::Ok(())
@@ -4004,7 +4139,7 @@ async fn netsim_holepunch_home_nat() -> Result<()> {
     check_caps()?;
     for (label, stagger_ms) in [("simultaneous", 0u64), ("staggered-200ms", 200)] {
         info!("--- {label} ---");
-        let lab = Lab::default();
+        let lab = Lab::new().await;
         let dc = lab.add_router("dc").build().await?;
         let nat1 = lab.add_router("nat1").nat(Nat::Home).build().await?;
         let nat2 = lab.add_router("nat2").nat(Nat::Home).build().await?;
@@ -4015,7 +4150,7 @@ async fn netsim_holepunch_home_nat() -> Result<()> {
         let (stun_tx, stun_rx) = oneshot::channel();
         let _task_relay = stun.spawn({
             async move |ctx| {
-                let addr = SocketAddr::from((ctx.ip(), 9999));
+                let addr = SocketAddr::from((ctx.ip().unwrap(), 9999));
                 ctx.spawn_reflector(addr)?;
                 stun_tx.send(addr).unwrap();
                 anyhow::Ok(())
@@ -4151,7 +4286,7 @@ async fn send_recv(socket: &UdpSocket, dst: SocketAddr, wait_before_send: Durati
 #[tokio::test(flavor = "current_thread")]
 #[traced_test]
 async fn test_ix_ip_alloc_no_duplicates() {
-    let lab = Lab::new();
+    let lab = Lab::new().await;
     let mut ips = std::collections::HashSet::new();
     let mut inner = lab.inner.lock().unwrap();
     // next_ix_low starts at 10, so we can allocate 245 IPs (10..=254).
@@ -4167,7 +4302,7 @@ async fn test_ix_ip_alloc_no_duplicates() {
 #[tokio::test(flavor = "current_thread")]
 #[traced_test]
 async fn test_ix_ip_v6_alloc_no_duplicates() {
-    let lab = Lab::new();
+    let lab = Lab::new().await;
     let mut ips = std::collections::HashSet::new();
     let mut inner = lab.inner.lock().unwrap();
     // next_ix_low_v6 starts at 0x10 = 16.
@@ -4188,7 +4323,7 @@ async fn test_ix_ip_v6_alloc_no_duplicates() {
 #[tokio::test(flavor = "current_thread")]
 #[traced_test]
 async fn mtu_set_and_verify() -> Result<()> {
-    let lab = Lab::new();
+    let lab = Lab::new().await;
     let dc = lab.add_router("dc").mtu(1400).build().await?;
     let dev = lab
         .add_device("dev")
@@ -4233,7 +4368,7 @@ async fn mtu_set_and_verify() -> Result<()> {
 #[tokio::test(flavor = "current_thread")]
 #[traced_test]
 async fn icmp_frag_blocked_nft_rule() -> Result<()> {
-    let lab = Lab::new();
+    let lab = Lab::new().await;
     let rtr = lab
         .add_router("rtr")
         .block_icmp_frag_needed()
@@ -4259,10 +4394,85 @@ async fn icmp_frag_blocked_nft_rule() -> Result<()> {
     Ok(())
 }
 
+/// Real PMTU blackhole test: verifies that large UDP packets are silently
+/// dropped when the router has a low MTU and blocks ICMP frag-needed.
+#[tokio::test(flavor = "current_thread")]
+#[traced_test]
+async fn pmtu_blackhole_drops_large_packets() -> Result<()> {
+    check_caps()?;
+    let lab = Lab::new().await;
+
+    // Router with low MTU and ICMP frag-needed blocked.
+    let rtr = lab
+        .add_router("rtr")
+        .mtu(500)
+        .block_icmp_frag_needed()
+        .build()
+        .await?;
+    let dc = lab.add_router("dc").build().await?;
+
+    let dev = lab.add_device("dev").uplink(rtr.id()).build().await?;
+    let server = lab.add_device("server").uplink(dc.id()).build().await?;
+
+    let server_ip = server.ip().unwrap();
+    let bind_addr: SocketAddr = SocketAddr::new(IpAddr::V4(server_ip), 18_900);
+
+    // Spawn server listener in background — blocks on recv with a timeout.
+    let server_thread = server.spawn_thread(move || {
+        let sock = std::net::UdpSocket::bind(bind_addr)?;
+        sock.set_read_timeout(Some(Duration::from_secs(3)))?;
+        let mut buf = [0u8; 2048];
+        match sock.recv_from(&mut buf) {
+            Ok((n, _)) => bail!("unexpectedly received {n} bytes — packet should be blackholed"),
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock
+                || e.kind() == std::io::ErrorKind::TimedOut =>
+            {
+                // Timeout — expected, packet was blackholed.
+                Ok(())
+            }
+            Err(e) => bail!("unexpected error: {e}"),
+        }
+    })?;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // Send a large (1200 byte) UDP packet from dev → server.
+    // Set IP_MTU_DISCOVER = IP_PMTUDISC_DO so the kernel sets DF and won't fragment.
+    // The router's 500-byte MTU means this packet is too large; it gets dropped.
+    // With ICMP frag-needed blocked, the sender never learns about the MTU limit.
+    dev.run_sync(move || {
+        use std::os::unix::io::AsRawFd;
+        let sock = std::net::UdpSocket::bind("0.0.0.0:0")?;
+        // IP_PMTUDISC_DO = 2
+        let val: libc::c_int = 2;
+        unsafe {
+            libc::setsockopt(
+                sock.as_raw_fd(),
+                libc::IPPROTO_IP,
+                libc::IP_MTU_DISCOVER,
+                &val as *const _ as *const libc::c_void,
+                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+            );
+        }
+        let payload = vec![0xABu8; 1200];
+        // Send multiple times in case of transient loss.
+        for _ in 0..3 {
+            let _ = sock.send_to(&payload, bind_addr);
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        Ok(())
+    })?;
+
+    // Server should have timed out without receiving anything.
+    tokio::task::spawn_blocking(move || server_thread.join().unwrap())
+        .await??;
+
+    Ok(())
+}
+
 #[tokio::test(flavor = "current_thread")]
 #[traced_test]
 async fn remove_device_smoke() -> Result<()> {
-    let lab = Lab::new();
+    let lab = Lab::new().await;
     let dc = lab.add_router("dc").build().await?;
     let dev = lab.add_device("dev").uplink(dc.id()).build().await?;
 
@@ -4283,7 +4493,7 @@ async fn remove_device_smoke() -> Result<()> {
 #[tokio::test(flavor = "current_thread")]
 #[traced_test]
 async fn remove_router_with_devices_fails() -> Result<()> {
-    let lab = Lab::new();
+    let lab = Lab::new().await;
     let dc = lab.add_router("dc").build().await?;
     let _dev = lab.add_device("dev").uplink(dc.id()).build().await?;
 
@@ -4301,7 +4511,7 @@ async fn remove_router_with_devices_fails() -> Result<()> {
 #[tokio::test(flavor = "current_thread")]
 #[traced_test]
 async fn remove_router_smoke() -> Result<()> {
-    let lab = Lab::new();
+    let lab = Lab::new().await;
     let dc = lab.add_router("dc").build().await?;
     let dev = lab.add_device("dev").uplink(dc.id()).build().await?;
 
@@ -4318,15 +4528,15 @@ async fn remove_router_smoke() -> Result<()> {
 #[tokio::test(flavor = "current_thread")]
 #[traced_test]
 async fn renew_ip_changes_address() -> Result<()> {
-    let lab = Lab::new();
+    let lab = Lab::new().await;
     let dc = lab.add_router("dc").build().await?;
     let dev = lab.add_device("dev").uplink(dc.id()).build().await?;
 
-    let old_ip = dev.ip();
+    let old_ip = dev.ip().unwrap();
     let new_ip = dev.renew_ip("eth0").await?;
 
     assert_ne!(old_ip, new_ip, "renewed IP should differ from old");
-    assert_eq!(dev.ip(), new_ip, "handle should reflect new IP");
+    assert_eq!(dev.ip().unwrap(), new_ip, "handle should reflect new IP");
 
     // Verify the new IP is reachable from DC side.
     let relay = lab.add_device("relay").uplink(dc.id()).build().await?;
@@ -4339,11 +4549,11 @@ async fn renew_ip_changes_address() -> Result<()> {
 #[tokio::test(flavor = "current_thread")]
 #[traced_test]
 async fn add_ip_secondary() -> Result<()> {
-    let lab = Lab::new();
+    let lab = Lab::new().await;
     let dc = lab.add_router("dc").build().await?;
     let dev = lab.add_device("dev").uplink(dc.id()).build().await?;
 
-    let primary = dev.ip();
+    let primary = dev.ip().unwrap();
     // Pick a secondary IP in the same subnet.
     let cidr = dc.downstream_cidr().unwrap();
     let octets = cidr.addr().octets();

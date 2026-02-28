@@ -1,4 +1,4 @@
-//! High-level lab API: [`Lab`], [`DeviceBuilder`], [`Nat`], [`Impair`] (aka `LinkCondition`), [`ObservedAddr`].
+//! High-level lab API: [`Lab`], [`DeviceBuilder`], [`Nat`], [`LinkCondition`] (aka `LinkCondition`), [`ObservedAddr`].
 
 use std::{
     collections::HashMap,
@@ -20,14 +20,14 @@ use tracing::{debug, debug_span, Instrument as _};
 
 use crate::{
     core::{
-        self, apply_nat_config, apply_nat_for_router, apply_nat_v6, apply_or_remove_impair,
+        self, apply_nat_for_router, apply_nat_v6, apply_or_remove_impair,
         run_nft_in, setup_device_async, setup_root_ns_async, setup_router_async, CoreConfig,
         DownstreamPool, IfaceBuild, NetworkCore, NodeId, RouterSetupData,
     },
     netlink::Netlink,
 };
 
-pub use crate::qdisc::ImpairLimits;
+pub use crate::qdisc::LinkLimits;
 
 pub(crate) static LAB_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -64,7 +64,6 @@ pub enum Nat {
     ///
     /// Hole-punching works with simultaneous open (both sides must send).
     /// This is the RFC 4787 REQ-1 compliant "port-restricted cone" NAT.
-    #[serde(alias = "destination-independent")]
     Home,
 
     /// Corporate firewall - symmetric NAT.
@@ -128,9 +127,11 @@ pub enum Nat {
     Custom(NatConfig),
 }
 
-/// Deprecated alias for [`Nat`].
-#[deprecated(note = "renamed to `Nat`")]
-pub type NatMode = Nat;
+impl From<NatConfig> for Nat {
+    fn from(config: NatConfig) -> Self {
+        Nat::Custom(config)
+    }
+}
 
 /// NAT mapping behavior per RFC 4787 Section 4.1.
 ///
@@ -209,6 +210,8 @@ pub struct NatConfig {
     pub filtering: NatFiltering,
     /// Conntrack timeout settings.
     pub timeouts: ConntrackTimeouts,
+    /// Whether LAN devices can reach each other via the router's public IP.
+    pub hairpin: bool,
 }
 
 impl NatConfig {
@@ -226,6 +229,7 @@ pub struct NatConfigBuilder {
     mapping: NatMapping,
     filtering: NatFiltering,
     timeouts: ConntrackTimeouts,
+    hairpin: bool,
 }
 
 impl Default for NatConfigBuilder {
@@ -234,6 +238,7 @@ impl Default for NatConfigBuilder {
             mapping: NatMapping::EndpointIndependent,
             filtering: NatFiltering::AddressAndPortDependent,
             timeouts: ConntrackTimeouts::default(),
+            hairpin: false,
         }
     }
 }
@@ -269,12 +274,22 @@ impl NatConfigBuilder {
         self
     }
 
+    /// Enables or disables NAT hairpinning. Default: false.
+    ///
+    /// When enabled, LAN devices can reach each other via the router's
+    /// public IP (e.g. using a reflexive address learned via STUN).
+    pub fn hairpin(mut self, enabled: bool) -> Self {
+        self.hairpin = enabled;
+        self
+    }
+
     /// Builds the [`NatConfig`].
     pub fn build(self) -> NatConfig {
         NatConfig {
             mapping: self.mapping,
             filtering: self.filtering,
             timeouts: self.timeouts,
+            hairpin: self.hairpin,
         }
     }
 }
@@ -295,6 +310,7 @@ impl Nat {
                     udp_stream: 300,
                     tcp_established: 7200,
                 },
+                hairpin: false,
             }),
             Nat::FullCone => Some(NatConfig {
                 mapping: NatMapping::EndpointIndependent,
@@ -304,6 +320,7 @@ impl Nat {
                     udp_stream: 300,
                     tcp_established: 7200,
                 },
+                hairpin: true,
             }),
             Nat::Corporate => Some(NatConfig {
                 mapping: NatMapping::EndpointDependent,
@@ -313,6 +330,7 @@ impl Nat {
                     udp_stream: 120,
                     tcp_established: 3600,
                 },
+                hairpin: false,
             }),
             // CloudNat and Corporate use the same nftables rules (masquerade random)
             // and the same mapping/filtering (EDM + APDF). The only difference is
@@ -327,6 +345,7 @@ impl Nat {
                     udp_stream: 350,
                     tcp_established: 3600,
                 },
+                hairpin: false,
             }),
             Nat::Custom(config) => Some(config),
         }
@@ -372,10 +391,10 @@ impl IpSupport {
 
 /// Link-layer impairment profile applied via `tc netem`.
 ///
-/// Named presets model common last-mile conditions. Use [`Impair::Manual`]
-/// with [`ImpairLimits`] for full control over all `tc netem` parameters.
+/// Named presets model common last-mile conditions. Use [`LinkCondition::Manual`]
+/// with [`LinkLimits`] for full control over all `tc netem` parameters.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub enum Impair {
+pub enum LinkCondition {
     /// Wired LAN (1G Ethernet). No impairment.
     ///
     /// Use for datacenter-local, same-rack communication.
@@ -405,10 +424,10 @@ pub enum Impair {
     /// 300 ms one-way delay, 20 ms jitter, 0.5 % loss, 25 Mbit.
     SatelliteGeo,
     /// Fully custom impairment parameters.
-    Manual(ImpairLimits),
+    Manual(LinkLimits),
 }
 
-impl<'de> Deserialize<'de> for Impair {
+impl<'de> Deserialize<'de> for LinkCondition {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: serde::Deserializer<'de>,
@@ -443,13 +462,13 @@ impl<'de> Deserialize<'de> for Impair {
 
         match Repr::deserialize(deserializer)? {
             Repr::Preset(s) => match s.as_str() {
-                "lan" => Ok(Impair::Lan),
-                "wifi" => Ok(Impair::Wifi),
-                "wifi_bad" | "wifi-bad" => Ok(Impair::WifiBad),
-                "mobile_4g" | "mobile-4g" | "mobile" => Ok(Impair::Mobile4G),
-                "mobile_3g" | "mobile-3g" => Ok(Impair::Mobile3G),
-                "satellite" => Ok(Impair::Satellite),
-                "satellite_geo" | "satellite-geo" => Ok(Impair::SatelliteGeo),
+                "lan" => Ok(LinkCondition::Lan),
+                "wifi" => Ok(LinkCondition::Wifi),
+                "wifi_bad" | "wifi-bad" => Ok(LinkCondition::WifiBad),
+                "mobile_4g" | "mobile-4g" | "mobile" => Ok(LinkCondition::Mobile4G),
+                "mobile_3g" | "mobile-3g" => Ok(LinkCondition::Mobile3G),
+                "satellite" => Ok(LinkCondition::Satellite),
+                "satellite_geo" | "satellite-geo" => Ok(LinkCondition::SatelliteGeo),
                 _ => Err(serde::de::Error::custom(format!(
                     "unknown impair preset '{s}'"
                 ))),
@@ -465,7 +484,7 @@ impl<'de> Deserialize<'de> for Impair {
                 reorder_pct,
                 duplicate_pct,
                 corrupt_pct,
-            } => Ok(Impair::Manual(ImpairLimits {
+            } => Ok(LinkCondition::Manual(LinkLimits {
                 rate_kbit: rate_kbit_alias.unwrap_or(rate_kbit),
                 loss_pct: loss_pct_alias.unwrap_or(loss_pct),
                 latency_ms: latency_ms_alias.unwrap_or(latency_ms),
@@ -478,61 +497,57 @@ impl<'de> Deserialize<'de> for Impair {
     }
 }
 
-impl Impair {
-    /// Converts this preset (or manual config) into concrete [`ImpairLimits`].
-    pub fn to_limits(self) -> ImpairLimits {
+impl LinkCondition {
+    /// Converts this preset (or manual config) into concrete [`LinkLimits`].
+    pub fn to_limits(self) -> LinkLimits {
         match self {
-            Impair::Lan => ImpairLimits::default(),
-            Impair::Wifi => ImpairLimits {
+            LinkCondition::Lan => LinkLimits::default(),
+            LinkCondition::Wifi => LinkLimits {
                 latency_ms: 5,
                 jitter_ms: 2,
                 loss_pct: 0.1,
                 ..Default::default()
             },
-            Impair::WifiBad => ImpairLimits {
+            LinkCondition::WifiBad => LinkLimits {
                 latency_ms: 40,
                 jitter_ms: 15,
                 loss_pct: 2.0,
                 rate_kbit: 20_000,
                 ..Default::default()
             },
-            Impair::Mobile4G => ImpairLimits {
+            LinkCondition::Mobile4G => LinkLimits {
                 latency_ms: 25,
                 jitter_ms: 8,
                 loss_pct: 0.5,
                 ..Default::default()
             },
-            Impair::Mobile3G => ImpairLimits {
+            LinkCondition::Mobile3G => LinkLimits {
                 latency_ms: 100,
                 jitter_ms: 30,
                 loss_pct: 2.0,
                 rate_kbit: 2_000,
                 ..Default::default()
             },
-            Impair::Satellite => ImpairLimits {
+            LinkCondition::Satellite => LinkLimits {
                 latency_ms: 40,
                 jitter_ms: 7,
                 loss_pct: 1.0,
                 ..Default::default()
             },
-            Impair::SatelliteGeo => ImpairLimits {
+            LinkCondition::SatelliteGeo => LinkLimits {
                 latency_ms: 300,
                 jitter_ms: 20,
                 loss_pct: 0.5,
                 rate_kbit: 25_000,
                 ..Default::default()
             },
-            Impair::Manual(limits) => limits,
+            LinkCondition::Manual(limits) => limits,
         }
     }
 }
 
 /// Observed external address as reported by a STUN-like reflector.
-#[derive(Clone, Debug)]
-pub struct ObservedAddr {
-    /// External socket address observed by the reflector.
-    pub observed: SocketAddr,
-}
+pub type ObservedAddr = SocketAddr;
 
 // ─────────────────────────────────────────────
 // Lab
@@ -551,7 +566,9 @@ impl Lab {
     // ── Constructors ────────────────────────────────────────────────────
 
     /// Creates a new lab with default address ranges and IX settings.
-    pub fn new() -> Self {
+    ///
+    /// Sets up the root network namespace and IX bridge before returning.
+    pub async fn new() -> Self {
         let pid = std::process::id();
         let pid_tag = pid % 9999 + 1;
         let lab_seq = LAB_COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -581,9 +598,18 @@ impl Lab {
             span: lab_span,
         })
         .expect("Lab::new: failed to create DNS entries directory");
-        Self {
+        let lab = Self {
             inner: Arc::new(Mutex::new(core)),
-        }
+        };
+        // Initialize root namespace and IX bridge eagerly — no lazy-init race.
+        let (cfg, netns) = {
+            let inner = lab.inner.lock().unwrap();
+            (inner.cfg.clone(), Arc::clone(&inner.netns))
+        };
+        setup_root_ns_async(&cfg, &netns)
+            .await
+            .expect("Lab::new: failed to set up root namespace");
+        lab
     }
 
     /// Returns the unique resource prefix associated with this lab instance.
@@ -600,7 +626,7 @@ impl Lab {
 
     /// Builds a `Lab` from a parsed config, creating all namespaces and links.
     pub async fn from_config(cfg: crate::config::LabConfig) -> Result<Self> {
-        let lab = Self::new();
+        let lab = Self::new().await;
 
         // Region latency pairs.
         if let Some(regions) = &cfg.region {
@@ -668,7 +694,7 @@ impl Lab {
         struct ParsedDev {
             name: String,
             default_via: Option<String>,
-            ifaces: Vec<(String, NodeId, Option<Impair>)>,
+            ifaces: Vec<(String, NodeId, Option<LinkCondition>)>,
         }
 
         let dev_data: Vec<ParsedDev> = {
@@ -730,7 +756,7 @@ impl Lab {
                                 gw_name
                             )
                         })?;
-                    let impair: Option<Impair> = match iface_table.get("impair") {
+                    let impair: Option<LinkCondition> = match iface_table.get("impair") {
                         None => None,
                         Some(v) => Some(v.clone().try_into().map_err(|e: toml::de::Error| {
                             anyhow!(
@@ -1088,7 +1114,7 @@ impl Lab {
     ///
     /// The order of `from` and `to` does not matter — the method resolves the
     /// connected pair in either direction.
-    pub fn set_link_condition(&self, a: NodeId, b: NodeId, impair: Option<Impair>) -> Result<()> {
+    pub fn set_link_condition(&self, a: NodeId, b: NodeId, impair: Option<LinkCondition>) -> Result<()> {
         debug!(a = ?a, b = ?b, impair = ?impair, "lab: set_link_condition");
         let inner = self.inner.lock().unwrap();
         let netns = Arc::clone(&inner.netns);
@@ -1147,11 +1173,6 @@ impl Lab {
         )
     }
 
-    /// Deprecated alias for [`Lab::set_link_condition`].
-    #[deprecated(note = "renamed to `set_link_condition`")]
-    pub fn impair_link(&self, a: NodeId, b: NodeId, impair: Option<Impair>) -> Result<()> {
-        self.set_link_condition(a, b, impair)
-    }
 
     // ── Lookup helpers ───────────────────────────────────────────────────
 
@@ -1218,11 +1239,6 @@ impl Lab {
     }
 }
 
-impl Default for Lab {
-    fn default() -> Self {
-        Self::new()
-    }
-}
 
 // ─────────────────────────────────────────────
 // RouterBuilder
@@ -1239,7 +1255,7 @@ pub struct RouterBuilder {
     ip_support: IpSupport,
     nat_v6: NatV6Mode,
     downstream_cidr: Option<Ipv4Net>,
-    downlink_condition: Option<Impair>,
+    downlink_condition: Option<LinkCondition>,
     mtu: Option<u32>,
     block_icmp_frag_needed: bool,
     result: Result<()>,
@@ -1272,39 +1288,12 @@ impl RouterBuilder {
         self
     }
 
-    /// Sets a custom NAT configuration, overriding any preset.
-    ///
-    /// When set, this config is used instead of expanding the [`Nat`] preset.
-    /// The router will still use private addressing (like `Nat::Home`).
-    ///
-    /// # Example
-    /// ```no_run
-    /// # use netsim_core::*;
-    /// # #[tokio::main] async fn main() -> anyhow::Result<()> {
-    /// let lab = Lab::new();
-    /// let cfg = NatConfig::builder()
-    ///     .mapping(NatMapping::EndpointIndependent)
-    ///     .filtering(NatFiltering::EndpointIndependent)
-    ///     .udp_stream_timeout(120)
-    ///     .build();
-    /// let router = lab.add_router("custom")
-    ///     .nat_config(cfg)
-    ///     .build()
-    ///     .await?;
-    /// # Ok(()) }
-    /// ```
-    pub fn nat_config(mut self, config: NatConfig) -> Self {
-        if self.result.is_ok() {
-            self.nat = Nat::Custom(config);
-        }
-        self
-    }
 
     /// Sets an impairment condition on this router's downlink bridge, affecting
     /// download-direction traffic to all downstream devices.
     ///
     /// Equivalent to calling [`Router::set_downlink_condition`] after build.
-    pub fn downlink_condition(mut self, condition: Impair) -> Self {
+    pub fn downlink_condition(mut self, condition: LinkCondition) -> Self {
         if self.result.is_ok() {
             self.downlink_condition = Some(condition);
         }
@@ -1365,7 +1354,7 @@ impl RouterBuilder {
         self.result?;
 
         // Phase 1: Lock → register topology + extract snapshot → unlock.
-        let (id, setup_data, netns, need_root_setup) = {
+        let (id, setup_data, netns) = {
             let mut inner = self.inner.lock().unwrap();
             let nat = self.nat;
             let downstream_pool = if nat == Nat::None {
@@ -1566,15 +1555,11 @@ impl RouterBuilder {
             };
 
             let netns = Arc::clone(&inner.netns);
-            let need_root = !inner.root_ns_initialized;
-            (id, setup_data, netns, need_root)
+            (id, setup_data, netns)
         }; // lock released
 
         // Phase 2: Async network setup (no lock held).
         async {
-            if need_root_setup {
-                ensure_root_ns(&self.inner, &netns).await?;
-            }
             setup_router_async(&netns, &setup_data).await
         }
         .instrument(self.lab_span.clone())
@@ -1620,7 +1605,7 @@ impl DeviceBuilder {
     }
 
     /// Attach `ifname` inside the device namespace to `router`'s downstream switch.
-    pub fn iface(mut self, ifname: &str, router: NodeId, impair: Option<Impair>) -> Self {
+    pub fn iface(mut self, ifname: &str, router: NodeId, impair: Option<LinkCondition>) -> Self {
         if self.result.is_ok() {
             self.result = self
                 .inner
@@ -1670,7 +1655,7 @@ impl DeviceBuilder {
         self.result?;
 
         // Phase 1: Lock → extract snapshot + DNS overlay → unlock.
-        let (dev, ifaces, prefix, root_ns, netns, need_root_setup, dns_overlay) = {
+        let (dev, ifaces, prefix, root_ns, netns, dns_overlay) = {
             let mut inner = self.inner.lock().unwrap();
             // Apply builder-level config before snapshot.
             if let Some(d) = inner.device_mut(self.id) {
@@ -1726,17 +1711,13 @@ impl DeviceBuilder {
             let prefix = inner.cfg.prefix.clone();
             let root_ns = inner.cfg.root_ns.clone();
             let netns = Arc::clone(&inner.netns);
-            let need_root = !inner.root_ns_initialized;
-            (dev, iface_data, prefix, root_ns, netns, need_root, overlay)
+            (dev, iface_data, prefix, root_ns, netns, overlay)
         }; // lock released
 
         // Phase 2: Async network setup (no lock held).
         // The DNS overlay is passed to create_named_netns so worker threads
         // get /etc/hosts and /etc/resolv.conf bind-mounted at startup.
         async {
-            if need_root_setup {
-                ensure_root_ns(&self.inner, &netns).await?;
-            }
             setup_device_async(&netns, &prefix, &root_ns, &dev, ifaces, Some(dns_overlay)).await
         }
         .instrument(self.lab_span.clone())
@@ -1758,9 +1739,9 @@ impl DeviceBuilder {
 #[derive(Clone, Debug)]
 pub struct DeviceIface {
     ifname: String,
-    ip: Ipv4Addr,
+    ip: Option<Ipv4Addr>,
     ip_v6: Option<Ipv6Addr>,
-    impair: Option<Impair>,
+    impair: Option<LinkCondition>,
 }
 
 impl DeviceIface {
@@ -1769,8 +1750,8 @@ impl DeviceIface {
         &self.ifname
     }
 
-    /// Returns the assigned IPv4 address.
-    pub fn ip(&self) -> Ipv4Addr {
+    /// Returns the assigned IPv4 address, if any.
+    pub fn ip(&self) -> Option<Ipv4Addr> {
         self.ip
     }
 
@@ -1780,7 +1761,7 @@ impl DeviceIface {
     }
 
     /// Returns the impairment profile, if any.
-    pub fn impair(&self) -> Option<Impair> {
+    pub fn impair(&self) -> Option<LinkCondition> {
         self.impair
     }
 }
@@ -1833,13 +1814,10 @@ impl Device {
             .unwrap_or_default()
     }
 
-    /// Returns the IP address of the default interface.
-    pub fn ip(&self) -> Ipv4Addr {
+    /// Returns the IPv4 address of the default interface, if assigned.
+    pub fn ip(&self) -> Option<Ipv4Addr> {
         let inner = self.lab.lock().unwrap();
-        inner
-            .device(self.id)
-            .and_then(|d| d.default_iface().ip)
-            .unwrap_or(Ipv4Addr::UNSPECIFIED)
+        inner.device(self.id).and_then(|d| d.default_iface().ip)
     }
 
     /// Returns the IPv6 address of the default interface, if assigned.
@@ -1861,7 +1839,7 @@ impl Device {
         let iface = dev.iface(name)?;
         Some(DeviceIface {
             ifname: iface.ifname.clone(),
-            ip: iface.ip.unwrap_or(Ipv4Addr::UNSPECIFIED),
+            ip: iface.ip,
             ip_v6: iface.ip_v6,
             impair: iface.impair,
         })
@@ -1874,7 +1852,7 @@ impl Device {
         let iface = dev.default_iface();
         DeviceIface {
             ifname: iface.ifname.clone(),
-            ip: iface.ip.unwrap_or(Ipv4Addr::UNSPECIFIED),
+            ip: iface.ip,
             ip_v6: iface.ip_v6,
             impair: iface.impair,
         }
@@ -1891,7 +1869,7 @@ impl Device {
             .iter()
             .map(|iface| DeviceIface {
                 ifname: iface.ifname.clone(),
-                ip: iface.ip.unwrap_or(Ipv4Addr::UNSPECIFIED),
+                ip: iface.ip,
                 ip_v6: iface.ip_v6,
                 impair: iface.impair,
             })
@@ -1991,14 +1969,9 @@ impl Device {
         Ok(())
     }
 
-    /// Deprecated alias for [`Device::set_default_route`].
-    #[deprecated(note = "renamed to `set_default_route`")]
-    pub async fn switch_route(&self, to: &str) -> Result<()> {
-        self.set_default_route(to).await
-    }
 
     /// Applies or removes a link-layer impairment on the named interface.
-    pub fn set_link_condition(&self, ifname: &str, impair: Option<Impair>) -> Result<()> {
+    pub fn set_link_condition(&self, ifname: &str, impair: Option<LinkCondition>) -> Result<()> {
         let mut inner = self.lab.lock().unwrap();
         let (ns, resolved_ifname, netns) = {
             let dev = inner
@@ -2019,11 +1992,6 @@ impl Device {
         Ok(())
     }
 
-    /// Deprecated alias for [`Device::set_link_condition`].
-    #[deprecated(note = "renamed to `set_link_condition`")]
-    pub fn set_impair(&self, ifname: &str, impair: Option<Impair>) -> Result<()> {
-        self.set_link_condition(ifname, impair)
-    }
 
     // ── Spawn / run ────────────────────────────────────────────────────
 
@@ -2097,6 +2065,28 @@ impl Device {
         };
         netns.run_closure_in(&ns, move || {
             cmd.spawn().context("spawn command in namespace")
+        })
+    }
+
+    /// Spawns an async command in this device's network namespace.
+    ///
+    /// The child is registered with the namespace's tokio reactor so that
+    /// `.wait()` and `.wait_with_output()` work as non-blocking futures.
+    pub fn spawn_command_async(
+        &self,
+        mut cmd: tokio::process::Command,
+    ) -> Result<tokio::process::Child> {
+        let (ns, rt, netns) = {
+            let inner = self.lab.lock().unwrap();
+            let dev = inner
+                .device(self.id)
+                .ok_or_else(|| anyhow!("unknown device id"))?;
+            let rt = inner.rt_handle_for(&dev.ns)?;
+            (dev.ns.clone(), rt, Arc::clone(&inner.netns))
+        };
+        netns.run_closure_in(&ns, move || {
+            let _guard = rt.enter();
+            cmd.spawn().context("spawn async command in namespace")
         })
     }
 
@@ -2325,11 +2315,6 @@ impl Device {
         Ok(())
     }
 
-    /// Deprecated alias for [`Device::replug_iface`].
-    #[deprecated(note = "renamed to `replug_iface`")]
-    pub async fn switch_uplink(&self, ifname: &str, to_router: NodeId) -> Result<()> {
-        self.replug_iface(ifname, to_router).await
-    }
 }
 
 /// Cloneable handle to a router in the lab topology.
@@ -2469,24 +2454,6 @@ impl Router {
         apply_nat_for_router(&netns, &ns, &cfg, &wan_if, wan_ip)
     }
 
-    /// Replaces NAT rules with a custom [`NatConfig`] at runtime.
-    ///
-    /// This bypasses the preset and uses the provided config directly.
-    pub fn set_nat_config(&self, config: NatConfig) -> Result<()> {
-        let (ns, wan_if, wan_ip, netns) = {
-            let inner = self.lab.lock().unwrap();
-            let (ns, _lan_if, wan_if, wan_ip) = inner.router_nat_params(self.id)?;
-            (ns, wan_if, wan_ip, Arc::clone(&inner.netns))
-        };
-        run_nft_in(&netns, &ns, "flush table ip nat").ok();
-        run_nft_in(&netns, &ns, "flush table ip filter").ok();
-        apply_nat_config(&netns, &ns, &config, &wan_if, wan_ip)?;
-        {
-            let mut inner = self.lab.lock().unwrap();
-            inner.set_router_nat_mode(self.id, Nat::Custom(config))?;
-        }
-        Ok(())
-    }
 
     /// Replaces IPv6 NAT rules on this router at runtime.
     pub fn set_nat_v6_mode(&self, mode: NatV6Mode) -> Result<()> {
@@ -2551,11 +2518,6 @@ impl Router {
         })
     }
 
-    /// Deprecated alias for [`Router::flush_nat_state`].
-    #[deprecated(note = "renamed to `flush_nat_state`")]
-    pub fn rebind_nats(&self) -> Result<()> {
-        self.flush_nat_state()
-    }
 
     // ── Spawn / run ────────────────────────────────────────────────────
 
@@ -2620,16 +2582,33 @@ impl Router {
                 .ok_or_else(|| anyhow!("unknown router id"))?;
             (router.ns.clone(), Arc::clone(&inner.netns))
         };
-        // Routers don't have DNS entries (no NodeId in dns.per_device),
-        // but lab-wide entries still apply if any exist.
         netns.run_closure_in(&ns, move || {
             cmd.spawn().context("spawn command in namespace")
         })
     }
 
+    /// Spawns an async command in this router's network namespace.
+    pub fn spawn_command_async(
+        &self,
+        mut cmd: tokio::process::Command,
+    ) -> Result<tokio::process::Child> {
+        let (ns, rt, netns) = {
+            let inner = self.lab.lock().unwrap();
+            let router = inner
+                .router(self.id)
+                .ok_or_else(|| anyhow!("unknown router id"))?;
+            let rt = inner.rt_handle_for(&router.ns)?;
+            (router.ns.clone(), rt, Arc::clone(&inner.netns))
+        };
+        netns.run_closure_in(&ns, move || {
+            let _guard = rt.enter();
+            cmd.spawn().context("spawn async command in namespace")
+        })
+    }
+
     /// Applies or removes impairment on this router's downlink bridge, affecting
     /// download-direction traffic to all downstream devices.
-    pub fn set_downlink_condition(&self, impair: Option<Impair>) -> Result<()> {
+    pub fn set_downlink_condition(&self, impair: Option<LinkCondition>) -> Result<()> {
         debug!(router = ?self.id, impair = ?impair, "router: set_downlink_condition");
         let (ns, bridge, netns) = {
             let inner = self.lab.lock().unwrap();
@@ -2644,11 +2623,6 @@ impl Router {
         Ok(())
     }
 
-    /// Deprecated alias for [`Router::set_downlink_condition`].
-    #[deprecated(note = "renamed to `set_downlink_condition`")]
-    pub fn impair_downlink(&self, impair: Option<Impair>) -> Result<()> {
-        self.set_downlink_condition(impair)
-    }
 
     /// Spawns a UDP reflector in this router's network namespace.
     pub fn spawn_reflector(&self, bind: SocketAddr) -> Result<()> {
@@ -2758,6 +2732,23 @@ impl Ix {
         })
     }
 
+    /// Spawns an async command in the IX root namespace.
+    pub fn spawn_command_async(
+        &self,
+        mut cmd: tokio::process::Command,
+    ) -> Result<tokio::process::Child> {
+        let (ns, rt, netns) = {
+            let inner = self.lab.lock().unwrap();
+            let ns = inner.root_ns().to_string();
+            let rt = inner.rt_handle_for(&ns)?;
+            (ns, rt, Arc::clone(&inner.netns))
+        };
+        netns.run_closure_in(&ns, move || {
+            let _guard = rt.enter();
+            cmd.spawn().context("spawn async command in namespace")
+        })
+    }
+
     /// Spawns a UDP reflector in the IX root namespace.
     pub fn spawn_reflector(&self, bind: SocketAddr) -> Result<()> {
         let inner = self.lab.lock().unwrap();
@@ -2770,17 +2761,6 @@ impl Ix {
 // Helpers
 // ─────────────────────────────────────────────
 
-/// Ensures the root namespace and IX bridge are set up (lazy init, idempotent).
-async fn ensure_root_ns(
-    inner: &Arc<Mutex<NetworkCore>>,
-    netns: &Arc<crate::netns::NetnsManager>,
-) -> Result<()> {
-    let cfg = inner.lock().unwrap().cfg.clone();
-    setup_root_ns_async(&cfg, netns).await?;
-    let mut guard = inner.lock().unwrap();
-    guard.root_ns_initialized = true;
-    Ok(())
-}
 
 /// Normalise a device/interface name for use in an environment variable name.
 fn normalize_env_name(s: &str) -> String {

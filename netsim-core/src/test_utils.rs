@@ -61,9 +61,7 @@ pub fn probe_udp(
                 let addr_str = s
                     .strip_prefix("OBSERVED ")
                     .ok_or_else(|| anyhow!("unexpected reflector reply: {:?}", s))?;
-                return Ok(ObservedAddr {
-                    observed: addr_str.parse()?,
-                });
+                return Ok(addr_str.parse()?);
             }
             Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {
                 debug!(attempt, "probe timeout waiting for reflector reply");

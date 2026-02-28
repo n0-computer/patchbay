@@ -217,10 +217,12 @@ pub enum Step {
         id: String,
         timeout: Option<String>,
     },
-    SetImpair {
+    #[serde(alias = "set-impair")]
+    SetLinkCondition {
         device: String,
         interface: Option<String>,
-        impair: Option<toml::Value>,
+        #[serde(alias = "impair")]
+        condition: Option<toml::Value>,
     },
     /// Generic route switch (replaces `SwitchRoute`).
     SetDefaultRoute {

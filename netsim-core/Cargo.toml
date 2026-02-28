@@ -20,7 +20,7 @@ nix = { version = "0.30", features = ["sched", "mount", "fs", "signal", "process
 rtnetlink = "0.20"
 serde = { version = "1", features = ["derive"] }
 strum = { version = "0.26", features = ["derive"] }
-tokio = { version = "1", features = ["rt", "macros", "sync", "time", "fs", "net", "io-util"] }
+tokio = { version = "1", features = ["rt", "macros", "sync", "time", "fs", "net", "io-util", "process"] }
 tokio-util = "0.7"
 toml = "0.8"
 tracing = "0.1"

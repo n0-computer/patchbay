@@ -62,13 +62,11 @@ mod userns;
 pub mod util;
 
 pub use lab::{
-    ConntrackTimeouts, Device, DeviceBuilder, DeviceIface, Impair, ImpairLimits, IpSupport, Ix,
+    ConntrackTimeouts, Device, DeviceBuilder, DeviceIface, LinkCondition, LinkLimits, IpSupport, Ix,
     Lab, Nat, NatConfig, NatConfigBuilder, NatFiltering, NatMapping, NatV6Mode, ObservedAddr,
     Router, RouterBuilder,
 };
 
-#[allow(deprecated)]
-pub use lab::NatMode;
 
 pub use crate::{
     core::NodeId,
