@@ -61,9 +61,10 @@ mod userns;
 pub mod util;
 
 pub use lab::{
-    ConntrackTimeouts, DefaultRegions, Device, DeviceBuilder, DeviceIface, IpSupport, Ix, Lab,
-    LinkCondition, LinkLimits, Nat, NatConfig, NatConfigBuilder, NatFiltering, NatMapping,
-    NatV6Mode, ObservedAddr, Region, RegionLink, Router, RouterBuilder,
+    ConntrackTimeouts, DefaultRegions, Device, DeviceBuilder, DeviceIface, Firewall,
+    FirewallConfig, IpSupport, Ix, Lab, LinkCondition, LinkLimits, Nat, NatConfig,
+    NatConfigBuilder, NatFiltering, NatMapping, NatV6Mode, ObservedAddr, Region, RegionLink,
+    Router, RouterBuilder,
 };
 
 

@@ -389,6 +389,134 @@ impl IpSupport {
     }
 }
 
+/// Firewall preset for a router's forward chain.
+///
+/// Firewall rules restrict which traffic can traverse the router.
+/// They are applied as nftables rules in a separate `ip fw` table
+/// (priority 10, after NAT filter rules at priority 0).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub enum Firewall {
+    /// No filtering beyond NAT (default).
+    #[default]
+    None,
+
+    /// Corporate/enterprise firewall.
+    ///
+    /// Allows TCP 80, 443 and UDP 53 (DNS). Blocks all other TCP and UDP.
+    /// STUN/ICE fails, must use TURN-over-TLS on port 443.
+    ///
+    /// Observed on: Cisco ASA, Palo Alto, Fortinet in enterprise deployments.
+    Corporate,
+
+    /// Hotel/airport captive-portal style firewall.
+    ///
+    /// Allows TCP 80, 443, 53 and UDP 53. Blocks all other UDP.
+    /// TCP to other ports is allowed (unlike Corporate).
+    ///
+    /// Observed on: hotel/airport guest WiFi after captive portal auth.
+    CaptivePortal,
+
+    /// Fully custom firewall configuration.
+    Custom(FirewallConfig),
+}
+
+/// Custom firewall configuration for per-port allow/block rules.
+///
+/// # Example
+/// ```
+/// # use netsim_core::FirewallConfig;
+/// let cfg = FirewallConfig::builder()
+///     .allow_tcp(&[80, 443, 8443])
+///     .allow_udp(&[53])
+///     .block_udp()
+///     .build();
+/// ```
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct FirewallConfig {
+    /// Allowed outbound TCP destination ports. Empty + block_tcp = block all TCP.
+    pub allow_tcp: Vec<u16>,
+    /// Allowed outbound UDP destination ports. Empty + block_udp = block all UDP.
+    pub allow_udp: Vec<u16>,
+    /// If true, block TCP not in `allow_tcp`.
+    pub block_tcp: bool,
+    /// If true, block UDP not in `allow_udp`.
+    pub block_udp: bool,
+}
+
+impl Firewall {
+    /// Expands a preset to a [`FirewallConfig`], or returns `None` for [`Firewall::None`].
+    pub fn to_config(&self) -> Option<FirewallConfig> {
+        match self {
+            Firewall::None => None,
+            Firewall::Corporate => Some(FirewallConfig {
+                allow_tcp: vec![80, 443],
+                allow_udp: vec![53],
+                block_tcp: true,
+                block_udp: true,
+            }),
+            Firewall::CaptivePortal => Some(FirewallConfig {
+                allow_tcp: vec![80, 443, 53],
+                allow_udp: vec![53],
+                block_tcp: false,
+                block_udp: true,
+            }),
+            Firewall::Custom(cfg) => Some(cfg.clone()),
+        }
+    }
+}
+
+impl FirewallConfig {
+    /// Returns a builder for constructing a custom firewall configuration.
+    pub fn builder() -> FirewallConfigBuilder {
+        FirewallConfigBuilder::default()
+    }
+}
+
+/// Builder for [`FirewallConfig`].
+#[derive(Clone, Debug, Default)]
+pub struct FirewallConfigBuilder {
+    allow_tcp: Vec<u16>,
+    allow_udp: Vec<u16>,
+    block_tcp: bool,
+    block_udp: bool,
+}
+
+impl FirewallConfigBuilder {
+    /// Allow outbound TCP to these destination ports.
+    pub fn allow_tcp(&mut self, ports: &[u16]) -> &mut Self {
+        self.allow_tcp.extend_from_slice(ports);
+        self
+    }
+
+    /// Allow outbound UDP to these destination ports.
+    pub fn allow_udp(&mut self, ports: &[u16]) -> &mut Self {
+        self.allow_udp.extend_from_slice(ports);
+        self
+    }
+
+    /// Block all outbound TCP not in the allow list.
+    pub fn block_tcp(&mut self) -> &mut Self {
+        self.block_tcp = true;
+        self
+    }
+
+    /// Block all outbound UDP not in the allow list.
+    pub fn block_udp(&mut self) -> &mut Self {
+        self.block_udp = true;
+        self
+    }
+
+    /// Builds the [`FirewallConfig`].
+    pub fn build(&self) -> FirewallConfig {
+        FirewallConfig {
+            allow_tcp: self.allow_tcp.clone(),
+            allow_udp: self.allow_udp.clone(),
+            block_tcp: self.block_tcp,
+            block_udp: self.block_udp,
+        }
+    }
+}
+
 /// Link-layer impairment profile applied via `tc netem`.
 ///
 /// Named presets model common last-mile conditions. Use [`LinkCondition::Manual`]
@@ -885,6 +1013,7 @@ impl Lab {
                 downlink_condition: None,
                 mtu: None,
                 block_icmp_frag_needed: false,
+                firewall: Firewall::None,
                 result: Err(anyhow!(
                     "router names starting with 'region_' are reserved"
                 )),
@@ -904,6 +1033,7 @@ impl Lab {
                 downlink_condition: None,
                 mtu: None,
                 block_icmp_frag_needed: false,
+                firewall: Firewall::None,
                 result: Err(anyhow!("router '{}' already exists", name)),
             };
         }
@@ -920,6 +1050,7 @@ impl Lab {
             downlink_condition: None,
             mtu: None,
             block_icmp_frag_needed: false,
+            firewall: Firewall::None,
             result: Ok(()),
         }
     }
@@ -1719,6 +1850,7 @@ pub struct RouterBuilder {
     downlink_condition: Option<LinkCondition>,
     mtu: Option<u32>,
     block_icmp_frag_needed: bool,
+    firewall: Firewall,
     result: Result<()>,
 }
 
@@ -1787,6 +1919,34 @@ impl RouterBuilder {
         self
     }
 
+    /// Sets a firewall preset for this router.
+    pub fn firewall(mut self, fw: Firewall) -> Self {
+        if self.result.is_ok() {
+            self.firewall = fw;
+        }
+        self
+    }
+
+    /// Configures a custom firewall via a builder closure.
+    ///
+    /// # Example
+    /// ```ignore
+    /// lab.add_router("fw")
+    ///     .firewall_custom(|f| f.allow_tcp(&[80, 443]).allow_udp(&[53]).block_udp())
+    ///     .build().await?;
+    /// ```
+    pub fn firewall_custom(
+        mut self,
+        f: impl FnOnce(&mut FirewallConfigBuilder) -> &mut FirewallConfigBuilder,
+    ) -> Self {
+        if self.result.is_ok() {
+            let mut builder = FirewallConfigBuilder::default();
+            f(&mut builder);
+            self.firewall = Firewall::Custom(builder.build());
+        }
+        self
+    }
+
     /// Sets which IP address families this router supports. Defaults to [`IpSupport::V4Only`].
     pub fn ip_support(mut self, support: IpSupport) -> Self {
         if self.result.is_ok() {
@@ -1839,6 +1999,7 @@ impl RouterBuilder {
             if let Some(r) = inner.router_mut(id) {
                 r.cfg.mtu = self.mtu;
                 r.cfg.block_icmp_frag_needed = self.block_icmp_frag_needed;
+                r.cfg.firewall = self.firewall.clone();
             }
             let has_v4 = self.ip_support.has_v4();
             let has_v6 = self.ip_support.has_v6();
@@ -3120,6 +3281,21 @@ impl Router {
         Ok(())
     }
 
+
+    /// Sets (or removes) the firewall on this router at runtime.
+    ///
+    /// Pass [`Firewall::None`] to remove all firewall rules.
+    pub fn set_firewall(&self, fw: Firewall) -> Result<()> {
+        let (ns, netns) = {
+            let mut inner = self.lab.lock().unwrap();
+            let r = inner.router_mut(self.id).context("unknown router id")?;
+            r.cfg.firewall = fw.clone();
+            (r.ns.clone(), Arc::clone(&inner.netns))
+        };
+        // Always remove existing rules first, then apply new ones.
+        core::remove_firewall(&netns, &ns)?;
+        core::apply_firewall(&netns, &ns, &fw)
+    }
 
     /// Spawns a UDP reflector in this router's network namespace.
     pub fn spawn_reflector(&self, bind: SocketAddr) -> Result<()> {

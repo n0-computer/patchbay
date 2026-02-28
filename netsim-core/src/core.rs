@@ -12,8 +12,8 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, instrument, Instrument as _};
 
 use crate::{
-    netlink::Netlink, netns, qdisc, ConntrackTimeouts, LinkCondition, IpSupport, Nat, NatConfig,
-    NatFiltering, NatMapping, NatV6Mode,
+    netlink::Netlink, netns, qdisc, ConntrackTimeouts, Firewall, LinkCondition, IpSupport, Nat,
+    NatConfig, NatFiltering, NatMapping, NatV6Mode,
 };
 
 /// Defines static addressing and naming for one lab instance.
@@ -75,6 +75,8 @@ pub(crate) struct RouterConfig {
     pub mtu: Option<u32>,
     /// Whether to block ICMP "fragmentation needed" messages (PMTU blackhole).
     pub block_icmp_frag_needed: bool,
+    /// Firewall preset for the router's forward chain.
+    pub firewall: Firewall,
 }
 
 impl RouterConfig {
@@ -601,6 +603,7 @@ impl NetworkCore {
                     ip_support,
                     mtu: None,
                     block_icmp_frag_needed: false,
+                    firewall: Firewall::None,
                 },
                 downlink_bridge,
                 uplink: None,
@@ -1446,6 +1449,9 @@ pub(crate) async fn setup_router_async(
         apply_icmp_frag_block(netns, &router.ns)?;
     }
 
+    // Apply firewall rules if configured.
+    apply_firewall(netns, &router.ns, &router.cfg.firewall)?;
+
     Ok(())
 }
 
@@ -1464,6 +1470,73 @@ table ip filter {
 }
 "#,
     )
+}
+
+/// Generates nftables rules for a [`FirewallConfig`].
+///
+/// Uses a separate `table ip fw` at priority 10 to avoid conflicts with the
+/// NAT filter table (`ip filter` at priority 0).
+fn generate_firewall_rules(cfg: &crate::lab::FirewallConfig) -> String {
+    let mut rules = String::new();
+    rules.push_str("table ip fw {\n");
+    rules.push_str("    chain forward {\n");
+    rules.push_str("        type filter hook forward priority 10; policy accept;\n");
+    rules.push_str("        ct state established,related accept\n");
+
+    // Allow specific TCP ports.
+    if !cfg.allow_tcp.is_empty() {
+        let ports: Vec<String> = cfg.allow_tcp.iter().map(|p| p.to_string()).collect();
+        rules.push_str(&format!(
+            "        tcp dport {{ {} }} accept\n",
+            ports.join(", ")
+        ));
+    }
+
+    // Allow specific UDP ports.
+    if !cfg.allow_udp.is_empty() {
+        let ports: Vec<String> = cfg.allow_udp.iter().map(|p| p.to_string()).collect();
+        rules.push_str(&format!(
+            "        udp dport {{ {} }} accept\n",
+            ports.join(", ")
+        ));
+    }
+
+    // Block remaining UDP if configured.
+    if cfg.block_udp {
+        rules.push_str("        ip protocol udp drop\n");
+    }
+
+    // Block remaining TCP if configured.
+    if cfg.block_tcp {
+        rules.push_str("        ip protocol tcp drop\n");
+    }
+
+    rules.push_str("    }\n");
+    rules.push_str("}\n");
+    rules
+}
+
+/// Applies firewall rules for a router. No-op for [`Firewall::None`].
+pub(crate) fn apply_firewall(
+    netns: &netns::NetnsManager,
+    ns: &str,
+    firewall: &Firewall,
+) -> Result<()> {
+    match firewall.to_config() {
+        None => Ok(()),
+        Some(cfg) => {
+            let rules = generate_firewall_rules(&cfg);
+            run_nft_in(netns, ns, &rules)
+        }
+    }
+}
+
+/// Removes firewall rules by flushing the `ip fw` table.
+pub(crate) fn remove_firewall(netns: &netns::NetnsManager, ns: &str) -> Result<()> {
+    // Flush and delete; ignore errors (table may not exist).
+    let rules = "delete table ip fw\n";
+    run_nft_in(netns, ns, rules).ok();
+    Ok(())
 }
 
 /// Sets up a single device's namespace and wires all interfaces. No lock held.
