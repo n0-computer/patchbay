@@ -23,7 +23,6 @@
 //! let lab = Lab::new();
 //! let isp = lab
 //!     .add_router("isp1")
-//!     .region("eu")
 //!     .nat(Nat::Cgnat)
 //!     .build()
 //!     .await?;
@@ -62,9 +61,9 @@ mod userns;
 pub mod util;
 
 pub use lab::{
-    ConntrackTimeouts, Device, DeviceBuilder, DeviceIface, LinkCondition, LinkLimits, IpSupport, Ix,
-    Lab, Nat, NatConfig, NatConfigBuilder, NatFiltering, NatMapping, NatV6Mode, ObservedAddr,
-    Router, RouterBuilder,
+    ConntrackTimeouts, DefaultRegions, Device, DeviceBuilder, DeviceIface, IpSupport, Ix, Lab,
+    LinkCondition, LinkLimits, Nat, NatConfig, NatConfigBuilder, NatFiltering, NatMapping,
+    NatV6Mode, ObservedAddr, Region, RegionLink, Router, RouterBuilder,
 };
 
 

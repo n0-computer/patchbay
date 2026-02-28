@@ -550,6 +550,72 @@ impl LinkCondition {
 pub type ObservedAddr = SocketAddr;
 
 // ─────────────────────────────────────────────
+// Region
+// ─────────────────────────────────────────────
+
+/// Handle for a network region backed by a real router namespace.
+///
+/// Regions model geographic proximity: routers within a region share a bridge,
+/// and inter-region traffic flows over veths with configurable netem impairment.
+#[derive(Clone)]
+pub struct Region {
+    name: String,
+    idx: u8,
+    router_id: NodeId,
+    lab: Arc<Mutex<NetworkCore>>,
+}
+
+impl Region {
+    /// Region name (e.g. "us", "eu").
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// The underlying region router's node ID.
+    pub fn router_id(&self) -> NodeId {
+        self.router_id
+    }
+}
+
+/// Parameters for an inter-region link.
+#[derive(Clone, Debug)]
+pub struct RegionLink {
+    pub latency_ms: u32,
+    pub jitter_ms: u32,
+    pub loss_pct: f64,
+    pub rate_mbit: u32,
+}
+
+impl RegionLink {
+    /// Good inter-region link with just latency.
+    pub fn good(latency_ms: u32) -> Self {
+        Self {
+            latency_ms,
+            jitter_ms: 0,
+            loss_pct: 0.0,
+            rate_mbit: 0,
+        }
+    }
+
+    /// Degraded link with jitter and some loss.
+    pub fn degraded(latency_ms: u32) -> Self {
+        Self {
+            latency_ms,
+            jitter_ms: latency_ms / 10,
+            loss_pct: 0.5,
+            rate_mbit: 0,
+        }
+    }
+}
+
+/// Pre-built regions from [`Lab::add_default_regions`].
+pub struct DefaultRegions {
+    pub us: Region,
+    pub eu: Region,
+    pub asia: Region,
+}
+
+// ─────────────────────────────────────────────
 // Lab
 // ─────────────────────────────────────────────
 
@@ -576,7 +642,7 @@ impl Lab {
         let prefix = format!("lab-p{}{}", pid_tag, uniq); // e.g. "lab-p12340"
         let root_ns = format!("lab{lab_seq}-root");
         let bridge_tag = format!("p{}{}", pid_tag, uniq);
-        let ix_gw = Ipv4Addr::new(203, 0, 113, 1);
+        let ix_gw = Ipv4Addr::new(198, 18, 0, 1);
         let lab_span = debug_span!("lab", id = lab_seq);
         {
             let _enter = lab_span.enter();
@@ -589,9 +655,9 @@ impl Lab {
             bridge_tag,
             ix_br: format!("br-p{}{}-1", pid_tag, uniq),
             ix_gw,
-            ix_cidr: "203.0.113.0/24".parse().expect("valid ix cidr"),
+            ix_cidr: "198.18.0.0/24".parse().expect("valid ix cidr"),
             private_cidr: "10.0.0.0/16".parse().expect("valid private cidr"),
-            public_cidr: "203.0.113.0/24".parse().expect("valid public cidr"),
+            public_cidr: "198.18.1.0/24".parse().expect("valid public cidr"),
             ix_gw_v6: "2001:db8::1".parse().expect("valid ix gw v6"),
             ix_cidr_v6: "2001:db8::/32".parse().expect("valid ix cidr v6"),
             private_cidr_v6: "fd10::/48".parse().expect("valid private cidr v6"),
@@ -628,15 +694,8 @@ impl Lab {
     pub async fn from_config(cfg: crate::config::LabConfig) -> Result<Self> {
         let lab = Self::new().await;
 
-        // Region latency pairs.
-        if let Some(regions) = &cfg.region {
-            let mut inner = lab.inner.lock().unwrap();
-            for (from, rcfg) in regions {
-                for (to, &ms) in &rcfg.latencies {
-                    inner.region_latencies.push((from.clone(), to.clone(), ms));
-                }
-            }
-        }
+        // Region latency pairs from TOML config are ignored in the new region API.
+        // TODO: support regions in TOML config via add_region / link_regions.
 
         // Routers: topological sort — process any router whose upstream is already resolved.
         let mut pending: HashMap<&str, &crate::config::RouterConfig> =
@@ -672,9 +731,7 @@ impl Lab {
                     .nat(rcfg.nat)
                     .ip_support(rcfg.ip_support)
                     .nat_v6(rcfg.nat_v6);
-                if let Some(r) = &rcfg.region {
-                    rb = rb.region(r);
-                }
+                // TODO: support region assignment from TOML config via add_region.
                 if let Some(u) = upstream {
                     rb = rb.upstream(u);
                 }
@@ -798,99 +855,9 @@ impl Lab {
             builder.build().await?;
         }
 
-        // Apply inter-region latency rules now that all routers are built.
-        lab.apply_region_latencies()?;
-
         Ok(lab)
     }
 
-    /// Applies stored region latency rules to IX-connected routers' "ix" interfaces.
-    fn apply_region_latencies(&self) -> Result<()> {
-        let inner = self.inner.lock().unwrap();
-        if inner.region_latencies.is_empty() {
-            return Ok(());
-        }
-
-        // Build region → target CIDRs map from IX-connected routers.
-        let mut region_targets: HashMap<String, Vec<ipnet::IpNet>> = HashMap::new();
-        for router in inner.all_routers() {
-            let Some(uplink) = router.uplink else {
-                continue;
-            };
-            if uplink != inner.ix_sw() {
-                continue;
-            }
-            let Some(region) = router.region.as_ref() else {
-                continue;
-            };
-            // v4 targets
-            if let Some(ix_ip) = router.upstream_ip {
-                if let Ok(cidr) = ipnet::Ipv4Net::new(ix_ip, 32) {
-                    region_targets
-                        .entry(region.clone())
-                        .or_default()
-                        .push(cidr.into());
-                }
-            }
-            if router.cfg.downstream_pool == crate::core::DownstreamPool::Public {
-                if let Some(cidr) = router.downstream_cidr {
-                    region_targets
-                        .entry(region.clone())
-                        .or_default()
-                        .push(cidr.into());
-                }
-            }
-            // v6 targets
-            if let Some(ix_ip_v6) = router.upstream_ip_v6 {
-                if let Ok(cidr) = ipnet::Ipv6Net::new(ix_ip_v6, 128) {
-                    region_targets
-                        .entry(region.clone())
-                        .or_default()
-                        .push(cidr.into());
-                }
-            }
-            if router.cfg.downstream_pool == crate::core::DownstreamPool::Public {
-                if let Some(cidr6) = router.downstream_cidr_v6 {
-                    region_targets
-                        .entry(region.clone())
-                        .or_default()
-                        .push(cidr6.into());
-                }
-            }
-        }
-
-        // Apply tc netem filters on each IX-connected router's "ix" interface.
-        let netns = Arc::clone(&inner.netns);
-        for router in inner.all_routers() {
-            let Some(uplink) = router.uplink else {
-                continue;
-            };
-            if uplink != inner.ix_sw() {
-                continue;
-            }
-            let Some(region) = router.region.as_ref() else {
-                continue;
-            };
-            let mut filters = Vec::new();
-            for (from, to, latency) in &inner.region_latencies {
-                if from != region {
-                    continue;
-                }
-                if let Some(targets) = region_targets.get(to) {
-                    for cidr in targets {
-                        filters.push((*cidr, *latency));
-                    }
-                }
-            }
-            if !filters.is_empty() {
-                let ns = router.ns.clone();
-                netns.run_closure_in(&ns, move || {
-                    crate::qdisc::apply_region_latency_dual("ix", &filters)
-                })?;
-            }
-        }
-        Ok(())
-    }
 
     // ── Builder methods (sync — just populate data structures) ──────────
 
@@ -904,6 +871,25 @@ impl Lab {
     pub fn add_router(&self, name: &str) -> RouterBuilder {
         let inner = self.inner.lock().unwrap();
         let lab_span = inner.cfg.span.clone();
+        if name.starts_with("region_") {
+            return RouterBuilder {
+                inner: Arc::clone(&self.inner),
+                lab_span,
+                name: name.to_string(),
+                region: None,
+                upstream: None,
+                nat: Nat::None,
+                ip_support: IpSupport::V4Only,
+                nat_v6: NatV6Mode::None,
+                downstream_cidr: None,
+                downlink_condition: None,
+                mtu: None,
+                block_icmp_frag_needed: false,
+                result: Err(anyhow!(
+                    "router names starting with 'region_' are reserved"
+                )),
+            };
+        }
         if inner.router_id_by_name(name).is_some() {
             return RouterBuilder {
                 inner: Arc::clone(&self.inner),
@@ -1023,20 +1009,495 @@ impl Lab {
 
     // ── User-facing API ─────────────────────────────────────────────────
 
-    /// Adds a one-way inter-region latency in milliseconds.
+    // ── Region API ────────────────────────────────────────────────────
+
+    /// Creates a new network region backed by a real router namespace.
     ///
-    /// If IX-connected routers are already built, the latency rules are applied
-    /// immediately. Otherwise they are deferred until all routers are ready.
-    pub fn set_region_latency(&self, from: &str, to: &str, latency_ms: u32) {
-        debug!(from = %from, to = %to, latency_ms, "lab: set_region_latency");
-        self.inner.lock().unwrap().region_latencies.push((
-            from.to_string(),
-            to.to_string(),
-            latency_ms,
-        ));
-        // Best-effort immediate application; no-op if routers aren't built yet.
-        let _ = self.apply_region_latencies();
+    /// Each region gets a /20 block from 198.18.0.0/15. Routers added with
+    /// `.region(&region)` connect to the region's bridge as sub-routers.
+    /// Inter-region latency is configured separately via [`link_regions`](Self::link_regions).
+    pub async fn add_region(&self, name: &str) -> Result<Region> {
+        if name.is_empty() {
+            bail!("region name must not be empty");
+        }
+        let region_router_name = format!("region_{name}");
+
+        // Phase 1: Lock → register topology → unlock.
+        let (id, setup_data, netns, idx) = {
+            let mut inner = self.inner.lock().unwrap();
+            if inner.regions.contains_key(name) {
+                bail!("region '{name}' already exists");
+            }
+            let idx = inner.alloc_region_idx()?;
+
+            // Region router: Nat::None, public downstream, no region tag (it IS the region).
+            let id = inner.add_router(
+                &region_router_name,
+                Nat::None,
+                DownstreamPool::Public,
+                None,
+                IpSupport::V4Only,
+                NatV6Mode::None,
+            );
+
+            // Downstream switch: region's first /24 as override CIDR.
+            let region_bridge_cidr: Ipv4Net = format!(
+                "198.18.{}.0/24",
+                idx as u16 * 16
+            )
+            .parse()
+            .context("region bridge CIDR")?;
+            let sub_switch = inner.add_switch(
+                &format!("{region_router_name}-sub"),
+                None,
+                None,
+                None,
+                None,
+            );
+            inner.connect_router_downlink(id, sub_switch, Some(region_bridge_cidr))?;
+
+            // Set next_host to 10 so sub-routers get .10, .11, ...
+            if let Some(sw) = inner.switch_mut(sub_switch) {
+                sw.next_host = 10;
+            }
+
+            // IX uplink: region router gets an IX IP.
+            let ix_ip = inner.alloc_ix_ip_low()?;
+            let ix_sw = inner.ix_sw();
+            inner.connect_router_uplink(id, ix_sw, Some(ix_ip), None)?;
+
+            // Store region info.
+            inner.regions.insert(
+                name.to_string(),
+                crate::core::RegionInfo {
+                    idx,
+                    router_id: id,
+                    next_host: 10,
+                    next_downstream: 1,
+                },
+            );
+
+            // Extract snapshot for async setup.
+            let router = inner.router(id).unwrap().clone();
+            let cfg = &inner.cfg;
+            let ix_sw_id = inner.ix_sw();
+
+            // Region router has a return route for its bridge /24 via its IX IP.
+            // But it also needs the /20 aggregate in root NS.
+            // The per-/24 return route for the bridge subnet is handled by the
+            // standard return_route mechanism.
+            let return_route = if let (Some(cidr), Some(via)) =
+                (router.downstream_cidr, router.upstream_ip)
+            {
+                Some((cidr.addr(), cidr.prefix_len(), via))
+            } else {
+                None
+            };
+
+            let downlink_bridge = router.downlink.and_then(|sw_id| {
+                let sw = inner.switch(sw_id)?;
+                let br = sw.bridge.clone().unwrap_or_else(|| "br-lan".to_string());
+                let v4 = sw.gw.and_then(|gw| Some((gw, sw.cidr?.prefix_len())));
+                Some((br, v4))
+            });
+
+            let setup_data = RouterSetupData {
+                router,
+                root_ns: cfg.root_ns.clone(),
+                prefix: cfg.prefix.clone(),
+                ix_sw: ix_sw_id,
+                ix_br: cfg.ix_br.clone(),
+                ix_gw: cfg.ix_gw,
+                ix_cidr_prefix: cfg.ix_cidr.prefix_len(),
+                upstream_owner_ns: None,
+                upstream_bridge: None,
+                upstream_gw: None,
+                upstream_cidr_prefix: None,
+                return_route,
+                downlink_bridge,
+                ix_gw_v6: None,
+                ix_cidr_v6_prefix: None,
+                upstream_gw_v6: None,
+                upstream_cidr_prefix_v6: None,
+                return_route_v6: None,
+                downlink_bridge_v6: None,
+                parent_route_v6: None,
+                parent_route_v4: None,
+            };
+
+            let netns = Arc::clone(&inner.netns);
+            (id, setup_data, netns, idx)
+        }; // lock released
+
+        // Phase 2: Async network setup (no lock held).
+        setup_router_async(&netns, &setup_data).await?;
+
+        // Phase 3: Add /20 aggregate route in root NS for the region.
+        let region_net: Ipv4Addr = format!("198.18.{}.0", idx as u16 * 16)
+            .parse()
+            .context("region aggregate net")?;
+        let via = setup_data.router.upstream_ip.context("region router has no IX IP")?;
+        let root_ns = setup_data.root_ns.clone();
+        core::nl_run(&netns, &root_ns, move |h: Netlink| async move {
+            h.add_route_v4(region_net, 20, via).await.ok();
+            Ok(())
+        })
+        .await?;
+
+        Ok(Region {
+            name: name.to_string(),
+            idx,
+            router_id: id,
+            lab: Arc::clone(&self.inner),
+        })
     }
+
+    /// Links two regions with a veth pair and applies netem impairment.
+    ///
+    /// Creates a point-to-point veth between the two region router namespaces,
+    /// assigns /30 addresses from 203.0.113.0/24, applies tc netem on both ends,
+    /// and adds /20 routes so each region can reach the other.
+    pub async fn link_regions(&self, a: &Region, b: &Region, link: RegionLink) -> Result<()> {
+        let (a_ns, b_ns, a_idx, b_idx, netns, root_ns);
+        let (ip_a, ip_b);
+        let link_key;
+        {
+            let mut inner = self.inner.lock().unwrap();
+
+            // Validate regions exist and aren't already linked.
+            let a_name = a.name.clone();
+            let b_name = b.name.clone();
+            link_key = if a_name < b_name {
+                (a_name.clone(), b_name.clone())
+            } else {
+                (b_name.clone(), a_name.clone())
+            };
+            if inner.region_links.contains_key(&link_key) {
+                bail!("regions '{}' and '{}' are already linked", a.name, b.name);
+            }
+
+            let a_info = inner
+                .regions
+                .get(&a.name)
+                .ok_or_else(|| anyhow!("region '{}' not found", a.name))?
+                .clone();
+            let b_info = inner
+                .regions
+                .get(&b.name)
+                .ok_or_else(|| anyhow!("region '{}' not found", b.name))?
+                .clone();
+
+            a_ns = inner.router(a_info.router_id).unwrap().ns.clone();
+            b_ns = inner.router(b_info.router_id).unwrap().ns.clone();
+            a_idx = a_info.idx;
+            b_idx = b_info.idx;
+            root_ns = inner.cfg.root_ns.clone();
+            netns = Arc::clone(&inner.netns);
+
+            // Allocate /30 from 203.0.113.0/24.
+            let (ipa, ipb) = inner.alloc_interregion_ips()?;
+            ip_a = ipa;
+            ip_b = ipb;
+
+            let ifname_a = format!("vr-{}-{}", a.name, b.name);
+            let ifname_b = format!("vr-{}-{}", b.name, a.name);
+            // Store IPs in sorted key order: ip_a belongs to link_key.0, ip_b to link_key.1.
+            let (stored_ip_a, stored_ip_b) = if a.name < b.name {
+                (ip_a, ip_b)
+            } else {
+                (ip_b, ip_a)
+            };
+            let (stored_if_a, stored_if_b) = if a.name < b.name {
+                (ifname_a.clone(), ifname_b.clone())
+            } else {
+                (ifname_b.clone(), ifname_a.clone())
+            };
+            inner.region_links.insert(
+                link_key.clone(),
+                crate::core::RegionLinkData {
+                    ifname_a: stored_if_a,
+                    ifname_b: stored_if_b,
+                    ip_a: stored_ip_a,
+                    ip_b: stored_ip_b,
+                    broken: false,
+                },
+            );
+        } // lock released
+
+        let veth_a = format!("vr-{}-{}", a.name, b.name);
+        let veth_b = format!("vr-{}-{}", b.name, a.name);
+
+        // Create veth pair in root NS, then move ends to region router NSes.
+        let veth_a2 = veth_a.clone();
+        let veth_b2 = veth_b.clone();
+        let a_ns_fd = netns.ns_fd(&a_ns)?;
+        let b_ns_fd = netns.ns_fd(&b_ns)?;
+        core::nl_run(&netns, &root_ns, move |h: Netlink| async move {
+            h.ensure_link_deleted(&veth_a2).await.ok();
+            h.add_veth(&veth_a2, &veth_b2).await?;
+            h.move_link_to_netns(&veth_a2, &a_ns_fd).await?;
+            h.move_link_to_netns(&veth_b2, &b_ns_fd).await?;
+            Ok(())
+        })
+        .await?;
+
+        // Configure side A: assign IP, bring up, add route to B's /20.
+        let veth_a3 = veth_a.clone();
+        let b_region_net: Ipv4Addr = format!("198.18.{}.0", b_idx as u16 * 16).parse()?;
+        core::nl_run(&netns, &a_ns, move |h: Netlink| async move {
+            h.add_addr4(&veth_a3, ip_a, 30).await?;
+            h.set_link_up(&veth_a3).await?;
+            h.add_route_v4(b_region_net, 20, ip_b).await?;
+            Ok(())
+        })
+        .await?;
+
+        // Configure side B: assign IP, bring up, add route to A's /20.
+        let veth_b3 = veth_b.clone();
+        let a_region_net: Ipv4Addr = format!("198.18.{}.0", a_idx as u16 * 16).parse()?;
+        core::nl_run(&netns, &b_ns, move |h: Netlink| async move {
+            h.add_addr4(&veth_b3, ip_b, 30).await?;
+            h.set_link_up(&veth_b3).await?;
+            h.add_route_v4(a_region_net, 20, ip_a).await?;
+            Ok(())
+        })
+        .await?;
+
+        // Apply netem impairment on both veth ends.
+        if link.latency_ms > 0 || link.jitter_ms > 0 || link.loss_pct > 0.0 {
+            let limits = LinkLimits {
+                latency_ms: link.latency_ms,
+                jitter_ms: link.jitter_ms,
+                loss_pct: link.loss_pct as f32,
+                rate_kbit: if link.rate_mbit > 0 {
+                    link.rate_mbit * 1000
+                } else {
+                    0
+                },
+                ..Default::default()
+            };
+            let veth_a4 = veth_a.clone();
+            let limits_a = limits.clone();
+            netns.run_closure_in(&a_ns, move || {
+                crate::qdisc::apply_impair(&veth_a4, limits_a)
+            })?;
+            let veth_b4 = veth_b.clone();
+            netns.run_closure_in(&b_ns, move || {
+                crate::qdisc::apply_impair(&veth_b4, limits)
+            })?;
+        }
+
+        Ok(())
+    }
+
+    /// Breaks the direct link between two regions, rerouting through an intermediate.
+    ///
+    /// Finds a third region `m` that has non-broken links to both `a` and `b`,
+    /// and replaces the direct routes with routes through `m`. Traffic will
+    /// traverse two inter-region hops instead of one.
+    pub fn break_region_link(&self, a: &Region, b: &Region) -> Result<()> {
+        let inner = self.inner.lock().unwrap();
+
+        let link_key = Self::region_link_key(&a.name, &b.name);
+        let link = inner
+            .region_links
+            .get(&link_key)
+            .ok_or_else(|| anyhow!("no link between '{}' and '{}'", a.name, b.name))?;
+        if link.broken {
+            bail!("link between '{}' and '{}' is already broken", a.name, b.name);
+        }
+
+        // Find intermediate region m with non-broken links to both a and b.
+        let m_name = inner
+            .regions
+            .keys()
+            .find(|name| {
+                if *name == &a.name || *name == &b.name {
+                    return false;
+                }
+                let key_ma = Self::region_link_key(name, &a.name);
+                let key_mb = Self::region_link_key(name, &b.name);
+                let link_ma = inner.region_links.get(&key_ma);
+                let link_mb = inner.region_links.get(&key_mb);
+                matches!((link_ma, link_mb), (Some(la), Some(lb)) if !la.broken && !lb.broken)
+            })
+            .cloned()
+            .ok_or_else(|| {
+                anyhow!(
+                    "no intermediate region found to reroute '{}'↔'{}'",
+                    a.name,
+                    b.name
+                )
+            })?;
+
+        // Get the veth IPs for m↔a and m↔b links.
+        let key_ma = Self::region_link_key(&m_name, &a.name);
+        let link_ma = inner.region_links.get(&key_ma).unwrap();
+        // m's IP on the m↔a veth: if key is (a, m) then ip_b is m's side, else ip_a.
+        let m_ip_on_ma = if key_ma.0 == a.name {
+            link_ma.ip_b
+        } else {
+            link_ma.ip_a
+        };
+
+        let key_mb = Self::region_link_key(&m_name, &b.name);
+        let link_mb = inner.region_links.get(&key_mb).unwrap();
+        let m_ip_on_mb = if key_mb.0 == b.name {
+            link_mb.ip_b
+        } else {
+            link_mb.ip_a
+        };
+
+        let a_ns = inner.router(a.router_id).unwrap().ns.clone();
+        let b_ns = inner.router(b.router_id).unwrap().ns.clone();
+        let netns = Arc::clone(&inner.netns);
+
+        // On region_a: replace route to b's /20 via m (on a↔m veth)
+        let b_net: Ipv4Addr = format!("198.18.{}.0", b.idx as u16 * 16).parse()?;
+        let a_via = m_ip_on_ma;
+        netns.run_closure_in(&a_ns, move || {
+            let status = Command::new("ip")
+                .args(["route", "replace", &format!("{b_net}/20"), "via", &a_via.to_string()])
+                .status()
+                .context("ip route replace")?;
+            if !status.success() {
+                bail!("ip route replace failed");
+            }
+            Ok(())
+        })?;
+
+        // On region_b: replace route to a's /20 via m (on b↔m veth)
+        let a_net: Ipv4Addr = format!("198.18.{}.0", a.idx as u16 * 16).parse()?;
+        let b_via = m_ip_on_mb;
+        netns.run_closure_in(&b_ns, move || {
+            let status = Command::new("ip")
+                .args(["route", "replace", &format!("{a_net}/20"), "via", &b_via.to_string()])
+                .status()
+                .context("ip route replace")?;
+            if !status.success() {
+                bail!("ip route replace failed");
+            }
+            Ok(())
+        })?;
+
+        // Mark link as broken.
+        drop(inner);
+        self.inner
+            .lock()
+            .unwrap()
+            .region_links
+            .get_mut(&link_key)
+            .unwrap()
+            .broken = true;
+        Ok(())
+    }
+
+    /// Restores a previously broken direct link between two regions.
+    pub fn restore_region_link(&self, a: &Region, b: &Region) -> Result<()> {
+        let inner = self.inner.lock().unwrap();
+
+        let link_key = Self::region_link_key(&a.name, &b.name);
+        let link = inner
+            .region_links
+            .get(&link_key)
+            .ok_or_else(|| anyhow!("no link between '{}' and '{}'", a.name, b.name))?;
+        if !link.broken {
+            bail!("link between '{}' and '{}' is not broken", a.name, b.name);
+        }
+
+        // Restore direct routes using the a↔b veth IPs.
+        let a_ns = inner.router(a.router_id).unwrap().ns.clone();
+        let b_ns = inner.router(b.router_id).unwrap().ns.clone();
+        let netns = Arc::clone(&inner.netns);
+
+        // Direct route on a: b's /20 via b's IP on the a↔b veth.
+        let b_net: Ipv4Addr = format!("198.18.{}.0", b.idx as u16 * 16).parse()?;
+        let b_direct_ip = if link_key.0 == a.name {
+            link.ip_b
+        } else {
+            link.ip_a
+        };
+        netns.run_closure_in(&a_ns, move || {
+            let status = Command::new("ip")
+                .args([
+                    "route",
+                    "replace",
+                    &format!("{b_net}/20"),
+                    "via",
+                    &b_direct_ip.to_string(),
+                ])
+                .status()
+                .context("ip route replace")?;
+            if !status.success() {
+                bail!("ip route replace failed");
+            }
+            Ok(())
+        })?;
+
+        // Direct route on b: a's /20 via a's IP on the a↔b veth.
+        let a_net: Ipv4Addr = format!("198.18.{}.0", a.idx as u16 * 16).parse()?;
+        let a_direct_ip = if link_key.0 == a.name {
+            link.ip_a
+        } else {
+            link.ip_b
+        };
+        netns.run_closure_in(&b_ns, move || {
+            let status = Command::new("ip")
+                .args([
+                    "route",
+                    "replace",
+                    &format!("{a_net}/20"),
+                    "via",
+                    &a_direct_ip.to_string(),
+                ])
+                .status()
+                .context("ip route replace")?;
+            if !status.success() {
+                bail!("ip route replace failed");
+            }
+            Ok(())
+        })?;
+
+        // Mark link as not broken.
+        drop(inner);
+        self.inner
+            .lock()
+            .unwrap()
+            .region_links
+            .get_mut(&link_key)
+            .unwrap()
+            .broken = false;
+        Ok(())
+    }
+
+    /// Creates three default regions (us, eu, asia) with typical one-way latencies.
+    ///
+    /// One-way latencies (RTT = 2×):
+    /// - us↔eu: 40ms (RTT ~80ms, real-world 70–100ms)
+    /// - us↔asia: 95ms (RTT ~190ms, real-world 170–220ms US East↔East Asia)
+    /// - eu↔asia: 120ms (RTT ~240ms, real-world 210–250ms EU↔East Asia)
+    pub async fn add_default_regions(&self) -> Result<DefaultRegions> {
+        let us = self.add_region("us").await?;
+        let eu = self.add_region("eu").await?;
+        let asia = self.add_region("asia").await?;
+        self.link_regions(&us, &eu, RegionLink::good(40)).await?;
+        self.link_regions(&us, &asia, RegionLink::good(95)).await?;
+        self.link_regions(&eu, &asia, RegionLink::good(120)).await?;
+        Ok(DefaultRegions { us, eu, asia })
+    }
+
+    fn region_link_key(a: &str, b: &str) -> (String, String) {
+        if a < b {
+            (a.to_string(), b.to_string())
+        } else {
+            (b.to_string(), a.to_string())
+        }
+    }
+
+    /// No-op stub — the old per-CIDR tc filter approach has been removed.
+    /// Use [`add_region`](Self::add_region) + [`link_regions`](Self::link_regions) instead.
+    #[deprecated(note = "use add_region + link_regions instead")]
+    pub fn set_region_latency(&self, _from: &str, _to: &str, _latency_ms: u32) {}
 
     /// Builds a map of `NETSIM_*` environment variables from the current lab state.
     pub fn env_vars(&self) -> std::collections::HashMap<String, String> {
@@ -1262,10 +1723,14 @@ pub struct RouterBuilder {
 }
 
 impl RouterBuilder {
-    /// Sets the region tag used for inter-region latency rules.
-    pub fn region(mut self, region: &str) -> Self {
+    /// Places this router in a region, connecting it to the region's bridge.
+    ///
+    /// The router becomes a sub-router of the region router. For `Nat::None`
+    /// routers, a return route is added in the region router's namespace.
+    pub fn region(mut self, region: &Region) -> Self {
         if self.result.is_ok() {
-            self.region = Some(region.to_string());
+            self.region = Some(region.name.clone());
+            self.upstream = Some(region.router_id);
         }
         self
     }
@@ -1379,7 +1844,24 @@ impl RouterBuilder {
             let has_v6 = self.ip_support.has_v6();
             let sub_switch =
                 inner.add_switch(&format!("{}-sub", self.name), None, None, None, None);
-            inner.connect_router_downlink(id, sub_switch, self.downstream_cidr)?;
+            // For Nat::None sub-routers in a region, allocate downstream /24
+            // from the region's pool instead of the global pool.
+            let downstream_cidr = if self.downstream_cidr.is_some() {
+                self.downstream_cidr
+            } else if downstream_pool == DownstreamPool::Public {
+                if let Some(region_name) = inner.router(id).and_then(|r| r.region.clone()) {
+                    if inner.regions.contains_key(&region_name) {
+                        Some(inner.alloc_region_public_cidr(&region_name)?)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            inner.connect_router_downlink(id, sub_switch, downstream_cidr)?;
             match self.upstream {
                 None => {
                     let ix_ip = if has_v4 {
@@ -1526,6 +2008,26 @@ impl RouterBuilder {
                 None
             };
 
+            // For sub-routers with public downstream: add return route in
+            // parent router's NS (e.g. region router) so return traffic can
+            // reach this sub-router's downstream /24.
+            let parent_route_v4 = if router.uplink.is_some()
+                && router.uplink != Some(ix_sw)
+                && router.cfg.downstream_pool == DownstreamPool::Public
+            {
+                if let (Some(cidr), Some(via), Some(ref owner_ns)) = (
+                    router.downstream_cidr,
+                    router.upstream_ip,
+                    &upstream_owner_ns,
+                ) {
+                    Some((owner_ns.clone(), cidr.addr(), cidr.prefix_len(), via))
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
             let has_v6 = router.cfg.ip_support.has_v6();
             let setup_data = RouterSetupData {
                 router,
@@ -1552,6 +2054,7 @@ impl RouterBuilder {
                 return_route_v6,
                 downlink_bridge_v6,
                 parent_route_v6,
+                parent_route_v4,
             };
 
             let netns = Arc::clone(&inner.netns);
@@ -1564,12 +2067,6 @@ impl RouterBuilder {
         }
         .instrument(self.lab_span.clone())
         .await?;
-
-        // Apply any pending region latency rules now that this router is ready.
-        let lab_handle = Lab {
-            inner: Arc::clone(&self.inner),
-        };
-        let _ = lab_handle.apply_region_latencies();
 
         let router = Router {
             id,

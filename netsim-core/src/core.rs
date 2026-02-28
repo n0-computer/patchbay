@@ -202,7 +202,7 @@ pub(crate) struct Switch {
     pub owner_router: Option<NodeId>,
     /// Stores the backing bridge name.
     pub bridge: Option<String>,
-    next_host: u8,
+    pub(crate) next_host: u8,
     next_host_v6: u8,
 }
 
@@ -339,12 +339,38 @@ impl DnsEntries {
     }
 }
 
+/// Per-region metadata stored in `NetworkCore`.
+#[derive(Clone, Debug)]
+pub(crate) struct RegionInfo {
+    /// Region index (1–16). Determines the /20 address block.
+    pub idx: u8,
+    /// NodeId of the region's internal router.
+    pub router_id: NodeId,
+    /// Next host offset for allocating IPs on the region bridge (.10, .11, ...).
+    pub next_host: u8,
+    /// Next downstream /24 offset within the region's /20 (1, 2, ... up to 15).
+    pub next_downstream: u8,
+}
+
+/// Stored data for one inter-region link.
+#[derive(Clone, Debug)]
+pub(crate) struct RegionLinkData {
+    /// Veth interface name inside region A's namespace.
+    pub ifname_a: String,
+    /// Veth interface name inside region B's namespace.
+    pub ifname_b: String,
+    /// IP of A's end of the /30.
+    pub ip_a: Ipv4Addr,
+    /// IP of B's end of the /30.
+    pub ip_b: Ipv4Addr,
+    /// Whether this link is currently broken.
+    pub broken: bool,
+}
+
 /// Stores mutable topology state and build-time allocators.
 pub(crate) struct NetworkCore {
     pub(crate) cfg: CoreConfig,
     pub(crate) netns: Arc<netns::NetnsManager>,
-    /// (from_region, to_region, latency_ms) pairs; applied as tc netem during build.
-    pub(crate) region_latencies: Vec<(String, String, u32)>,
     /// Cancellation token: cancelled on Drop to stop all spawned async tasks.
     pub(crate) cancel: CancellationToken,
     /// DNS host entries for `/etc/hosts` overlay in spawned commands.
@@ -361,6 +387,14 @@ pub(crate) struct NetworkCore {
     routers: HashMap<NodeId, RouterData>,
     switches: HashMap<NodeId, Switch>,
     nodes_by_name: HashMap<String, NodeId>,
+    /// Named regions. Key = user-facing name (e.g. "us"), not "region_us".
+    pub(crate) regions: HashMap<String, RegionInfo>,
+    /// Inter-region links. Key = canonically ordered (min, max) region names.
+    pub(crate) region_links: HashMap<(String, String), RegionLinkData>,
+    /// Next region index (1–16).
+    next_region_idx: u8,
+    /// Next /30 offset for inter-region veths in 203.0.113.0/24.
+    next_interregion_subnet: u8,
 }
 
 impl Drop for NetworkCore {
@@ -379,7 +413,6 @@ impl NetworkCore {
         let mut core = Self {
             netns: Arc::new(netns::NetnsManager::new_with_span(cfg.span.clone())),
             cfg,
-            region_latencies: Vec::new(),
             cancel: CancellationToken::new(),
             dns,
             next_id: 1,
@@ -394,6 +427,10 @@ impl NetworkCore {
             routers: HashMap::new(),
             switches: HashMap::new(),
             nodes_by_name: HashMap::new(),
+            regions: HashMap::new(),
+            region_links: HashMap::new(),
+            next_region_idx: 1,
+            next_interregion_subnet: 0,
         };
         let ix_sw = core.add_switch(
             "ix",
@@ -484,6 +521,11 @@ impl NetworkCore {
     /// Returns switch data for `id`.
     pub(crate) fn switch(&self, id: NodeId) -> Option<&Switch> {
         self.switches.get(&id)
+    }
+
+    /// Returns mutable switch data for `id`.
+    pub(crate) fn switch_mut(&mut self, id: NodeId) -> Option<&mut Switch> {
+        self.switches.get_mut(&id)
     }
 
     /// Returns the router identifier for `name`, or `None` if not a router.
@@ -919,6 +961,76 @@ impl NetworkCore {
         ))
     }
 
+    /// Allocates the next region index (1–16).
+    pub(crate) fn alloc_region_idx(&mut self) -> Result<u8> {
+        let idx = self.next_region_idx;
+        if idx > 16 {
+            bail!("region pool exhausted (max 16 regions)");
+        }
+        self.next_region_idx = idx + 1;
+        Ok(idx)
+    }
+
+    /// Allocates the next host IP on a region's bridge subnet.
+    /// Region `idx` → bridge at 198.18.{idx*16}.0/24, hosts start at .10.
+    pub(crate) fn alloc_region_host(&mut self, region_name: &str) -> Result<Ipv4Addr> {
+        let region = self
+            .regions
+            .get_mut(region_name)
+            .ok_or_else(|| anyhow!("unknown region '{}'", region_name))?;
+        let host = region.next_host;
+        if host == 0 || host == 255 {
+            bail!("region '{}' host pool exhausted", region_name);
+        }
+        region.next_host = host + 1;
+        let base_third = region.idx as u16 * 16;
+        Ok(Ipv4Addr::new(198, 18, base_third as u8, host))
+    }
+
+    /// Allocates the next public downstream /24 from a region's /20 pool.
+    /// Region `idx` → downstream starts at 198.18.{idx*16 + 1}.0/24.
+    pub(crate) fn alloc_region_public_cidr(&mut self, region_name: &str) -> Result<Ipv4Net> {
+        let region = self
+            .regions
+            .get_mut(region_name)
+            .ok_or_else(|| anyhow!("unknown region '{}'", region_name))?;
+        let offset = region.next_downstream;
+        if offset > 15 {
+            bail!(
+                "region '{}' public downstream pool exhausted (max 15 /24s)",
+                region_name
+            );
+        }
+        region.next_downstream = offset + 1;
+        let third = region.idx as u16 * 16 + offset as u16;
+        let cidr = Ipv4Net::new(Ipv4Addr::new(198, 18, third as u8, 0), 24)
+            .context("allocate region public /24")?;
+        Ok(cidr)
+    }
+
+    /// Allocates the next /30 from 203.0.113.0/24 for inter-region veths.
+    /// Returns (ip_a, ip_b) — the two usable IPs in the /30.
+    pub(crate) fn alloc_interregion_ips(&mut self) -> Result<(Ipv4Addr, Ipv4Addr)> {
+        let offset = self.next_interregion_subnet;
+        // Each /30 = 4 IPs, max offset = 63 (64 * 4 = 256, but .0 and .255 are unusable,
+        // and we need network + broadcast per /30, so: offsets 0..63 give base 0,4,8,...252)
+        if offset >= 64 {
+            bail!("inter-region /30 pool exhausted (max 64 links)");
+        }
+        self.next_interregion_subnet = offset + 1;
+        let base = offset as u16 * 4;
+        let ip_a = Ipv4Addr::new(203, 0, 113, (base + 1) as u8);
+        let ip_b = Ipv4Addr::new(203, 0, 113, (base + 2) as u8);
+        Ok((ip_a, ip_b))
+    }
+
+    /// Returns the /20 CIDR for a region (e.g. region idx 1 → 198.18.16.0/20).
+    pub(crate) fn region_cidr(idx: u8) -> Ipv4Net {
+        let third = idx as u16 * 16;
+        Ipv4Net::new(Ipv4Addr::new(198, 18, third as u8, 0), 20)
+            .expect("valid region /20")
+    }
+
     /// Returns an iterator over all devices in the topology.
     pub(crate) fn all_devices(&self) -> impl Iterator<Item = &DeviceData> {
         self.devices.values()
@@ -1035,6 +1147,9 @@ pub(crate) struct RouterSetupData {
     /// For sub-routers with NatV6Mode::None: route in the parent router's ns
     /// for the sub-router's downstream v6 subnet via the sub-router's WAN IP.
     pub parent_route_v6: Option<(String, Ipv6Addr, u8, Ipv6Addr)>, // (parent_ns, net, prefix, via)
+    /// For sub-routers with public downstream in a region: route in the parent
+    /// (region) router's ns for this sub-router's downstream /24 via its WAN IP.
+    pub parent_route_v4: Option<(String, Ipv4Addr, u8, Ipv4Addr)>, // (parent_ns, net, prefix, via)
 }
 
 /// Sets up a single router's namespaces, links, and NAT. No lock held.
@@ -1292,6 +1407,16 @@ pub(crate) async fn setup_router_async(
     if let Some((ref parent_ns, net6, prefix6, via6)) = data.parent_route_v6 {
         nl_run(netns, parent_ns, move |h: Netlink| async move {
             h.add_route_v6(net6, prefix6, via6).await.ok();
+            Ok(())
+        })
+        .await
+        .ok();
+    }
+
+    // Route in parent (region) router's ns for sub-router's public downstream.
+    if let Some((ref parent_ns, net4, prefix4, via4)) = data.parent_route_v4 {
+        nl_run(netns, parent_ns, move |h: Netlink| async move {
+            h.add_route_v4(net4, prefix4, via4).await.ok();
             Ok(())
         })
         .await

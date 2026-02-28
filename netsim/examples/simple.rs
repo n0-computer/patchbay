@@ -15,7 +15,7 @@ async fn async_main() -> Result<()> {
     let lab = Lab::new().await;
 
     // A "datacenter" router: downstream devices get "public" IPs.
-    let dc = lab.add_router("dc").region("eu").build().await?;
+    let dc = lab.add_router("dc").build().await?;
 
     // A "home" router with a NAT: downstream devices get private IPs.
     let home = lab.add_router("home").nat(Nat::Home).build().await?;
