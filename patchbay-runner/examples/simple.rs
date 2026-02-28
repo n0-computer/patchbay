@@ -70,8 +70,8 @@ async fn async_main() -> Result<()> {
         anyhow::Ok(())
     });
 
-    client_task.await??;
-    server_task.await??;
+    client_task?.await??;
+    server_task?.await??;
 
     Ok(())
 }

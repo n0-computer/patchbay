@@ -1299,33 +1299,51 @@ impl Lab {
     /// Returns a device handle by id, or `None` if the id is not a device.
     pub fn device(&self, id: NodeId) -> Option<Device> {
         let inner = self.inner.core.lock().unwrap();
-        inner
-            .device(id)
-            .map(|_| Device::new(id, Arc::clone(&self.inner)))
+        let d = inner.device(id)?;
+        Some(Device::new(
+            id,
+            d.name.as_str().into(),
+            d.ns.as_str().into(),
+            Arc::clone(&self.inner),
+        ))
     }
 
     /// Returns a router handle by id, or `None` if the id is not a router.
     pub fn router(&self, id: NodeId) -> Option<Router> {
         let inner = self.inner.core.lock().unwrap();
-        inner
-            .router(id)
-            .map(|_| Router::new(id, Arc::clone(&self.inner)))
+        let r = inner.router(id)?;
+        Some(Router::new(
+            id,
+            r.name.as_str().into(),
+            r.ns.as_str().into(),
+            Arc::clone(&self.inner),
+        ))
     }
 
     /// Looks up a device by name and returns a handle.
     pub fn device_by_name(&self, name: &str) -> Option<Device> {
         let inner = self.inner.core.lock().unwrap();
-        inner
-            .device_id_by_name(name)
-            .map(|id| Device::new(id, Arc::clone(&self.inner)))
+        let id = inner.device_id_by_name(name)?;
+        let d = inner.device(id)?;
+        Some(Device::new(
+            id,
+            d.name.as_str().into(),
+            d.ns.as_str().into(),
+            Arc::clone(&self.inner),
+        ))
     }
 
     /// Looks up a router by name and returns a handle.
     pub fn router_by_name(&self, name: &str) -> Option<Router> {
         let inner = self.inner.core.lock().unwrap();
-        inner
-            .router_id_by_name(name)
-            .map(|id| Router::new(id, Arc::clone(&self.inner)))
+        let id = inner.router_id_by_name(name)?;
+        let r = inner.router(id)?;
+        Some(Router::new(
+            id,
+            r.name.as_str().into(),
+            r.ns.as_str().into(),
+            Arc::clone(&self.inner),
+        ))
     }
 
     /// Returns handles for all devices.
@@ -1334,7 +1352,15 @@ impl Lab {
         inner
             .all_device_ids()
             .into_iter()
-            .map(|id| Device::new(id, Arc::clone(&self.inner)))
+            .filter_map(|id| {
+                let d = inner.device(id)?;
+                Some(Device::new(
+                    id,
+                    d.name.as_str().into(),
+                    d.ns.as_str().into(),
+                    Arc::clone(&self.inner),
+                ))
+            })
             .collect()
     }
 
@@ -1344,7 +1370,15 @@ impl Lab {
         inner
             .all_router_ids()
             .into_iter()
-            .map(|id| Router::new(id, Arc::clone(&self.inner)))
+            .filter_map(|id| {
+                let r = inner.router(id)?;
+                Some(Router::new(
+                    id,
+                    r.name.as_str().into(),
+                    r.ns.as_str().into(),
+                    Arc::clone(&self.inner),
+                ))
+            })
             .collect()
     }
 }
@@ -1768,7 +1802,16 @@ impl RouterBuilder {
             .instrument(self.lab_span.clone())
             .await?;
 
-        let router = Router::new(id, Arc::clone(&self.inner));
+        let router = {
+            let inner = self.inner.core.lock().unwrap();
+            let r = inner.router(id).unwrap();
+            Router::new(
+                id,
+                r.name.as_str().into(),
+                r.ns.as_str().into(),
+                Arc::clone(&self.inner),
+            )
+        };
         if let Some(cond) = self.downlink_condition {
             router.set_downlink_condition(Some(cond)).await?;
         }
@@ -1920,6 +1963,11 @@ impl DeviceBuilder {
         .instrument(self.lab_span.clone())
         .await?;
 
-        Ok(Device::new(self.id, Arc::clone(&self.inner)))
+        Ok(Device::new(
+            self.id,
+            dev.name.as_str().into(),
+            dev.ns.as_str().into(),
+            Arc::clone(&self.inner),
+        ))
     }
 }

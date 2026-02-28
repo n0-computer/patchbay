@@ -8,6 +8,10 @@
 //! Mutation methods (`set_nat_mode`, `set_link_condition`, etc.) are `async` and
 //! serialize per-node via a `tokio::sync::Mutex<()>` operation guard to prevent
 //! TOCTOU races when multiple tasks mutate the same node concurrently.
+//!
+//! [`Device::name`], [`Device::ns`], [`Router::name`], and [`Router::ns`] are
+//! cached at construction time and always available. Other accessors return
+//! `None` (or `Err` for mutation methods) if the node has been removed.
 
 use std::{
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
@@ -76,14 +80,14 @@ impl DeviceIface {
 /// Holds a [`NodeId`] and an `Arc` to the lab interior. All accessor methods
 /// briefly lock the mutex, read a value, and return owned data.
 ///
-/// # Panics
-///
-/// Most accessor methods (except [`name`](Self::name) and [`ns`](Self::ns))
-/// panic if the underlying device has been removed via [`Lab::remove_device`](crate::Lab::remove_device).
-/// Call [`Lab::device`](crate::Lab::device) to check existence first if the
-/// device may have been removed.
+/// [`name`](Self::name) and [`ns`](Self::ns) are cached and always available.
+/// Other accessors return `None` if the device has been removed via
+/// [`Lab::remove_device`](crate::Lab::remove_device). Mutation methods return
+/// `Err` in that case.
 pub struct Device {
     id: NodeId,
+    name: Arc<str>,
+    ns: Arc<str>,
     lab: Arc<LabInner>,
 }
 
@@ -91,6 +95,8 @@ impl Clone for Device {
     fn clone(&self) -> Self {
         Self {
             id: self.id,
+            name: Arc::clone(&self.name),
+            ns: Arc::clone(&self.ns),
             lab: Arc::clone(&self.lab),
         }
     }
@@ -98,13 +104,16 @@ impl Clone for Device {
 
 impl std::fmt::Debug for Device {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Device").field("id", &self.id).finish()
+        f.debug_struct("Device")
+            .field("id", &self.id)
+            .field("name", &self.name)
+            .finish()
     }
 }
 
 impl Device {
-    pub(crate) fn new(id: NodeId, lab: Arc<LabInner>) -> Self {
-        Self { id, lab }
+    pub(crate) fn new(id: NodeId, name: Arc<str>, ns: Arc<str>, lab: Arc<LabInner>) -> Self {
+        Self { id, name, ns, lab }
     }
 
     /// Returns the node identifier.
@@ -112,36 +121,45 @@ impl Device {
         self.id
     }
 
-    /// Returns the device name, or `""` if the device was removed.
-    pub fn name(&self) -> String {
-        self.lab
-            .try_with_device(self.id, |d| d.name.clone())
-            .unwrap_or_default()
+    /// Returns the device name.
+    pub fn name(&self) -> &str {
+        &self.name
     }
 
-    /// Returns the network namespace name for this device, or `""` if removed.
-    pub fn ns(&self) -> String {
-        self.lab
-            .try_with_device(self.id, |d| d.ns.clone())
-            .unwrap_or_default()
+    /// Returns the network namespace name for this device.
+    pub fn ns(&self) -> &str {
+        &self.ns
     }
 
     /// Returns the IPv4 address of the default interface, if assigned.
+    ///
+    /// Returns `None` if the device has been removed or no IPv4 is assigned.
     pub fn ip(&self) -> Option<Ipv4Addr> {
-        self.lab.with_device(self.id, |d| d.default_iface().ip)
+        self.lab
+            .with_device(self.id, |d| d.default_iface().ip)
+            .flatten()
     }
 
     /// Returns the IPv6 address of the default interface, if assigned.
+    ///
+    /// Returns `None` if the device has been removed or no IPv6 is assigned.
     pub fn ip6(&self) -> Option<Ipv6Addr> {
-        self.lab.with_device(self.id, |d| d.default_iface().ip_v6)
+        self.lab
+            .with_device(self.id, |d| d.default_iface().ip_v6)
+            .flatten()
     }
 
     /// Returns the configured MTU, if set.
+    ///
+    /// Returns `None` if the device has been removed or no MTU is configured.
     pub fn mtu(&self) -> Option<u32> {
-        self.lab.with_device(self.id, |d| d.mtu)
+        self.lab.with_device(self.id, |d| d.mtu).flatten()
     }
 
     /// Returns a snapshot of the named interface, if it exists.
+    ///
+    /// Returns `None` if the device has been removed or the interface does
+    /// not exist.
     pub fn iface(&self, name: &str) -> Option<DeviceIface> {
         let inner = self.lab.core.lock().unwrap();
         let dev = inner.device(self.id)?;
@@ -154,8 +172,9 @@ impl Device {
         })
     }
 
-    /// Returns a snapshot of the default interface.
-    pub fn default_iface(&self) -> DeviceIface {
+    /// Returns a snapshot of the default interface, or `None` if the device
+    /// has been removed.
+    pub fn default_iface(&self) -> Option<DeviceIface> {
         self.lab.with_device(self.id, |dev| {
             let iface = dev.default_iface();
             DeviceIface {
@@ -168,6 +187,8 @@ impl Device {
     }
 
     /// Returns snapshots of all interfaces.
+    ///
+    /// Returns an empty `Vec` if the device has been removed.
     pub fn interfaces(&self) -> Vec<DeviceIface> {
         let inner = self.lab.core.lock().unwrap();
         let dev = match inner.device(self.id) {
@@ -191,9 +212,10 @@ impl Device {
     ///
     /// # Errors
     ///
-    /// Returns an error if the netlink operation fails.
+    /// Returns an error if the device has been removed or the netlink
+    /// operation fails.
     pub async fn link_down(&self, ifname: &str) -> Result<()> {
-        let ns = self.lab.with_device(self.id, |d| d.ns.clone());
+        let ns = self.ns.to_string();
         let ifname = ifname.to_string();
         core::nl_run(&self.lab.netns, &ns, move |nl: Netlink| async move {
             nl.set_link_down(&ifname).await
@@ -205,12 +227,17 @@ impl Device {
     ///
     /// Linux removes routes via an interface when it goes admin-down, so we
     /// re-add the default route if `ifname` is the device's current `default_via`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the device has been removed or the netlink
+    /// operation fails.
     pub async fn link_up(&self, ifname: &str) -> Result<()> {
         let (ns, uplink, is_default_via) = {
             let inner = self.lab.core.lock().unwrap();
             let dev = inner
                 .device(self.id)
-                .ok_or_else(|| anyhow!("unknown device id"))?;
+                .ok_or_else(|| anyhow!("device removed"))?;
             let iface = dev
                 .iface(ifname)
                 .ok_or_else(|| anyhow!("interface '{}' not found", ifname))?;
@@ -244,16 +271,19 @@ impl Device {
     ///
     /// # Errors
     ///
-    /// Returns an error if `to` is not a known interface on this device or if
-    /// the netlink route replacement fails.
+    /// Returns an error if the device has been removed, `to` is not a known
+    /// interface on this device, or the netlink route replacement fails.
     pub async fn set_default_route(&self, to: &str) -> Result<()> {
-        let op = self.lab.with_device(self.id, |d| Arc::clone(&d.op));
+        let op = self
+            .lab
+            .with_device(self.id, |d| Arc::clone(&d.op))
+            .ok_or_else(|| anyhow!("device removed"))?;
         let _guard = op.lock().await;
         let (ns, impair, gw_ip) = {
             let inner = self.lab.core.lock().unwrap();
             let dev = inner
                 .device(self.id)
-                .ok_or_else(|| anyhow!("unknown device id"))?;
+                .ok_or_else(|| anyhow!("device removed"))?;
             let iface = dev
                 .iface(to)
                 .ok_or_else(|| anyhow!("interface '{}' not found", to))?;
@@ -281,19 +311,23 @@ impl Device {
     ///
     /// # Errors
     ///
-    /// Returns an error if the interface does not exist on this device.
+    /// Returns an error if the device has been removed or the interface does
+    /// not exist on this device.
     pub async fn set_link_condition(
         &self,
         ifname: &str,
         impair: Option<LinkCondition>,
     ) -> Result<()> {
-        let op = self.lab.with_device(self.id, |d| Arc::clone(&d.op));
+        let op = self
+            .lab
+            .with_device(self.id, |d| Arc::clone(&d.op))
+            .ok_or_else(|| anyhow!("device removed"))?;
         let _guard = op.lock().await;
         let (ns, resolved_ifname) = {
             let inner = self.lab.core.lock().unwrap();
             let dev = inner
                 .device(self.id)
-                .ok_or_else(|| anyhow!("unknown device id"))?;
+                .ok_or_else(|| anyhow!("device removed"))?;
             let iname = ifname.to_string();
             if dev.iface(&iname).is_none() {
                 bail!("interface '{}' not found", iname);
@@ -319,19 +353,19 @@ impl Device {
     /// The closure receives a cloned [`Device`] handle and can use
     /// `tokio::net` for network I/O that will go through this device's
     /// network namespace.
-    pub fn spawn<F, Fut, T>(&self, f: F) -> tokio::task::JoinHandle<T>
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the namespace worker is not available.
+    pub fn spawn<F, Fut, T>(&self, f: F) -> Result<tokio::task::JoinHandle<T>>
     where
         F: FnOnce(Device) -> Fut + Send + 'static,
         Fut: std::future::Future<Output = T> + Send + 'static,
         T: Send + 'static,
     {
-        let ns = self.lab.with_device(self.id, |d| d.ns.clone());
-        let rt = self
-            .lab
-            .rt_handle_for(&ns)
-            .expect("namespace has async worker");
+        let rt = self.lab.rt_handle_for(&self.ns)?;
         let handle = self.clone();
-        rt.spawn(f(handle))
+        Ok(rt.spawn(f(handle)))
     }
 
     /// Runs a short-lived sync closure in this device's network namespace.
@@ -344,8 +378,7 @@ impl Device {
         F: FnOnce() -> Result<R> + Send + 'static,
         R: Send + 'static,
     {
-        let ns = self.lab.with_device(self.id, |d| d.ns.clone());
-        self.lab.netns.run_closure_in(&ns, f)
+        self.lab.netns.run_closure_in(&self.ns, f)
     }
 
     /// Spawns a dedicated OS thread in this device's network namespace.
@@ -357,8 +390,7 @@ impl Device {
         F: FnOnce() -> Result<R> + Send + 'static,
         R: Send + 'static,
     {
-        let ns = self.lab.with_device(self.id, |d| d.ns.clone());
-        self.lab.netns.spawn_thread_in(&ns, f)
+        self.lab.netns.spawn_thread_in(&self.ns, f)
     }
 
     /// Spawns a raw command in this device's network namespace.
@@ -367,7 +399,7 @@ impl Device {
     /// `fork()` inherits the mount namespace, so child processes automatically see
     /// the DNS overlay without a separate `pre_exec` hook.
     pub fn spawn_command(&self, mut cmd: Command) -> Result<std::process::Child> {
-        let ns = self.lab.with_device(self.id, |d| d.ns.clone());
+        let ns = self.ns.to_string();
         self.lab.netns.run_closure_in(&ns, move || {
             cmd.spawn().context("spawn command in namespace")
         })
@@ -382,7 +414,7 @@ impl Device {
         &self,
         mut cmd: tokio::process::Command,
     ) -> Result<tokio::process::Child> {
-        let ns = self.lab.with_device(self.id, |d| d.ns.clone());
+        let ns = self.ns.to_string();
         let rt = self.lab.rt_handle_for(&ns)?;
         self.lab.netns.run_closure_in(&ns, move || {
             let _guard = rt.enter();
@@ -415,8 +447,7 @@ impl Device {
     /// The reflector echoes the sender's observed `ip:port` back, enabling
     /// NAT mapping tests via [`probe_udp_mapping`](Self::probe_udp_mapping).
     pub fn spawn_reflector(&self, bind: SocketAddr) -> Result<()> {
-        let ns = self.lab.with_device(self.id, |d| d.ns.clone());
-        self.lab.spawn_reflector_in(&ns, bind)
+        self.lab.spawn_reflector_in(&self.ns, bind)
     }
 
     /// Adds a hosts entry visible only to this device.
@@ -452,8 +483,9 @@ impl Device {
     ///
     /// # Errors
     ///
-    /// Returns an error if `ifname` does not exist on this device, if
-    /// `to_router` is unknown, or if the target router has no downstream switch.
+    /// Returns an error if the device has been removed, `ifname` does not exist
+    /// on this device, `to_router` is unknown, or the target router has no
+    /// downstream switch.
     pub async fn replug_iface(&self, ifname: &str, to_router: NodeId) -> Result<()> {
         use crate::core::{self, IfaceBuild};
 
@@ -462,7 +494,7 @@ impl Device {
             let mut inner = self.lab.core.lock().unwrap();
             let dev = inner
                 .device(self.id)
-                .ok_or_else(|| anyhow!("unknown device id"))?
+                .ok_or_else(|| anyhow!("device removed"))?
                 .clone();
             let iface = dev
                 .interfaces
@@ -533,7 +565,12 @@ impl Device {
         let new_ip_v6 = iface_build.dev_ip_v6;
         let new_uplink = {
             let inner = self.lab.core.lock().unwrap();
-            inner.router(to_router).unwrap().downlink.unwrap()
+            let router = inner
+                .router(to_router)
+                .ok_or_else(|| anyhow!("target router disappeared"))?;
+            router
+                .downlink
+                .ok_or_else(|| anyhow!("target router has no downlink"))?
         };
         core::wire_iface_async(netns, &prefix, &root_ns, iface_build).await?;
 
@@ -561,8 +598,8 @@ impl Device {
     ///
     /// # Errors
     ///
-    /// Returns an error if the interface has no IPv4 address or if the router's
-    /// address pool is exhausted.
+    /// Returns an error if the device has been removed, the interface has no
+    /// IPv4 address, or the router's address pool is exhausted.
     pub async fn renew_ip(&self, ifname: &str) -> Result<Ipv4Addr> {
         use crate::core;
 
@@ -571,7 +608,7 @@ impl Device {
             let mut inner = self.lab.core.lock().unwrap();
             let dev = inner
                 .device(self.id)
-                .ok_or_else(|| anyhow!("unknown device id"))?;
+                .ok_or_else(|| anyhow!("device removed"))?;
             let iface = dev
                 .iface(ifname)
                 .ok_or_else(|| anyhow!("device '{}' has no interface '{}'", dev.name, ifname))?;
@@ -610,6 +647,11 @@ impl Device {
     ///
     /// The address is added via netlink without removing existing addresses.
     /// Linux natively supports multiple addresses per interface.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the device has been removed or the interface does
+    /// not exist.
     pub async fn add_ip(&self, ifname: &str, ip: Ipv4Addr, prefix_len: u8) -> Result<()> {
         use crate::core;
 
@@ -617,7 +659,7 @@ impl Device {
             let inner = self.lab.core.lock().unwrap();
             let dev = inner
                 .device(self.id)
-                .ok_or_else(|| anyhow!("unknown device id"))?;
+                .ok_or_else(|| anyhow!("device removed"))?;
             let _ = dev
                 .iface(ifname)
                 .ok_or_else(|| anyhow!("device '{}' has no interface '{}'", dev.name, ifname))?;
@@ -639,14 +681,14 @@ impl Device {
 ///
 /// Same pattern as [`Device`]: holds [`NodeId`] + `Arc<LabInner>`.
 ///
-/// # Panics
-///
-/// Most accessor methods (except [`name`](Self::name) and [`ns`](Self::ns))
-/// panic if the underlying router has been removed via [`Lab::remove_router`](crate::Lab::remove_router).
-/// Call [`Lab::router`](crate::Lab::router) to check existence first if the
-/// router may have been removed.
+/// [`name`](Self::name) and [`ns`](Self::ns) are cached and always available.
+/// Other accessors return `None` if the router has been removed via
+/// [`Lab::remove_router`](crate::Lab::remove_router). Mutation methods return
+/// `Err` in that case.
 pub struct Router {
     id: NodeId,
+    name: Arc<str>,
+    ns: Arc<str>,
     lab: Arc<LabInner>,
 }
 
@@ -654,6 +696,8 @@ impl Clone for Router {
     fn clone(&self) -> Self {
         Self {
             id: self.id,
+            name: Arc::clone(&self.name),
+            ns: Arc::clone(&self.ns),
             lab: Arc::clone(&self.lab),
         }
     }
@@ -661,13 +705,16 @@ impl Clone for Router {
 
 impl std::fmt::Debug for Router {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Router").field("id", &self.id).finish()
+        f.debug_struct("Router")
+            .field("id", &self.id)
+            .field("name", &self.name)
+            .finish()
     }
 }
 
 impl Router {
-    pub(crate) fn new(id: NodeId, lab: Arc<LabInner>) -> Self {
-        Self { id, lab }
+    pub(crate) fn new(id: NodeId, name: Arc<str>, ns: Arc<str>, lab: Arc<LabInner>) -> Self {
+        Self { id, name, ns, lab }
     }
 
     /// Returns the node identifier.
@@ -675,72 +722,99 @@ impl Router {
         self.id
     }
 
-    /// Returns the router name, or `""` if the router was removed.
-    pub fn name(&self) -> String {
-        self.lab
-            .try_with_router(self.id, |r| r.name.clone())
-            .unwrap_or_default()
+    /// Returns the router name.
+    pub fn name(&self) -> &str {
+        &self.name
     }
 
-    /// Returns the network namespace name for this router, or `""` if removed.
-    pub fn ns(&self) -> String {
-        self.lab
-            .try_with_router(self.id, |r| r.ns.clone())
-            .unwrap_or_default()
+    /// Returns the network namespace name for this router.
+    pub fn ns(&self) -> &str {
+        &self.ns
     }
 
     /// Returns the region label, if set.
+    ///
+    /// Returns `None` if the router has been removed or no region is assigned.
     pub fn region(&self) -> Option<String> {
-        self.lab.with_router(self.id, |r| r.region.clone())
+        self.lab
+            .with_router(self.id, |r| r.region.clone())
+            .flatten()
     }
 
-    /// Returns the NAT mode.
-    pub fn nat_mode(&self) -> Nat {
+    /// Returns the NAT mode, or `None` if the router has been removed.
+    pub fn nat_mode(&self) -> Option<Nat> {
         self.lab.with_router(self.id, |r| r.cfg.nat)
     }
 
     /// Returns the configured MTU, if set.
+    ///
+    /// Returns `None` if the router has been removed or no MTU is configured.
     pub fn mtu(&self) -> Option<u32> {
-        self.lab.with_router(self.id, |r| r.cfg.mtu)
+        self.lab.with_router(self.id, |r| r.cfg.mtu).flatten()
     }
 
     /// Returns the uplink (WAN-side) IP, if connected.
+    ///
+    /// Returns `None` if the router has been removed or no uplink IP is assigned.
     pub fn uplink_ip(&self) -> Option<Ipv4Addr> {
-        self.lab.with_router(self.id, |r| r.upstream_ip)
+        self.lab
+            .with_router(self.id, |r| r.upstream_ip)
+            .flatten()
     }
 
     /// Returns the downstream subnet CIDR, if allocated.
+    ///
+    /// Returns `None` if the router has been removed or no downstream is allocated.
     pub fn downstream_cidr(&self) -> Option<Ipv4Net> {
-        self.lab.with_router(self.id, |r| r.downstream_cidr)
+        self.lab
+            .with_router(self.id, |r| r.downstream_cidr)
+            .flatten()
     }
 
     /// Returns the downstream gateway address, if allocated.
+    ///
+    /// Returns `None` if the router has been removed or no downstream is allocated.
     pub fn downstream_gw(&self) -> Option<Ipv4Addr> {
-        self.lab.with_router(self.id, |r| r.downstream_gw)
+        self.lab
+            .with_router(self.id, |r| r.downstream_gw)
+            .flatten()
     }
 
-    /// Returns which IP address families this router supports.
-    pub fn ip_support(&self) -> IpSupport {
+    /// Returns which IP address families this router supports, or `None` if
+    /// the router has been removed.
+    pub fn ip_support(&self) -> Option<IpSupport> {
         self.lab.with_router(self.id, |r| r.cfg.ip_support)
     }
 
     /// Returns the uplink (WAN-side) IPv6 address, if connected.
+    ///
+    /// Returns `None` if the router has been removed or no IPv6 uplink is assigned.
     pub fn uplink_ip_v6(&self) -> Option<Ipv6Addr> {
-        self.lab.with_router(self.id, |r| r.upstream_ip_v6)
+        self.lab
+            .with_router(self.id, |r| r.upstream_ip_v6)
+            .flatten()
     }
 
     /// Returns the downstream IPv6 subnet CIDR, if allocated.
+    ///
+    /// Returns `None` if the router has been removed or no IPv6 downstream is allocated.
     pub fn downstream_cidr_v6(&self) -> Option<Ipv6Net> {
-        self.lab.with_router(self.id, |r| r.downstream_cidr_v6)
+        self.lab
+            .with_router(self.id, |r| r.downstream_cidr_v6)
+            .flatten()
     }
 
     /// Returns the downstream IPv6 gateway address, if allocated.
+    ///
+    /// Returns `None` if the router has been removed or no IPv6 downstream is allocated.
     pub fn downstream_gw_v6(&self) -> Option<Ipv6Addr> {
-        self.lab.with_router(self.id, |r| r.downstream_gw_v6)
+        self.lab
+            .with_router(self.id, |r| r.downstream_gw_v6)
+            .flatten()
     }
 
-    /// Returns the IPv6 NAT mode.
-    pub fn nat_v6_mode(&self) -> NatV6Mode {
+    /// Returns the IPv6 NAT mode, or `None` if the router has been removed.
+    pub fn nat_v6_mode(&self) -> Option<NatV6Mode> {
         self.lab.with_router(self.id, |r| r.cfg.nat_v6)
     }
 
@@ -755,9 +829,12 @@ impl Router {
     ///
     /// # Errors
     ///
-    /// Returns an error if the router id is unknown or if nftables commands fail.
+    /// Returns an error if the router has been removed or nftables commands fail.
     pub async fn set_nat_mode(&self, mode: Nat) -> Result<()> {
-        let op = self.lab.with_router(self.id, |r| Arc::clone(&r.op));
+        let op = self
+            .lab
+            .with_router(self.id, |r| Arc::clone(&r.op))
+            .ok_or_else(|| anyhow!("router removed"))?;
         let _guard = op.lock().await;
         let (ns, wan_if, wan_ip, cfg) = {
             let mut inner = self.lab.core.lock().unwrap();
@@ -783,15 +860,18 @@ impl Router {
     ///
     /// # Errors
     ///
-    /// Returns an error if the router id is unknown or if nftables commands fail.
+    /// Returns an error if the router has been removed or nftables commands fail.
     pub async fn set_nat_v6_mode(&self, mode: NatV6Mode) -> Result<()> {
-        let op = self.lab.with_router(self.id, |r| Arc::clone(&r.op));
+        let op = self
+            .lab
+            .with_router(self.id, |r| Arc::clone(&r.op))
+            .ok_or_else(|| anyhow!("router removed"))?;
         let _guard = op.lock().await;
         let (ns, wan_if, lan_prefix, wan_prefix) = {
             let inner = self.lab.core.lock().unwrap();
             let router = inner
                 .router(self.id)
-                .ok_or_else(|| anyhow!("unknown router id"))?;
+                .ok_or_else(|| anyhow!("router removed"))?;
             let wan_if = router.wan_ifname(inner.ix_sw()).to_string();
             let lan_prefix = router
                 .downstream_cidr_v6
@@ -820,7 +900,7 @@ impl Router {
             let mut inner = self.lab.core.lock().unwrap();
             let router = inner
                 .router_mut(self.id)
-                .ok_or_else(|| anyhow!("unknown router id"))?;
+                .ok_or_else(|| anyhow!("router removed"))?;
             router.cfg.nat_v6 = mode;
         }
         Ok(())
@@ -833,15 +913,14 @@ impl Router {
     ///
     /// # Errors
     ///
-    /// Returns an error if `conntrack -F` fails. Requires the `conntrack`
-    /// binary from `conntrack-tools`.
+    /// Returns an error if the router has been removed or `conntrack -F` fails.
     pub async fn flush_nat_state(&self) -> Result<()> {
-        let op = self.lab.with_router(self.id, |r| Arc::clone(&r.op));
+        let op = self
+            .lab
+            .with_router(self.id, |r| Arc::clone(&r.op))
+            .ok_or_else(|| anyhow!("router removed"))?;
         let _guard = op.lock().await;
-        let ns = {
-            let inner = self.lab.core.lock().unwrap();
-            inner.router_ns(self.id)?.to_string()
-        };
+        let ns = self.ns.to_string();
         let rt = self.lab.netns.rt_handle_for(&ns)?;
         rt.spawn(async move {
             let st = tokio::process::Command::new("conntrack")
@@ -863,19 +942,19 @@ impl Router {
     ///
     /// The closure receives a cloned [`Router`] handle and can use
     /// `tokio::net` for network I/O through this router's namespace.
-    pub fn spawn<F, Fut, T>(&self, f: F) -> tokio::task::JoinHandle<T>
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the namespace worker is not available.
+    pub fn spawn<F, Fut, T>(&self, f: F) -> Result<tokio::task::JoinHandle<T>>
     where
         F: FnOnce(Router) -> Fut + Send + 'static,
         Fut: std::future::Future<Output = T> + Send + 'static,
         T: Send + 'static,
     {
-        let ns = self.lab.with_router(self.id, |r| r.ns.clone());
-        let rt = self
-            .lab
-            .rt_handle_for(&ns)
-            .expect("namespace has async worker");
+        let rt = self.lab.rt_handle_for(&self.ns)?;
         let handle = self.clone();
-        rt.spawn(f(handle))
+        Ok(rt.spawn(f(handle)))
     }
 
     /// Runs a short-lived sync closure in this router's network namespace.
@@ -887,8 +966,7 @@ impl Router {
         F: FnOnce() -> Result<R> + Send + 'static,
         R: Send + 'static,
     {
-        let ns = self.lab.with_router(self.id, |r| r.ns.clone());
-        self.lab.netns.run_closure_in(&ns, f)
+        self.lab.netns.run_closure_in(&self.ns, f)
     }
 
     /// Spawns a dedicated OS thread in this router's network namespace.
@@ -899,15 +977,14 @@ impl Router {
         F: FnOnce() -> Result<R> + Send + 'static,
         R: Send + 'static,
     {
-        let ns = self.lab.with_router(self.id, |r| r.ns.clone());
-        self.lab.netns.spawn_thread_in(&ns, f)
+        self.lab.netns.spawn_thread_in(&self.ns, f)
     }
 
     /// Spawns a [`Command`] in this router's network namespace.
     ///
     /// The child inherits the namespace's DNS bind-mounts.
     pub fn spawn_command(&self, mut cmd: Command) -> Result<std::process::Child> {
-        let ns = self.lab.with_router(self.id, |r| r.ns.clone());
+        let ns = self.ns.to_string();
         self.lab.netns.run_closure_in(&ns, move || {
             cmd.spawn().context("spawn command in namespace")
         })
@@ -920,7 +997,7 @@ impl Router {
         &self,
         mut cmd: tokio::process::Command,
     ) -> Result<tokio::process::Child> {
-        let ns = self.lab.with_router(self.id, |r| r.ns.clone());
+        let ns = self.ns.to_string();
         let rt = self.lab.rt_handle_for(&ns)?;
         self.lab.netns.run_closure_in(&ns, move || {
             let _guard = rt.enter();
@@ -933,14 +1010,22 @@ impl Router {
     /// Affects download-direction traffic to **all** downstream devices.
     /// Pass `Some(condition)` to apply `tc netem` rules on the bridge, or
     /// `None` to remove any existing impairment.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the router has been removed.
     pub async fn set_downlink_condition(&self, impair: Option<LinkCondition>) -> Result<()> {
-        let op = self.lab.with_router(self.id, |r| Arc::clone(&r.op));
+        let op = self
+            .lab
+            .with_router(self.id, |r| Arc::clone(&r.op))
+            .ok_or_else(|| anyhow!("router removed"))?;
         let _guard = op.lock().await;
         debug!(router = ?self.id, impair = ?impair, "router: set_downlink_condition");
-        let (ns, bridge) = self
+        let bridge = self
             .lab
-            .with_router(self.id, |r| (r.ns.clone(), r.downlink_bridge.clone()));
-        apply_or_remove_impair(&self.lab.netns, &ns, &bridge, impair).await;
+            .with_router(self.id, |r| r.downlink_bridge.clone())
+            .ok_or_else(|| anyhow!("router removed"))?;
+        apply_or_remove_impair(&self.lab.netns, &self.ns, &bridge, impair).await;
         Ok(())
     }
 
@@ -951,16 +1036,19 @@ impl Router {
     ///
     /// # Errors
     ///
-    /// Returns an error if the router id is unknown or if nftables commands fail.
+    /// Returns an error if the router has been removed or nftables commands fail.
     pub async fn set_firewall(&self, fw: Firewall) -> Result<()> {
-        let op = self.lab.with_router(self.id, |r| Arc::clone(&r.op));
+        let op = self
+            .lab
+            .with_router(self.id, |r| Arc::clone(&r.op))
+            .ok_or_else(|| anyhow!("router removed"))?;
         let _guard = op.lock().await;
-        let ns = {
+        {
             let mut inner = self.lab.core.lock().unwrap();
-            let r = inner.router_mut(self.id).context("unknown router id")?;
+            let r = inner.router_mut(self.id).context("router removed")?;
             r.cfg.firewall = fw.clone();
-            r.ns.clone()
-        };
+        }
+        let ns = self.ns.to_string();
         // Always remove existing rules first, then apply new ones.
         core::remove_firewall(&self.lab.netns, &ns).await?;
         core::apply_firewall(&self.lab.netns, &ns, &fw).await
@@ -970,8 +1058,7 @@ impl Router {
     ///
     /// See [`Device::spawn_reflector`] for details.
     pub fn spawn_reflector(&self, bind: SocketAddr) -> Result<()> {
-        let ns = self.lab.with_router(self.id, |r| r.ns.clone());
-        self.lab.spawn_reflector_in(&ns, bind)
+        self.lab.spawn_reflector_in(&self.ns, bind)
     }
 }
 

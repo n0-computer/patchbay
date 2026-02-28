@@ -404,13 +404,7 @@ impl LabInner {
 
     // ── with() helpers ──────────────────────────────────────────────────
 
-    pub(crate) fn with_device<R>(&self, id: NodeId, f: impl FnOnce(&DeviceData) -> R) -> R {
-        let core = self.core.lock().unwrap();
-        f(core.device(id).expect("device handle has valid id"))
-    }
-
-    /// Like [`with_device`], but returns `None` if the device was removed.
-    pub(crate) fn try_with_device<R>(
+    pub(crate) fn with_device<R>(
         &self,
         id: NodeId,
         f: impl FnOnce(&DeviceData) -> R,
@@ -419,29 +413,13 @@ impl LabInner {
         core.device(id).map(f)
     }
 
-    pub(crate) fn with_device_mut<R>(&self, id: NodeId, f: impl FnOnce(&mut DeviceData) -> R) -> R {
-        let mut core = self.core.lock().unwrap();
-        f(core.device_mut(id).expect("device handle has valid id"))
-    }
-
-    pub(crate) fn with_router<R>(&self, id: NodeId, f: impl FnOnce(&RouterData) -> R) -> R {
-        let core = self.core.lock().unwrap();
-        f(core.router(id).expect("router handle has valid id"))
-    }
-
-    /// Like [`with_router`], but returns `None` if the router was removed.
-    pub(crate) fn try_with_router<R>(
+    pub(crate) fn with_router<R>(
         &self,
         id: NodeId,
         f: impl FnOnce(&RouterData) -> R,
     ) -> Option<R> {
         let core = self.core.lock().unwrap();
         core.router(id).map(f)
-    }
-
-    pub(crate) fn with_router_mut<R>(&self, id: NodeId, f: impl FnOnce(&mut RouterData) -> R) -> R {
-        let mut core = self.core.lock().unwrap();
-        f(core.router_mut(id).expect("router handle has valid id"))
     }
 }
 
@@ -544,14 +522,6 @@ impl NetworkCore {
     /// Returns the lab root namespace name.
     pub(crate) fn root_ns(&self) -> &str {
         &self.cfg.root_ns
-    }
-
-    /// Returns the namespace name for router `id`.
-    pub(crate) fn router_ns(&self, id: NodeId) -> Result<&str> {
-        self.routers
-            .get(&id)
-            .map(|r| r.ns.as_str())
-            .ok_or_else(|| anyhow!("unknown router id"))
     }
 
     /// Returns router data for `id`.

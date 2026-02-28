@@ -125,7 +125,7 @@ async fn probe_reflexive_addr(
             crate::test_utils::probe_udp(reflector, Duration::from_millis(500), Some(bind_addr))
         }),
         Proto::Tcp => dev
-            .spawn(move |_| async move { probe_tcp(reflector).await })
+            .spawn(move |_| async move { probe_tcp(reflector).await })?
             .await
             .context("probe_tcp task panicked")?,
     }
@@ -254,7 +254,7 @@ async fn build_nat_case(
     ix.spawn_reflector(r_ix)?;
 
     // TCP reflector on the DC namespace's async worker.
-    dc.spawn(move |_| async move { spawn_tcp_reflector(r_dc).await })
+    dc.spawn(move |_| async move { spawn_tcp_reflector(r_dc).await })?
         .await
         .context("tcp reflector task panicked")??;
 
@@ -299,7 +299,7 @@ async fn build_dual_nat_lab(mode_a: Nat, mode_b: Nat, port_base: u16) -> Result<
     let reflector = SocketAddr::new(IpAddr::V4(dc_ip), port_base);
 
     dc.spawn_reflector(reflector)?;
-    dc.spawn(move |_| async move { spawn_tcp_reflector(reflector).await })
+    dc.spawn(move |_| async move { spawn_tcp_reflector(reflector).await })?
         .await
         .context("tcp reflector task panicked")??;
 
@@ -357,7 +357,7 @@ async fn build_single_nat_case(
         (Nat::None, _) => dev.ip().unwrap(),
         _ => nat.uplink_ip().context("no uplink ip")?,
     };
-    Ok((lab, dev_ns, r_dc, r_ix, expected_ip))
+    Ok((lab, dev_ns.to_string(), r_dc, r_ix, expected_ip))
 }
 
 /// Spawns an async TCP echo server that loops accepting connections,
@@ -721,13 +721,13 @@ async fn smoke_tcp_dc_roundtrip() -> Result<()> {
 
     let dc_ip = dc.uplink_ip().context("no uplink ip")?;
     let bind = SocketAddr::new(IpAddr::V4(dc_ip), 9000);
-    dc.spawn(move |_| async move { spawn_tcp_echo_server(bind).await })
+    dc.spawn(move |_| async move { spawn_tcp_echo_server(bind).await })?
         .await
         .context("tcp echo task panicked")??;
 
     tokio::time::sleep(Duration::from_millis(250)).await;
 
-    dev.spawn(move |_| async move { tcp_roundtrip(bind).await })
+    dev.spawn(move |_| async move { tcp_roundtrip(bind).await })?
         .await
         .context("tcp roundtrip task panicked")??;
     Ok(())
@@ -1206,7 +1206,7 @@ async fn dynamic_set_impair_changes_rtt() -> Result<()> {
     let base_rtt = dev.run_sync(move || crate::test_utils::udp_rtt(r))?;
 
     let dev_handle = lab.device_by_name("dev1").unwrap();
-    let default_if = dev_handle.default_iface().name().to_string();
+    let default_if = dev_handle.default_iface().unwrap().name().to_string();
     dev_handle
         .set_link_condition(&default_if, Some(LinkCondition::Mobile4G))
         .await?;
@@ -1363,12 +1363,12 @@ async fn tcp_reflector_basic() -> Result<()> {
     let dc_ip = dc.uplink_ip().context("no dc uplink ip")?;
     let r = SocketAddr::new(IpAddr::V4(dc_ip), 13_000);
 
-    dc.spawn(move |_| async move { spawn_tcp_reflector(r).await })
+    dc.spawn(move |_| async move { spawn_tcp_reflector(r).await })?
         .await
         .context("tcp reflector task panicked")??;
 
     let obs = dev
-        .spawn(move |_| async move { probe_tcp(r).await })
+        .spawn(move |_| async move { probe_tcp(r).await })?
         .await
         .context("probe_tcp task panicked")??;
     assert_ne!(obs.port(), 0, "expected non-zero port");
@@ -1610,17 +1610,17 @@ async fn switch_route_tcp_roundtrip() -> Result<()> {
     let dc_ip = dc.uplink_ip().context("no dc uplink ip")?;
 
     let r = SocketAddr::new(IpAddr::V4(dc_ip), 16_410);
-    dc.spawn(move |_| async move { spawn_tcp_echo_server(r).await })
+    dc.spawn(move |_| async move { spawn_tcp_echo_server(r).await })?
         .await
         .context("tcp echo server task panicked")??;
     tokio::time::sleep(Duration::from_millis(200)).await;
-    dev.spawn(move |_| async move { tcp_roundtrip(r).await })
+    dev.spawn(move |_| async move { tcp_roundtrip(r).await })?
         .await
         .context("tcp roundtrip task panicked")??;
 
     dev.set_default_route("eth1").await?;
     tokio::time::sleep(Duration::from_millis(100)).await;
-    dev.spawn(move |_| async move { tcp_roundtrip(r).await })
+    dev.spawn(move |_| async move { tcp_roundtrip(r).await })?
         .await
         .context("tcp roundtrip task panicked")??;
 
@@ -1841,17 +1841,17 @@ async fn link_down_up_connectivity() -> Result<()> {
                 }
                 Proto::Tcp => {
                     // Persistent echo server: handles all connections for the whole test.
-                    dc.spawn(move |_| async move { spawn_tcp_echo_server(r).await })
+                    dc.spawn(move |_| async move { spawn_tcp_echo_server(r).await })?
                         .await
                         .context("tcp echo server task panicked")??;
                     tokio::time::sleep(Duration::from_millis(200)).await;
-                    dev.spawn(move |_| async move { tcp_roundtrip(r).await })
+                    dev.spawn(move |_| async move { tcp_roundtrip(r).await })?
                         .await
                         .context("tcp roundtrip panicked")?
                         .context("before link_down")?;
                     dev_handle.link_down("eth0").await?;
                     if dev
-                        .spawn(move |_| async move { tcp_roundtrip(r).await })
+                        .spawn(move |_| async move { tcp_roundtrip(r).await })?
                         .await
                         .map(|r| r.is_ok())
                         .unwrap_or(false)
@@ -1860,7 +1860,7 @@ async fn link_down_up_connectivity() -> Result<()> {
                     }
                     dev_handle.link_up("eth0").await?;
                     tokio::time::sleep(Duration::from_millis(200)).await;
-                    dev.spawn(move |_| async move { tcp_roundtrip(r).await })
+                    dev.spawn(move |_| async move { tcp_roundtrip(r).await })?
                         .await
                         .context("tcp roundtrip panicked")?
                         .context("after link_up")?;
@@ -2334,7 +2334,7 @@ async fn rate_limit_udp_upload() -> Result<()> {
     let start = Instant::now();
     dev.spawn(move |_| async move {
         crate::test_utils::udp_send_recv_count(r, 300, 1024, Duration::from_secs(5)).await
-    })
+    })?
     .await??;
     let elapsed = start.elapsed();
     assert!(
@@ -2374,7 +2374,7 @@ async fn rate_limit_udp_download() -> Result<()> {
     dev_id
         .spawn(move |_| async move {
             crate::test_utils::udp_send_recv_count(r, 300, 1024, Duration::from_secs(5)).await
-        })
+        })?
         .await??;
     let elapsed = start.elapsed();
     assert!(
@@ -2556,7 +2556,7 @@ async fn loss_udp_moderate() -> Result<()> {
     let (_, received) = dev
         .spawn(move |_| async move {
             crate::test_utils::udp_send_recv_count(r, 1000, 64, Duration::from_secs(8)).await
-        })
+        })?
         .await??;
     assert!(
         received >= 200,
@@ -2597,7 +2597,7 @@ async fn loss_udp_high() -> Result<()> {
     let (_, received) = dev
         .spawn(move |_| async move {
             crate::test_utils::udp_send_recv_count(r, 100, 64, Duration::from_secs(3)).await
-        })
+        })?
         .await??;
     assert!(
         received <= 30,
@@ -2692,7 +2692,7 @@ async fn loss_udp_both_directions() -> Result<()> {
     let (_, received) = dev
         .spawn(move |_| async move {
             crate::test_utils::udp_send_recv_count(r, 100, 64, Duration::from_secs(3)).await
-        })
+        })?
         .await??;
     assert!(
         received <= 80,
@@ -2919,7 +2919,7 @@ async fn rate_dynamic_decrease() -> Result<()> {
     join_sink(sink)?;
 
     let dev_handle = lab.device_by_name("dev").unwrap();
-    let default_if = dev_handle.default_iface().name().to_string();
+    let default_if = dev_handle.default_iface().unwrap().name().to_string();
     dev_handle
         .set_link_condition(
             &default_if,
@@ -2984,7 +2984,7 @@ async fn rate_dynamic_remove() -> Result<()> {
     join_sink(sink)?;
 
     let dev_handle = lab.device_by_name("dev").unwrap();
-    let default_if = dev_handle.default_iface().name().to_string();
+    let default_if = dev_handle.default_iface().unwrap().name().to_string();
     dev_handle.set_link_condition(&default_if, None).await?;
 
     let sink = dc.spawn_thread(move || tcp_sink(SocketAddr::new(IpAddr::V4(dc_ip), 18_901)))?;
@@ -3020,7 +3020,7 @@ async fn latency_dynamic_add_remove() -> Result<()> {
     let baseline = dev.run_sync(move || crate::test_utils::udp_rtt(r))?;
 
     let dev_handle = lab.device_by_name("dev").unwrap();
-    let default_if = dev_handle.default_iface().name().to_string();
+    let default_if = dev_handle.default_iface().unwrap().name().to_string();
     dev_handle
         .set_link_condition(
             &default_if,
@@ -3086,7 +3086,7 @@ async fn rate_presets() -> Result<()> {
                     .spawn(move |_| async move {
                         crate::test_utils::udp_send_recv_count(r, 1000, 64, Duration::from_secs(5))
                             .await
-                    })
+                    })?
                     .await??;
                 if received == 1000 {
                     bail!(
@@ -3502,7 +3502,7 @@ async fn dns_tokio_lookup() -> Result<()> {
             .and_then(|mut addrs| addrs.next())
             .map(|a| a.ip())
     });
-    let resolved = jh.await.unwrap();
+    let resolved = jh?.await.unwrap();
     info!(?resolved, "tokio lookup_host via spawn");
     assert_eq!(
         resolved,
@@ -3535,7 +3535,7 @@ async fn dns_hickory_system_resolver() -> Result<()> {
         let lookup = resolver.lookup_ip("hickorytest.patchbay").await.ok()?;
         lookup.iter().next()
     });
-    let resolved = jh.await.unwrap();
+    let resolved = jh?.await.unwrap();
     info!(?resolved, "hickory resolver via spawn");
     assert_eq!(
         resolved,
@@ -3717,8 +3717,8 @@ async fn router_v6_accessors() -> Result<()> {
         .build()
         .await?;
 
-    assert_eq!(dc.ip_support(), IpSupport::DualStack);
-    assert_eq!(dc.nat_v6_mode(), NatV6Mode::Masquerade);
+    assert_eq!(dc.ip_support(), Some(IpSupport::DualStack));
+    assert_eq!(dc.nat_v6_mode(), Some(NatV6Mode::Masquerade));
     assert!(dc.uplink_ip_v6().is_some(), "should have v6 uplink");
     assert!(
         dc.downstream_cidr_v6().is_some(),
@@ -3731,7 +3731,7 @@ async fn router_v6_accessors() -> Result<()> {
 
     // V4-only router should not have v6 addresses.
     let dc4 = lab.add_router("dc4").build().await?;
-    assert_eq!(dc4.ip_support(), IpSupport::V4Only);
+    assert_eq!(dc4.ip_support(), Some(IpSupport::V4Only));
     assert!(
         dc4.uplink_ip_v6().is_none(),
         "v4-only should have no v6 uplink"
@@ -3761,7 +3761,7 @@ async fn device_v6_accessors() -> Result<()> {
         .await?;
 
     assert!(dev.ip6().is_some(), "dual-stack device should have v6");
-    let iface = dev.default_iface();
+    let iface = dev.default_iface().unwrap();
     assert!(iface.ip6().is_some(), "dual-stack iface should have v6");
 
     // V4-only device
@@ -4049,8 +4049,8 @@ async fn patchbay_basic_holepunch() -> Result<()> {
         })
         .await
     });
-    tokio::try_join!(async { task1.await.unwrap() }, async {
-        task2.await.unwrap()
+    tokio::try_join!(async { task1?.await.unwrap() }, async {
+        task2?.await.unwrap()
     },)?;
     Ok(())
 }
@@ -4131,8 +4131,8 @@ async fn patchbay_holepunch_home_nat() -> Result<()> {
             })
             .await
         });
-        tokio::try_join!(async { task1.await.unwrap() }, async {
-            task2.await.unwrap()
+        tokio::try_join!(async { task1?.await.unwrap() }, async {
+            task2?.await.unwrap()
         },)?;
         info!("--- {label} OK ---");
     }
@@ -4416,9 +4416,9 @@ async fn remove_device_smoke() -> Result<()> {
     // Remove it.
     lab.remove_device(dev.id())?;
 
-    // After removal, the device is gone from the lab.
-    // Trying to get data from the handle returns defaults.
-    assert_eq!(dev.name(), "");
+    // After removal, cached fields still work but data accessors return None.
+    assert_eq!(dev.name(), "dev");
+    assert!(dev.ip().is_none(), "ip() should be None after removal");
 
     Ok(())
 }
@@ -4452,8 +4452,9 @@ async fn remove_router_smoke() -> Result<()> {
     lab.remove_device(dev.id())?;
     lab.remove_router(dc.id())?;
 
-    // Router is gone.
-    assert_eq!(dc.name(), "");
+    // Router is gone — cached fields still work, data accessors return None.
+    assert_eq!(dc.name(), "dc");
+    assert!(dc.uplink_ip().is_none(), "uplink_ip() should be None after removal");
 
     Ok(())
 }
@@ -4785,9 +4786,9 @@ async fn firewall_corporate_blocks_udp() -> Result<()> {
 
     // TCP on port 443 should work.
     let tcp_bind = SocketAddr::new(IpAddr::V4(dc_ip), 443);
-    dc.spawn(async move |_| spawn_tcp_echo_server(tcp_bind).await)
+    dc.spawn(async move |_| spawn_tcp_echo_server(tcp_bind).await)?
         .await??;
-    dev.spawn(async move |_| tcp_roundtrip(tcp_bind).await)
+    dev.spawn(async move |_| tcp_roundtrip(tcp_bind).await)?
         .await??;
 
     Ok(())
@@ -4830,9 +4831,9 @@ async fn firewall_captive_portal_blocks_udp() -> Result<()> {
 
     // TCP on port 8080 (non-standard) should work — captive portal only blocks UDP.
     let tcp_bind = SocketAddr::new(IpAddr::V4(dc_ip), 8080);
-    dc.spawn(async move |_| spawn_tcp_echo_server(tcp_bind).await)
+    dc.spawn(async move |_| spawn_tcp_echo_server(tcp_bind).await)?
         .await??;
-    dev.spawn(async move |_| tcp_roundtrip(tcp_bind).await)
+    dev.spawn(async move |_| tcp_roundtrip(tcp_bind).await)?
         .await??;
 
     Ok(())

@@ -642,7 +642,7 @@ async fn inspect_command(input: PathBuf, work_dir: PathBuf) -> Result<()> {
             .with_context(|| "unknown router '{name}'")?;
         let child = r.spawn_command(keeper_commmand())?;
         node_keeper_pids.insert(name.clone(), child.id());
-        node_namespaces.insert(name.clone(), r.ns());
+        node_namespaces.insert(name.clone(), r.ns().to_string());
         if let Some(ip) = r.uplink_ip() {
             node_ips_v4.insert(name, ip.to_string());
         }
@@ -653,7 +653,7 @@ async fn inspect_command(input: PathBuf, work_dir: PathBuf) -> Result<()> {
             .with_context(|| "unknown device '{name}'")?;
         let child = d.spawn_command(keeper_commmand())?;
         node_keeper_pids.insert(name.clone(), child.id());
-        node_namespaces.insert(name.clone(), d.ns());
+        node_namespaces.insert(name.clone(), d.ns().to_string());
         if let Some(ip) = d.ip() {
             node_ips_v4.insert(name.clone(), ip.to_string());
         }
