@@ -12,7 +12,7 @@ fn main() -> Result<()> {
 #[tokio::main]
 async fn async_main() -> Result<()> {
     // Create a lab with a global "internet switch" to which routers are connected.
-    let lab = Lab::new().await;
+    let lab = Lab::new().await?;
 
     // A "datacenter" router: downstream devices get "public" IPs.
     let dc = lab.add_router("dc").build().await?;

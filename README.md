@@ -17,7 +17,7 @@ See the [`simple.rs`](patchbay-runner/examples/simple.rs) example for the runnab
 patchbay::init_userns().expect("failed to enter user namespace");
 
 // Create a lab (async - sets up the root namespace and IX bridge).
-let lab = Lab::new().await;
+let lab = Lab::new().await?;
 
 // A "datacenter" router: downstream devices get public IPs.
 let dc = lab.add_router("dc").region("eu").build().await?;
@@ -121,7 +121,7 @@ is dropped, workers are shut down and namespaces disappear automatically.
 ### Building a topology
 
 ```rust
-let lab = Lab::new().await;
+let lab = Lab::new().await?;
 
 // Routers
 let dc = lab.add_router("dc")

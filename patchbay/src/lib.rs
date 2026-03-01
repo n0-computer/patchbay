@@ -45,7 +45,7 @@
 //! # use patchbay::{Lab, Nat};
 //! # #[tokio::main(flavor = "current_thread")]
 //! # async fn main() -> anyhow::Result<()> {
-//! let lab = Lab::new().await;
+//! let lab = Lab::new().await?;
 //! let isp = lab
 //!     .add_router("isp1")
 //!     .nat(Nat::Cgnat)

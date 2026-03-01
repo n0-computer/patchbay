@@ -270,7 +270,7 @@ impl Lab {
     /// Creates a new lab with default address ranges and IX settings.
     ///
     /// Sets up the root network namespace and IX bridge before returning.
-    pub async fn new() -> Self {
+    pub async fn new() -> Result<Self> {
         let pid = std::process::id();
         let pid_tag = pid % 9999 + 1;
         let lab_seq = LAB_COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -299,7 +299,7 @@ impl Lab {
             private_cidr_v6: net6(Ipv6Addr::new(0xfd10, 0, 0, 0, 0, 0, 0, 0), 48),
             span: lab_span,
         })
-        .expect("Lab::new: failed to create DNS entries directory");
+        .context("failed to create DNS entries directory")?;
         let netns = Arc::new(crate::netns::NetnsManager::new());
         let cancel = tokio_util::sync::CancellationToken::new();
         let lab = Self {
@@ -313,8 +313,8 @@ impl Lab {
         let cfg = lab.inner.core.lock().unwrap().cfg.clone();
         setup_root_ns_async(&cfg, &netns)
             .await
-            .expect("Lab::new: failed to set up root namespace");
-        lab
+            .context("failed to set up root namespace")?;
+        Ok(lab)
     }
 
     /// Returns the unique resource prefix associated with this lab instance.
@@ -331,7 +331,7 @@ impl Lab {
 
     /// Builds a `Lab` from a parsed config, creating all namespaces and links.
     pub async fn from_config(cfg: crate::config::LabConfig) -> Result<Self> {
-        let lab = Self::new().await;
+        let lab = Self::new().await?;
 
         // Region latency pairs from TOML config are ignored in the new region API.
         // TODO: support regions in TOML config via add_region / link_regions.

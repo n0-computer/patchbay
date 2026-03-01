@@ -224,7 +224,7 @@ async fn build_nat_case(
     wiring: UplinkWiring,
     port_base: u16,
 ) -> Result<(Lab, NatTestCtx)> {
-    let lab = Lab::new().await;
+    let lab = Lab::new().await?;
     let dc = lab.add_router("dc").build().await?;
     let upstream = match wiring {
         UplinkWiring::DirectIx => None,
@@ -283,7 +283,7 @@ async fn build_nat_case(
 }
 
 async fn build_dual_nat_lab(mode_a: Nat, mode_b: Nat, port_base: u16) -> Result<DualNatLab> {
-    let lab = Lab::new().await;
+    let lab = Lab::new().await?;
     let dc = lab.add_router("dc").build().await?;
     let nat_a = lab.add_router("nat-a").nat(mode_a).build().await?;
     let nat_b = lab.add_router("nat-b").nat(mode_b).build().await?;
@@ -319,7 +319,7 @@ async fn build_single_nat_case(
     wiring: UplinkWiring,
     port_base: u16,
 ) -> Result<(Lab, String, SocketAddr, SocketAddr, Ipv4Addr)> {
-    let lab = Lab::new().await;
+    let lab = Lab::new().await?;
     let dc = lab.add_router("dc").build().await?;
     let upstream = match wiring {
         UplinkWiring::DirectIx => None,
@@ -420,7 +420,7 @@ async fn tcp_roundtrip(target: SocketAddr) -> Result<()> {
 #[traced_test]
 async fn nat_dest_independent_keeps_port() -> Result<()> {
     check_caps()?;
-    let lab = Lab::new().await;
+    let lab = Lab::new().await?;
     let isp = lab.add_router("isp1").build().await?;
     let dc = lab.add_router("dc1").build().await?;
     let home = lab
@@ -463,7 +463,7 @@ async fn nat_dest_independent_keeps_port() -> Result<()> {
 #[traced_test]
 async fn nat_dest_dependent_changes_port() -> Result<()> {
     check_caps()?;
-    let lab = Lab::new().await;
+    let lab = Lab::new().await?;
     let isp = lab.add_router("isp1").build().await?;
     let dc = lab.add_router("dc1").build().await?;
     let home = lab
@@ -506,7 +506,7 @@ async fn nat_dest_dependent_changes_port() -> Result<()> {
 #[traced_test]
 async fn cgnat_hides_behind_isp_public_ip() -> Result<()> {
     check_caps()?;
-    let lab = Lab::new().await;
+    let lab = Lab::new().await?;
     let isp = lab.add_router("isp1").nat(Nat::Cgnat).build().await?;
     let dc = lab.add_router("dc1").build().await?;
     let home = lab
@@ -542,7 +542,7 @@ async fn cgnat_hides_behind_isp_public_ip() -> Result<()> {
 #[traced_test]
 async fn iroh_nat_like_nodes_report_public_203_mapped_addrs() -> Result<()> {
     check_caps()?;
-    let lab = Lab::new().await;
+    let lab = Lab::new().await?;
     let dc = lab.add_router("dc").build().await?;
     let isp = lab.add_router("isp").nat(Nat::Cgnat).build().await?;
     let lan_provider = lab
@@ -651,7 +651,7 @@ gateway = "lan1"
 #[traced_test]
 async fn smoke_ping_gateway() -> Result<()> {
     check_caps()?;
-    let lab = Lab::new().await;
+    let lab = Lab::new().await?;
     let isp = lab.add_router("isp1").build().await?;
     let home = lab
         .add_router("home1")
@@ -675,7 +675,7 @@ async fn smoke_ping_gateway() -> Result<()> {
 #[traced_test]
 async fn smoke_udp_dc_roundtrip() -> Result<()> {
     check_caps()?;
-    let lab = Lab::new().await;
+    let lab = Lab::new().await?;
     let isp = lab.add_router("isp1").build().await?;
     let dc = lab.add_router("dc1").build().await?;
     let home = lab
@@ -704,7 +704,7 @@ async fn smoke_udp_dc_roundtrip() -> Result<()> {
 #[traced_test]
 async fn smoke_tcp_dc_roundtrip() -> Result<()> {
     check_caps()?;
-    let lab = Lab::new().await;
+    let lab = Lab::new().await?;
     let isp = lab.add_router("isp1").build().await?;
     let dc = lab.add_router("dc1").build().await?;
     let home = lab
@@ -737,7 +737,7 @@ async fn smoke_tcp_dc_roundtrip() -> Result<()> {
 #[traced_test]
 async fn smoke_ping_home_to_isp() -> Result<()> {
     check_caps()?;
-    let lab = Lab::new().await;
+    let lab = Lab::new().await?;
     let isp = lab.add_router("isp1").build().await?;
     let home = lab
         .add_router("home1")
@@ -756,7 +756,7 @@ async fn smoke_ping_home_to_isp() -> Result<()> {
 #[traced_test]
 async fn smoke_ping_isp_to_ix_and_dc() -> Result<()> {
     check_caps()?;
-    let lab = Lab::new().await;
+    let lab = Lab::new().await?;
     let isp = lab.add_router("isp1").build().await?;
     let dc = lab.add_router("dc1").build().await?;
 
@@ -772,7 +772,7 @@ async fn smoke_ping_isp_to_ix_and_dc() -> Result<()> {
 #[traced_test]
 async fn smoke_nat_homes_can_ping_public_relay_device() -> Result<()> {
     check_caps()?;
-    let lab = Lab::new().await;
+    let lab = Lab::new().await?;
 
     let dc = lab.add_router("dc").build().await?;
     let lan_provider = lab
@@ -901,7 +901,7 @@ async fn nat_mapping_port_behavior_by_mode_and_wiring() -> Result<()> {
 #[traced_test]
 async fn nat_private_reachability_isolated_public_reachable() -> Result<()> {
     check_caps()?;
-    let lab = Lab::new().await;
+    let lab = Lab::new().await?;
     let dc = lab.add_router("dc").build().await?;
     let nat_a = lab.add_router("nat-a").nat(Nat::Home).build().await?;
     let nat_b = lab.add_router("nat-b").nat(Nat::Home).build().await?;
@@ -970,7 +970,7 @@ async fn nat_private_reachability_isolated_public_reachable() -> Result<()> {
 #[traced_test]
 async fn smoke_device_to_device_same_lan() -> Result<()> {
     check_caps()?;
-    let lab = Lab::new().await;
+    let lab = Lab::new().await?;
     let isp = lab.add_router("isp1").build().await?;
     let home = lab
         .add_router("home1")
@@ -1000,7 +1000,7 @@ async fn smoke_device_to_device_same_lan() -> Result<()> {
 #[allow(deprecated)]
 async fn latency_directional_between_regions() -> Result<()> {
     check_caps()?;
-    let lab = Lab::new().await;
+    let lab = Lab::new().await?;
     lab.set_region_latency("eu", "us", 30);
     lab.set_region_latency("us", "eu", 70);
     let dc_eu = lab.add_router("dc-eu").build().await?;
@@ -1052,7 +1052,7 @@ async fn latency_directional_between_regions() -> Result<()> {
 #[allow(deprecated)]
 async fn latency_inter_region_dc_to_dc() -> Result<()> {
     check_caps()?;
-    let lab = Lab::new().await;
+    let lab = Lab::new().await?;
     lab.set_region_latency("eu", "us", 50);
     lab.set_region_latency("us", "eu", 50);
     let dc_eu = lab.add_router("dc-eu").build().await?;
@@ -1085,7 +1085,7 @@ async fn latency_device_impair_adds_delay() -> Result<()> {
 
     #[allow(deprecated)]
     async fn measure(impair: Option<LinkCondition>) -> Result<Duration> {
-        let lab = Lab::new().await;
+        let lab = Lab::new().await?;
         lab.set_region_latency("eu", "us", 40);
         lab.set_region_latency("us", "eu", 40);
         let dc_eu = lab.add_router("dc-eu").build().await?;
@@ -1119,7 +1119,7 @@ async fn latency_device_impair_adds_delay() -> Result<()> {
 #[allow(deprecated)]
 async fn latency_manual_impair_applies() -> Result<()> {
     check_caps()?;
-    let lab = Lab::new().await;
+    let lab = Lab::new().await?;
     let dc_eu = lab.add_router("dc-eu").build().await?;
     let dc_us = lab.add_router("dc-us").build().await?;
     lab.set_region_latency("eu", "us", 20);
@@ -1155,7 +1155,7 @@ async fn latency_manual_impair_applies() -> Result<()> {
 #[traced_test]
 async fn isp_home_wan_pool_selection() -> Result<()> {
     check_caps()?;
-    let lab = Lab::new().await;
+    let lab = Lab::new().await?;
     let isp_public = lab.add_router("isp-public").build().await?;
     let isp_cgnat = lab.add_router("isp-cgnat").nat(Nat::Cgnat).build().await?;
     let home_public = lab
@@ -1190,7 +1190,7 @@ async fn isp_home_wan_pool_selection() -> Result<()> {
 #[traced_test]
 async fn dynamic_set_impair_changes_rtt() -> Result<()> {
     check_caps()?;
-    let lab = Lab::new().await;
+    let lab = Lab::new().await?;
     let dc = lab.add_router("dc1").build().await?;
     let dev = lab
         .add_device("dev1")
@@ -1229,7 +1229,7 @@ async fn dynamic_set_impair_changes_rtt() -> Result<()> {
 #[traced_test]
 async fn dynamic_link_down_up_connectivity() -> Result<()> {
     check_caps()?;
-    let lab = Lab::new().await;
+    let lab = Lab::new().await?;
     let dc = lab.add_router("dc1").build().await?;
     let dev = lab
         .add_device("dev1")
@@ -1264,7 +1264,7 @@ async fn dynamic_link_down_up_connectivity() -> Result<()> {
 #[traced_test]
 async fn dynamic_switch_route_changes_path() -> Result<()> {
     check_caps()?;
-    let lab = Lab::new().await;
+    let lab = Lab::new().await?;
     let dc = lab.add_router("dc1").build().await?;
     let isp = lab.add_router("isp1").build().await?;
     let dev = lab
@@ -1352,7 +1352,7 @@ gateway = "dc1"
 #[tokio::test(flavor = "current_thread")]
 #[traced_test]
 async fn tcp_reflector_basic() -> Result<()> {
-    let lab = Lab::new().await;
+    let lab = Lab::new().await?;
     let dc = lab.add_router("dc").build().await?;
     let dev = lab
         .add_device("dev")
@@ -1671,7 +1671,7 @@ async fn switch_route_udp_reflexive_change() -> Result<()> {
 #[tokio::test(flavor = "current_thread")]
 #[traced_test]
 async fn switch_uplink_udp_smoke() -> Result<()> {
-    let lab = Lab::new().await;
+    let lab = Lab::new().await?;
     let dc = lab.add_router("dc").build().await?;
     let nat_a = lab.add_router("nat-a").nat(Nat::Home).build().await?;
     let nat_b = lab.add_router("nat-b").nat(Nat::Home).build().await?;
@@ -1704,7 +1704,7 @@ async fn switch_uplink_udp_smoke() -> Result<()> {
 #[tokio::test(flavor = "current_thread")]
 #[traced_test]
 async fn switch_uplink_reflexive_ip_changes() -> Result<()> {
-    let lab = Lab::new().await;
+    let lab = Lab::new().await?;
     let dc = lab.add_router("dc").build().await?;
     let nat_a = lab.add_router("nat-a").nat(Nat::Home).build().await?;
     let nat_b = lab.add_router("nat-b").nat(Nat::Home).build().await?;
@@ -1749,7 +1749,7 @@ async fn switch_uplink_reflexive_ip_changes() -> Result<()> {
 #[tokio::test(flavor = "current_thread")]
 #[traced_test]
 async fn custom_downstream_cidr() -> Result<()> {
-    let lab = Lab::new().await;
+    let lab = Lab::new().await?;
     let dc = lab.add_router("dc").build().await?;
     let custom = lab
         .add_router("custom")
@@ -1802,7 +1802,7 @@ async fn link_down_up_connectivity() -> Result<()> {
     let mut failures = Vec::new();
     for proto in Proto::iter() {
         let result: Result<()> = async {
-            let lab = Lab::new().await;
+            let lab = Lab::new().await?;
             let dc = lab.add_router("dc").build().await?;
             let dev = lab
                 .add_device("dev")
@@ -2004,7 +2004,7 @@ async fn nat_rebind_conntrack_flush() -> Result<()> {
 #[tokio::test(flavor = "current_thread")]
 #[traced_test]
 async fn devices_same_nat_share_ip() -> Result<()> {
-    let lab = Lab::new().await;
+    let lab = Lab::new().await?;
     let dc = lab.add_router("dc").build().await?;
     let nat = lab.add_router("nat").nat(Nat::Home).build().await?;
     let dev_a = lab
@@ -2036,7 +2036,7 @@ async fn devices_same_nat_share_ip() -> Result<()> {
 #[tokio::test(flavor = "current_thread")]
 #[traced_test]
 async fn devices_diff_nat_isolate() -> Result<()> {
-    let lab = Lab::new().await;
+    let lab = Lab::new().await?;
     let dc = lab.add_router("dc").build().await?;
     let nat_a = lab.add_router("nat-a").nat(Nat::Home).build().await?;
     let nat_b = lab.add_router("nat-b").nat(Nat::Home).build().await?;
@@ -2086,7 +2086,7 @@ async fn devices_diff_nat_isolate() -> Result<()> {
 #[tokio::test(flavor = "current_thread")]
 #[traced_test]
 async fn hairpin_fullcone_udp() -> Result<()> {
-    let lab = Lab::new().await;
+    let lab = Lab::new().await?;
     let dc = lab.add_router("dc").build().await?;
     let r = lab.add_router("r").nat(Nat::FullCone).build().await?;
     let a = lab
@@ -2135,7 +2135,7 @@ async fn hairpin_fullcone_udp() -> Result<()> {
 #[tokio::test(flavor = "current_thread")]
 #[traced_test]
 async fn hairpin_home_blocked() -> Result<()> {
-    let lab = Lab::new().await;
+    let lab = Lab::new().await?;
     let dc = lab.add_router("dc").build().await?;
     let r = lab.add_router("r").nat(Nat::Home).build().await?;
     let a = lab
@@ -2181,7 +2181,7 @@ async fn hairpin_home_blocked() -> Result<()> {
 #[tokio::test(flavor = "current_thread")]
 #[traced_test]
 async fn hairpin_custom_enabled() -> Result<()> {
-    let lab = Lab::new().await;
+    let lab = Lab::new().await?;
     let dc = lab.add_router("dc").build().await?;
     let r = lab
         .add_router("r")
@@ -2241,7 +2241,7 @@ fn join_sink(join: thread::JoinHandle<Result<()>>) -> Result<()> {
 #[tokio::test(flavor = "current_thread")]
 #[traced_test]
 async fn rate_limit_tcp_upload() -> Result<()> {
-    let lab = Lab::new().await;
+    let lab = Lab::new().await?;
     let dc = lab.add_router("dc").build().await?;
     let dev = lab
         .add_device("dev")
@@ -2274,7 +2274,7 @@ async fn rate_limit_tcp_upload() -> Result<()> {
 #[tokio::test(flavor = "current_thread")]
 #[traced_test]
 async fn rate_limit_tcp_download() -> Result<()> {
-    let lab = Lab::new().await;
+    let lab = Lab::new().await?;
     let dc = lab.add_router("dc").build().await?;
     let dev_id = lab
         .add_device("dev")
@@ -2308,7 +2308,7 @@ async fn rate_limit_tcp_download() -> Result<()> {
 #[traced_test]
 async fn rate_limit_udp_upload() -> Result<()> {
     use std::time::Instant;
-    let lab = Lab::new().await;
+    let lab = Lab::new().await?;
     let dc = lab.add_router("dc").build().await?;
     let dev = lab
         .add_device("dev")
@@ -2348,7 +2348,7 @@ async fn rate_limit_udp_upload() -> Result<()> {
 #[traced_test]
 async fn rate_limit_udp_download() -> Result<()> {
     use std::time::Instant;
-    let lab = Lab::new().await;
+    let lab = Lab::new().await?;
     let dc = lab.add_router("dc").build().await?;
     let dev_id = lab
         .add_device("dev")
@@ -2387,7 +2387,7 @@ async fn rate_limit_udp_download() -> Result<()> {
 #[tokio::test(flavor = "current_thread")]
 #[traced_test]
 async fn rate_limit_asymmetric() -> Result<()> {
-    let lab = Lab::new().await;
+    let lab = Lab::new().await?;
     let dc = lab.add_router("dc").build().await?;
     let dev_id = lab
         .add_device("dev")
@@ -2441,7 +2441,7 @@ async fn rate_limit_asymmetric() -> Result<()> {
 #[tokio::test(flavor = "current_thread")]
 #[traced_test]
 async fn rate_limit_multihop_bottleneck() -> Result<()> {
-    let lab = Lab::new().await;
+    let lab = Lab::new().await?;
     let dc = lab.add_router("dc").build().await?;
     let isp = lab.add_router("isp").build().await?;
     let nat = lab
@@ -2486,7 +2486,7 @@ async fn rate_limit_multihop_bottleneck() -> Result<()> {
 #[tokio::test(flavor = "current_thread")]
 #[traced_test]
 async fn rate_limit_two_hops_stack() -> Result<()> {
-    let lab = Lab::new().await;
+    let lab = Lab::new().await?;
     let dc = lab.add_router("dc").build().await?;
     let dev = lab
         .add_device("dev")
@@ -2529,7 +2529,7 @@ async fn rate_limit_two_hops_stack() -> Result<()> {
 #[tokio::test(flavor = "current_thread")]
 #[traced_test]
 async fn loss_udp_moderate() -> Result<()> {
-    let lab = Lab::new().await;
+    let lab = Lab::new().await?;
     let dc = lab.add_router("dc").build().await?;
     let dev = lab
         .add_device("dev")
@@ -2572,7 +2572,7 @@ async fn loss_udp_moderate() -> Result<()> {
 #[tokio::test(flavor = "current_thread")]
 #[traced_test]
 async fn loss_udp_high() -> Result<()> {
-    let lab = Lab::new().await;
+    let lab = Lab::new().await?;
     let dc = lab.add_router("dc").build().await?;
     let dev = lab
         .add_device("dev")
@@ -2609,7 +2609,7 @@ async fn loss_udp_high() -> Result<()> {
 #[tokio::test(flavor = "current_thread")]
 #[traced_test]
 async fn loss_tcp_integrity() -> Result<()> {
-    let lab = Lab::new().await;
+    let lab = Lab::new().await?;
     let dc = lab.add_router("dc").build().await?;
     let dev = lab
         .add_device("dev")
@@ -2658,7 +2658,7 @@ async fn loss_tcp_integrity() -> Result<()> {
 #[tokio::test(flavor = "current_thread")]
 #[traced_test]
 async fn loss_udp_both_directions() -> Result<()> {
-    let lab = Lab::new().await;
+    let lab = Lab::new().await?;
     let dc = lab.add_router("dc").build().await?;
     let dev = lab
         .add_device("dev")
@@ -2707,7 +2707,7 @@ async fn loss_udp_both_directions() -> Result<()> {
 #[traced_test]
 #[ignore = "hangs — download-direction impair path needs async worker fix"]
 async fn latency_download_direction() -> Result<()> {
-    let lab = Lab::new().await;
+    let lab = Lab::new().await?;
     let dc = lab.add_router("dc").build().await?;
     let dev = lab
         .add_device("dev")
@@ -2741,7 +2741,7 @@ async fn latency_download_direction() -> Result<()> {
 #[tokio::test(flavor = "current_thread")]
 #[traced_test]
 async fn latency_upload_and_download() -> Result<()> {
-    let lab = Lab::new().await;
+    let lab = Lab::new().await?;
     let dc = lab.add_router("dc").build().await?;
     let dev = lab
         .add_device("dev")
@@ -2785,7 +2785,7 @@ async fn latency_upload_and_download() -> Result<()> {
 #[ignore = "TODO: migrate to new region API (add_region + link_regions)"]
 #[allow(deprecated)]
 async fn latency_device_plus_region() -> Result<()> {
-    let lab = Lab::new().await;
+    let lab = Lab::new().await?;
     lab.set_region_latency("eu", "us", 40);
     lab.set_region_latency("us", "eu", 40);
     let dc_eu = lab.add_router("dc-eu").build().await?;
@@ -2837,7 +2837,7 @@ async fn latency_device_plus_region() -> Result<()> {
 #[tokio::test(flavor = "current_thread")]
 #[traced_test]
 async fn latency_multihop_chain() -> Result<()> {
-    let lab = Lab::new().await;
+    let lab = Lab::new().await?;
     let dc = lab.add_router("dc").build().await?;
     let isp = lab.add_router("isp").build().await?;
     let nat = lab
@@ -2892,7 +2892,7 @@ async fn latency_multihop_chain() -> Result<()> {
 #[tokio::test(flavor = "current_thread")]
 #[traced_test]
 async fn rate_dynamic_decrease() -> Result<()> {
-    let lab = Lab::new().await;
+    let lab = Lab::new().await?;
     let dc = lab.add_router("dc").build().await?;
     let dev = lab
         .add_device("dev")
@@ -2957,7 +2957,7 @@ async fn rate_dynamic_decrease() -> Result<()> {
 #[tokio::test(flavor = "current_thread")]
 #[traced_test]
 async fn rate_dynamic_remove() -> Result<()> {
-    let lab = Lab::new().await;
+    let lab = Lab::new().await?;
     let dc = lab.add_router("dc").build().await?;
     let dev = lab
         .add_device("dev")
@@ -3004,7 +3004,7 @@ async fn rate_dynamic_remove() -> Result<()> {
 #[tokio::test(flavor = "current_thread")]
 #[traced_test]
 async fn latency_dynamic_add_remove() -> Result<()> {
-    let lab = Lab::new().await;
+    let lab = Lab::new().await?;
     let dc = lab.add_router("dc").build().await?;
     let dev = lab
         .add_device("dev")
@@ -3063,7 +3063,7 @@ async fn rate_presets() -> Result<()> {
     let mut failures = Vec::new();
     for (preset, min_latency_ms, loss_pct) in cases {
         let result: Result<()> = async {
-            let lab = Lab::new().await;
+            let lab = Lab::new().await?;
             let dc = lab.add_router("dc").build().await?;
             let dev = lab
                 .add_device("dev")
@@ -3155,7 +3155,7 @@ fn impair_presets_to_limits() {
 #[traced_test]
 async fn downlink_condition_builder() -> Result<()> {
     check_caps()?;
-    let lab = Lab::new().await;
+    let lab = Lab::new().await?;
     let dc = lab
         .add_router("dc")
         .downlink_condition(LinkCondition::Manual(LinkLimits {
@@ -3190,7 +3190,7 @@ async fn downlink_condition_builder() -> Result<()> {
 #[tokio::test(flavor = "current_thread")]
 #[traced_test]
 async fn dns_entry_visible_in_spawned_cmd() -> Result<()> {
-    let lab = Lab::new().await;
+    let lab = Lab::new().await?;
     let dc = lab.add_router("dc").build().await?;
     let dev = lab
         .add_device("dev")
@@ -3226,7 +3226,7 @@ async fn dns_entry_visible_in_spawned_cmd() -> Result<()> {
 #[tokio::test(flavor = "current_thread")]
 #[traced_test]
 async fn dns_entry_lab_wide() -> Result<()> {
-    let lab = Lab::new().await;
+    let lab = Lab::new().await?;
     let dc = lab.add_router("dc").build().await?;
     let dev1 = lab
         .add_device("dev1")
@@ -3261,7 +3261,7 @@ async fn dns_entry_lab_wide() -> Result<()> {
 #[tokio::test(flavor = "current_thread")]
 #[traced_test]
 async fn dns_entry_device_specific() -> Result<()> {
-    let lab = Lab::new().await;
+    let lab = Lab::new().await?;
     let dc = lab.add_router("dc").build().await?;
     let dev1 = lab
         .add_device("dev1")
@@ -3304,7 +3304,7 @@ async fn dns_entry_device_specific() -> Result<()> {
 #[tokio::test(flavor = "current_thread")]
 #[traced_test]
 async fn dns_resolve_in_process() -> Result<()> {
-    let lab = Lab::new().await;
+    let lab = Lab::new().await?;
     let dc = lab.add_router("dc").build().await?;
     let dev = lab
         .add_device("dev")
@@ -3340,7 +3340,7 @@ async fn dns_resolve_in_process() -> Result<()> {
 #[tokio::test(flavor = "current_thread")]
 #[traced_test]
 async fn dns_entry_after_build() -> Result<()> {
-    let lab = Lab::new().await;
+    let lab = Lab::new().await?;
     let dc = lab.add_router("dc").build().await?;
     let dev = lab
         .add_device("dev")
@@ -3384,7 +3384,7 @@ async fn dns_entry_after_build() -> Result<()> {
 #[tokio::test(flavor = "current_thread")]
 #[traced_test]
 async fn dns_hosts_file_content() -> Result<()> {
-    let lab = Lab::new().await;
+    let lab = Lab::new().await?;
     let dc = lab.add_router("dc").build().await?;
     let dev = lab
         .add_device("dev")
@@ -3431,7 +3431,7 @@ async fn dns_hosts_file_content() -> Result<()> {
 #[tokio::test(flavor = "current_thread")]
 #[traced_test]
 async fn dns_std_to_socket_addrs_in_process() -> Result<()> {
-    let lab = Lab::new().await;
+    let lab = Lab::new().await?;
     let dc = lab.add_router("dc").build().await?;
     let dev = lab
         .add_device("dev")
@@ -3484,7 +3484,7 @@ async fn dns_std_to_socket_addrs_in_process() -> Result<()> {
 #[tokio::test(flavor = "current_thread")]
 #[traced_test]
 async fn dns_tokio_lookup() -> Result<()> {
-    let lab = Lab::new().await;
+    let lab = Lab::new().await?;
     let dc = lab.add_router("dc").build().await?;
     let dev = lab
         .add_device("dev")
@@ -3519,7 +3519,7 @@ async fn dns_tokio_lookup() -> Result<()> {
 async fn dns_hickory_system_resolver() -> Result<()> {
     use hickory_resolver::TokioResolver;
 
-    let lab = Lab::new().await;
+    let lab = Lab::new().await?;
     let dc = lab.add_router("dc").build().await?;
     let dev = lab
         .add_device("dev")
@@ -3549,7 +3549,7 @@ async fn dns_hickory_system_resolver() -> Result<()> {
 #[tokio::test(flavor = "current_thread")]
 #[traced_test]
 async fn dns_set_nameserver() -> Result<()> {
-    let lab = Lab::new().await;
+    let lab = Lab::new().await?;
     let dc = lab.add_router("dc").build().await?;
     let dev = lab
         .add_device("dev")
@@ -3582,7 +3582,7 @@ async fn dns_set_nameserver() -> Result<()> {
 #[traced_test]
 async fn smoke_dual_stack_roundtrip() -> Result<()> {
     check_caps()?;
-    let lab = Lab::new().await;
+    let lab = Lab::new().await?;
     let dc = lab
         .add_router("dc")
         .ip_support(IpSupport::DualStack)
@@ -3626,7 +3626,7 @@ async fn smoke_dual_stack_roundtrip() -> Result<()> {
 #[traced_test]
 async fn smoke_v6_only_roundtrip() -> Result<()> {
     check_caps()?;
-    let lab = Lab::new().await;
+    let lab = Lab::new().await?;
     let dc = lab
         .add_router("dc")
         .ip_support(IpSupport::V6Only)
@@ -3662,7 +3662,7 @@ async fn smoke_v6_only_roundtrip() -> Result<()> {
 #[traced_test]
 async fn nat_v6_masquerade() -> Result<()> {
     check_caps()?;
-    let lab = Lab::new().await;
+    let lab = Lab::new().await?;
     let dc = lab
         .add_router("dc")
         .ip_support(IpSupport::DualStack)
@@ -3709,7 +3709,7 @@ async fn nat_v6_masquerade() -> Result<()> {
 #[traced_test]
 async fn router_v6_accessors() -> Result<()> {
     check_caps()?;
-    let lab = Lab::new().await;
+    let lab = Lab::new().await?;
     let dc = lab
         .add_router("dc")
         .ip_support(IpSupport::DualStack)
@@ -3748,7 +3748,7 @@ async fn router_v6_accessors() -> Result<()> {
 #[traced_test]
 async fn device_v6_accessors() -> Result<()> {
     check_caps()?;
-    let lab = Lab::new().await;
+    let lab = Lab::new().await?;
     let dc = lab
         .add_router("dc")
         .ip_support(IpSupport::DualStack)
@@ -3780,7 +3780,7 @@ async fn device_v6_accessors() -> Result<()> {
 #[traced_test]
 async fn v6_only_no_v4() -> Result<()> {
     check_caps()?;
-    let lab = Lab::new().await;
+    let lab = Lab::new().await?;
     let dc = lab
         .add_router("dc")
         .ip_support(IpSupport::V6Only)
@@ -3812,7 +3812,7 @@ async fn v6_only_no_v4() -> Result<()> {
 #[traced_test]
 async fn dual_stack_public_addrs() -> Result<()> {
     check_caps()?;
-    let lab = Lab::new().await;
+    let lab = Lab::new().await?;
     let dc = lab
         .add_router("dc")
         .ip_support(IpSupport::DualStack)
@@ -3850,7 +3850,7 @@ async fn dual_stack_public_addrs() -> Result<()> {
 #[traced_test]
 async fn nat_v6_none_global() -> Result<()> {
     check_caps()?;
-    let lab = Lab::new().await;
+    let lab = Lab::new().await?;
     let dc = lab
         .add_router("dc")
         .ip_support(IpSupport::DualStack)
@@ -3900,7 +3900,7 @@ async fn nat_v6_none_global() -> Result<()> {
 #[allow(deprecated)]
 async fn latency_v6_region() -> Result<()> {
     check_caps()?;
-    let lab = Lab::new().await;
+    let lab = Lab::new().await?;
     lab.set_region_latency("eu", "us", 65);
     lab.set_region_latency("us", "eu", 65);
 
@@ -3938,7 +3938,7 @@ async fn latency_v6_region() -> Result<()> {
 #[allow(deprecated)]
 async fn latency_dual_stack_region() -> Result<()> {
     check_caps()?;
-    let lab = Lab::new().await;
+    let lab = Lab::new().await?;
     lab.set_region_latency("eu", "us", 65);
     lab.set_region_latency("us", "eu", 65);
 
@@ -3987,7 +3987,7 @@ async fn latency_dual_stack_region() -> Result<()> {
 #[tokio::test]
 #[traced_test]
 async fn patchbay_basic_holepunch() -> Result<()> {
-    let lab = Lab::new().await;
+    let lab = Lab::new().await?;
     let nat_mode = Nat::FullCone;
     let dc = lab.add_router("dc").build().await?;
     let nat1 = lab.add_router("nat1").nat(nat_mode).build().await?;
@@ -4072,7 +4072,7 @@ async fn patchbay_holepunch_home_nat() -> Result<()> {
     check_caps()?;
     for (label, stagger_ms) in [("simultaneous", 0u64), ("staggered-200ms", 200)] {
         info!("--- {label} ---");
-        let lab = Lab::new().await;
+        let lab = Lab::new().await?;
         let dc = lab.add_router("dc").build().await?;
         let nat1 = lab.add_router("nat1").nat(Nat::Home).build().await?;
         let nat2 = lab.add_router("nat2").nat(Nat::Home).build().await?;
@@ -4218,8 +4218,8 @@ async fn send_recv(socket: &UdpSocket, dst: SocketAddr, wait_before_send: Durati
 /// Verifies alloc_ix_ip_low returns unique IPs and errors on exhaustion.
 #[tokio::test(flavor = "current_thread")]
 #[traced_test]
-async fn test_ix_ip_alloc_no_duplicates() {
-    let lab = Lab::new().await;
+async fn test_ix_ip_alloc_no_duplicates() -> Result<()> {
+    let lab = Lab::new().await?;
     let mut ips = std::collections::HashSet::new();
     let mut inner = lab.inner.core.lock().unwrap();
     // next_ix_low starts at 10, so we can allocate 245 IPs (10..=254).
@@ -4229,13 +4229,14 @@ async fn test_ix_ip_alloc_no_duplicates() {
         count += 1;
     }
     assert_eq!(count, 245, "expected 245 unique IPs (hosts 10..=254)");
+    Ok(())
 }
 
 /// Verifies alloc_ix_ip_v6_low returns unique IPs and errors on exhaustion.
 #[tokio::test(flavor = "current_thread")]
 #[traced_test]
-async fn test_ix_ip_v6_alloc_no_duplicates() {
-    let lab = Lab::new().await;
+async fn test_ix_ip_v6_alloc_no_duplicates() -> Result<()> {
+    let lab = Lab::new().await?;
     let mut ips = std::collections::HashSet::new();
     let mut inner = lab.inner.core.lock().unwrap();
     // next_ix_low_v6 starts at 0x10 = 16.
@@ -4249,6 +4250,7 @@ async fn test_ix_ip_v6_alloc_no_duplicates() {
     }
     // 16..=65534 = 65519 unique IPs
     assert_eq!(count, 65519, "expected 65519 unique v6 IPs");
+    Ok(())
 }
 
 // ── Phase 3: MTU, node removal, IP management ──────────────────────
@@ -4256,7 +4258,7 @@ async fn test_ix_ip_v6_alloc_no_duplicates() {
 #[tokio::test(flavor = "current_thread")]
 #[traced_test]
 async fn mtu_set_and_verify() -> Result<()> {
-    let lab = Lab::new().await;
+    let lab = Lab::new().await?;
     let dc = lab.add_router("dc").mtu(1400).build().await?;
     let dev = lab
         .add_device("dev")
@@ -4301,7 +4303,7 @@ async fn mtu_set_and_verify() -> Result<()> {
 #[tokio::test(flavor = "current_thread")]
 #[traced_test]
 async fn icmp_frag_blocked_nft_rule() -> Result<()> {
-    let lab = Lab::new().await;
+    let lab = Lab::new().await?;
     let rtr = lab
         .add_router("rtr")
         .block_icmp_frag_needed()
@@ -4333,7 +4335,7 @@ async fn icmp_frag_blocked_nft_rule() -> Result<()> {
 #[traced_test]
 async fn pmtu_blackhole_drops_large_packets() -> Result<()> {
     check_caps()?;
-    let lab = Lab::new().await;
+    let lab = Lab::new().await?;
 
     // Router with low MTU and ICMP frag-needed blocked.
     let rtr = lab
@@ -4405,7 +4407,7 @@ async fn pmtu_blackhole_drops_large_packets() -> Result<()> {
 #[tokio::test(flavor = "current_thread")]
 #[traced_test]
 async fn remove_device_smoke() -> Result<()> {
-    let lab = Lab::new().await;
+    let lab = Lab::new().await?;
     let dc = lab.add_router("dc").build().await?;
     let dev = lab.add_device("dev").uplink(dc.id()).build().await?;
 
@@ -4426,7 +4428,7 @@ async fn remove_device_smoke() -> Result<()> {
 #[tokio::test(flavor = "current_thread")]
 #[traced_test]
 async fn remove_router_with_devices_fails() -> Result<()> {
-    let lab = Lab::new().await;
+    let lab = Lab::new().await?;
     let dc = lab.add_router("dc").build().await?;
     let _dev = lab.add_device("dev").uplink(dc.id()).build().await?;
 
@@ -4444,7 +4446,7 @@ async fn remove_router_with_devices_fails() -> Result<()> {
 #[tokio::test(flavor = "current_thread")]
 #[traced_test]
 async fn remove_router_smoke() -> Result<()> {
-    let lab = Lab::new().await;
+    let lab = Lab::new().await?;
     let dc = lab.add_router("dc").build().await?;
     let dev = lab.add_device("dev").uplink(dc.id()).build().await?;
 
@@ -4462,7 +4464,7 @@ async fn remove_router_smoke() -> Result<()> {
 #[tokio::test(flavor = "current_thread")]
 #[traced_test]
 async fn renew_ip_changes_address() -> Result<()> {
-    let lab = Lab::new().await;
+    let lab = Lab::new().await?;
     let dc = lab.add_router("dc").build().await?;
     let dev = lab.add_device("dev").uplink(dc.id()).build().await?;
 
@@ -4483,7 +4485,7 @@ async fn renew_ip_changes_address() -> Result<()> {
 #[tokio::test(flavor = "current_thread")]
 #[traced_test]
 async fn add_ip_secondary() -> Result<()> {
-    let lab = Lab::new().await;
+    let lab = Lab::new().await?;
     let dc = lab.add_router("dc").build().await?;
     let dev = lab.add_device("dev").uplink(dc.id()).build().await?;
 
@@ -4513,7 +4515,7 @@ async fn add_ip_secondary() -> Result<()> {
 #[traced_test]
 async fn region_basic_latency() -> Result<()> {
     check_caps()?;
-    let lab = Lab::new().await;
+    let lab = Lab::new().await?;
     let us = lab.add_region("us").await?;
     let eu = lab.add_region("eu").await?;
     lab.link_regions(&us, &eu, RegionLink::good(50)).await?;
@@ -4545,7 +4547,7 @@ async fn region_basic_latency() -> Result<()> {
 #[traced_test]
 async fn region_default_regions() -> Result<()> {
     check_caps()?;
-    let lab = Lab::new().await;
+    let lab = Lab::new().await?;
     let regions = lab.add_default_regions().await?;
 
     let dc_us = lab.add_router("dc-us").region(&regions.us).build().await?;
@@ -4575,7 +4577,7 @@ async fn region_default_regions() -> Result<()> {
 #[traced_test]
 async fn region_break_restore() -> Result<()> {
     check_caps()?;
-    let lab = Lab::new().await;
+    let lab = Lab::new().await?;
     let regions = lab.add_default_regions().await?;
 
     let dc_eu = lab.add_router("dc-eu").region(&regions.eu).build().await?;
@@ -4625,7 +4627,7 @@ async fn region_break_restore() -> Result<()> {
 #[traced_test]
 async fn region_no_cost_without_regions() -> Result<()> {
     check_caps()?;
-    let lab = Lab::new().await;
+    let lab = Lab::new().await?;
     let dc1 = lab.add_router("dc1").build().await?;
     let dc2 = lab.add_router("dc2").build().await?;
 
@@ -4654,7 +4656,7 @@ async fn region_no_cost_without_regions() -> Result<()> {
 #[traced_test]
 async fn region_regionless_to_region_connectivity() -> Result<()> {
     check_caps()?;
-    let lab = Lab::new().await;
+    let lab = Lab::new().await?;
     let us = lab.add_region("us").await?;
 
     let dc = lab.add_router("dc").build().await?; // regionless, on IX
@@ -4680,7 +4682,7 @@ async fn region_regionless_to_region_connectivity() -> Result<()> {
 #[traced_test]
 async fn region_mixed_nat() -> Result<()> {
     check_caps()?;
-    let lab = Lab::new().await;
+    let lab = Lab::new().await?;
     let us = lab.add_region("us").await?;
     let eu = lab.add_region("eu").await?;
     lab.link_regions(&us, &eu, RegionLink::good(50)).await?;
@@ -4717,7 +4719,7 @@ async fn region_mixed_nat() -> Result<()> {
 #[tokio::test(flavor = "current_thread")]
 #[traced_test]
 async fn region_reserved_name_rejected() -> Result<()> {
-    let lab = Lab::new().await;
+    let lab = Lab::new().await?;
     let result = lab.add_router("region_foo").build().await;
     assert!(
         result.is_err(),
@@ -4753,7 +4755,7 @@ async fn span_log_timeout(
 #[traced_test]
 async fn firewall_corporate_blocks_udp() -> Result<()> {
     check_caps()?;
-    let lab = Lab::new().await;
+    let lab = Lab::new().await?;
 
     let dc = lab.add_router("dc").build().await?;
     let dc_ip = dc.uplink_ip().context("no dc uplink ip")?;
@@ -4799,7 +4801,7 @@ async fn firewall_corporate_blocks_udp() -> Result<()> {
 #[traced_test]
 async fn firewall_captive_portal_blocks_udp() -> Result<()> {
     check_caps()?;
-    let lab = Lab::new().await;
+    let lab = Lab::new().await?;
 
     let dc = lab.add_router("dc").build().await?;
     let dc_ip = dc.uplink_ip().context("no dc uplink ip")?;
@@ -4844,7 +4846,7 @@ async fn firewall_captive_portal_blocks_udp() -> Result<()> {
 #[traced_test]
 async fn firewall_none_allows_all() -> Result<()> {
     check_caps()?;
-    let lab = Lab::new().await;
+    let lab = Lab::new().await?;
 
     let dc = lab.add_router("dc").build().await?;
     let dc_ip = dc.uplink_ip().context("no dc uplink ip")?;
@@ -4875,7 +4877,7 @@ async fn firewall_none_allows_all() -> Result<()> {
 #[traced_test]
 async fn firewall_custom_selective() -> Result<()> {
     check_caps()?;
-    let lab = Lab::new().await;
+    let lab = Lab::new().await?;
 
     let dc = lab.add_router("dc").build().await?;
     let dc_ip = dc.uplink_ip().context("no dc uplink ip")?;
@@ -4925,7 +4927,7 @@ async fn firewall_custom_selective() -> Result<()> {
 #[traced_test]
 async fn firewall_runtime_change() -> Result<()> {
     check_caps()?;
-    let lab = Lab::new().await;
+    let lab = Lab::new().await?;
 
     let dc = lab.add_router("dc").build().await?;
     let dc_ip = dc.uplink_ip().context("no dc uplink ip")?;
