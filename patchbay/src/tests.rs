@@ -1628,8 +1628,8 @@ async fn add_and_remove_iface_at_runtime() -> Result<()> {
     let obs = dev.run_sync(move || test_utils::udp_roundtrip(reflector))?;
     assert_eq!(
         obs.ip(),
-        IpAddr::V4(dc_ip),
-        "traffic should go directly through dc (no NAT)"
+        IpAddr::V4(eth1_ip),
+        "reflector should see device's eth1 IP (dc has no NAT)"
     );
 
     // Remove the original interface.
@@ -1639,7 +1639,7 @@ async fn add_and_remove_iface_at_runtime() -> Result<()> {
 
     // Connectivity still works through the remaining eth1.
     let obs2 = dev.run_sync(move || test_utils::udp_roundtrip(reflector))?;
-    assert_eq!(obs2.ip(), IpAddr::V4(dc_ip));
+    assert_eq!(obs2.ip(), IpAddr::V4(eth1_ip));
 
     // Cannot remove the last interface.
     let err = dev.remove_iface("eth1").await;

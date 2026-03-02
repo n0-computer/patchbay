@@ -212,7 +212,7 @@ pub(crate) struct Switch {
     /// Backing bridge name.
     pub bridge: Option<String>,
     pub(crate) next_host: u8,
-    next_host_v6: u8,
+    pub(crate) next_host_v6: u8,
 }
 
 /// Per-interface wiring job collected by `build()`.
@@ -448,6 +448,8 @@ pub(crate) struct NetworkCore {
     next_region_idx: u8,
     /// Next /30 offset for inter-region veths in 203.0.113.0/24.
     next_interregion_subnet: u8,
+    /// Next /126 offset for inter-region v6 veths in fd11::/48.
+    next_interregion_subnet_v6: u8,
 }
 
 impl Drop for NetworkCore {
@@ -480,6 +482,7 @@ impl NetworkCore {
             region_links: HashMap::new(),
             next_region_idx: 1,
             next_interregion_subnet: 0,
+            next_interregion_subnet_v6: 0,
         };
         let ix_sw = core.add_switch(
             "ix",
@@ -860,10 +863,14 @@ impl NetworkCore {
             .switches
             .get_mut(&sw)
             .ok_or_else(|| anyhow!("unknown switch id"))?;
-        sw_entry.cidr = cidr;
-        sw_entry.gw = gw;
-        sw_entry.cidr_v6 = cidr_v6;
-        sw_entry.gw_v6 = gw_v6;
+        if cidr.is_some() {
+            sw_entry.cidr = cidr;
+            sw_entry.gw = gw;
+        }
+        if cidr_v6.is_some() {
+            sw_entry.cidr_v6 = cidr_v6;
+            sw_entry.gw_v6 = gw_v6;
+        }
         let bridge = self
             .routers
             .get(&router)
@@ -1034,6 +1041,20 @@ impl NetworkCore {
         let base = offset as u16 * 4;
         let ip_a = Ipv4Addr::new(203, 0, 113, (base + 1) as u8);
         let ip_b = Ipv4Addr::new(203, 0, 113, (base + 2) as u8);
+        Ok((ip_a, ip_b))
+    }
+
+    /// Allocates the next /126 from fd11::/48 for inter-region v6 veths.
+    /// Returns (ip_a, ip_b) — the two usable IPs in the /126.
+    pub(crate) fn alloc_interregion_ips_v6(&mut self) -> Result<(Ipv6Addr, Ipv6Addr)> {
+        let offset = self.next_interregion_subnet_v6;
+        if offset >= 64 {
+            bail!("inter-region v6 /126 pool exhausted (max 64 links)");
+        }
+        self.next_interregion_subnet_v6 = offset + 1;
+        // fd11::N:1 and fd11::N:2 for each link
+        let ip_a = Ipv6Addr::new(0xfd11, 0, 0, offset as u16, 0, 0, 0, 1);
+        let ip_b = Ipv6Addr::new(0xfd11, 0, 0, offset as u16, 0, 0, 0, 2);
         Ok((ip_a, ip_b))
     }
 

@@ -649,16 +649,18 @@ impl Lab {
             let idx = inner.alloc_region_idx()?;
 
             // Region router: Nat::None, public downstream, no region tag (it IS the region).
+            // DualStack so it can forward v6 traffic from sub-routers.
             let id = inner.add_router(
                 &region_router_name,
                 Nat::None,
                 DownstreamPool::Public,
                 None,
-                IpSupport::V4Only,
+                IpSupport::DualStack,
                 NatV6Mode::None,
             );
 
             // Downstream switch: region's first /24 as override CIDR.
+            // v6 /64 is auto-allocated by connect_router_downlink since region router is DualStack.
             let region_bridge_cidr = net4(198, 18, idx * 16, 0, 24);
             let sub_switch =
                 inner.add_switch(&format!("{region_router_name}-sub"), None, None, None, None);
@@ -667,12 +669,14 @@ impl Lab {
             // Set next_host to 10 so sub-routers get .10, .11, ...
             if let Some(sw) = inner.switch_mut(sub_switch) {
                 sw.next_host = 10;
+                sw.next_host_v6 = 10;
             }
 
-            // IX uplink: region router gets an IX IP.
+            // IX uplink: region router gets an IX IP (v4 + v6).
             let ix_ip = inner.alloc_ix_ip_low()?;
+            let ix_ip_v6 = inner.alloc_ix_ip_v6_low()?;
             let ix_sw = inner.ix_sw();
-            inner.connect_router_uplink(id, ix_sw, Some(ix_ip), None)?;
+            inner.connect_router_uplink(id, ix_sw, Some(ix_ip), Some(ix_ip_v6))?;
 
             // Store region info.
             inner.regions.insert(
@@ -706,6 +710,10 @@ impl Lab {
                 let v4 = sw.gw.and_then(|gw| Some((gw, sw.cidr?.prefix_len())));
                 Some((br, v4))
             });
+            let downlink_bridge_v6 = router.downlink.and_then(|sw_id| {
+                let sw = inner.switch(sw_id)?;
+                Some((sw.gw_v6?, sw.cidr_v6?.prefix_len()))
+            });
 
             let setup_data = RouterSetupData {
                 router,
@@ -721,12 +729,12 @@ impl Lab {
                 upstream_cidr_prefix: None,
                 return_route,
                 downlink_bridge,
-                ix_gw_v6: None,
-                ix_cidr_v6_prefix: None,
+                ix_gw_v6: Some(cfg.ix_gw_v6),
+                ix_cidr_v6_prefix: Some(cfg.ix_cidr_v6.prefix_len()),
                 upstream_gw_v6: None,
                 upstream_cidr_prefix_v6: None,
                 return_route_v6: None,
-                downlink_bridge_v6: None,
+                downlink_bridge_v6,
                 parent_route_v6: None,
                 parent_route_v4: None,
             };
@@ -738,15 +746,22 @@ impl Lab {
         let netns = &self.inner.netns;
         setup_router_async(netns, &setup_data).await?;
 
-        // Phase 3: Add /20 aggregate route in root NS for the region.
+        // Phase 3: Add /20 aggregate route in root NS for the region (v4 + v6).
         let region_net = region_base(idx);
         let via = setup_data
             .router
             .upstream_ip
             .context("region router has no IX IP")?;
+        let via_v6 = setup_data.router.upstream_ip_v6;
+        let downstream_cidr_v6 = setup_data.router.downstream_cidr_v6;
         let root_ns = setup_data.root_ns.clone();
         core::nl_run(netns, &root_ns, move |h: Netlink| async move {
             h.add_route_v4(region_net, 20, via).await.ok();
+            if let (Some(via6), Some(cidr6)) = (via_v6, downstream_cidr_v6) {
+                h.add_route_v6(cidr6.addr(), cidr6.prefix_len(), via6)
+                    .await
+                    .ok();
+            }
             Ok(())
         })
         .await?;
@@ -766,6 +781,9 @@ impl Lab {
     pub async fn link_regions(&self, a: &Region, b: &Region, link: RegionLink) -> Result<()> {
         let (a_ns, b_ns, a_idx, b_idx, root_ns);
         let (ip_a, ip_b);
+        let (ip6_a, ip6_b);
+        // v6 /64 CIDRs of each region's sub-switch (for routing).
+        let (a_sub_v6, b_sub_v6);
         let link_key;
         {
             let mut inner = self.inner.core.lock().unwrap();
@@ -799,10 +817,21 @@ impl Lab {
             b_idx = b_info.idx;
             root_ns = inner.cfg.root_ns.clone();
 
+            // Look up v6 CIDRs from region sub-switches.
+            let a_downlink = inner.router(a_info.router_id).unwrap().downlink;
+            let b_downlink = inner.router(b_info.router_id).unwrap().downlink;
+            a_sub_v6 = a_downlink.and_then(|sw| inner.switch(sw).and_then(|s| s.cidr_v6));
+            b_sub_v6 = b_downlink.and_then(|sw| inner.switch(sw).and_then(|s| s.cidr_v6));
+
             // Allocate /30 from 203.0.113.0/24.
             let (ipa, ipb) = inner.alloc_interregion_ips()?;
             ip_a = ipa;
             ip_b = ipb;
+
+            // Allocate v6 point-to-point addresses.
+            let (ip6a, ip6b) = inner.alloc_interregion_ips_v6()?;
+            ip6_a = ip6a;
+            ip6_b = ip6b;
 
             // Store IPs in sorted key order: ip_a belongs to link_key.0, ip_b to link_key.1.
             let (stored_ip_a, stored_ip_b) = if a.name < b.name {
@@ -843,8 +872,13 @@ impl Lab {
         let b_region_net = region_base(b_idx);
         core::nl_run(netns, &a_ns, move |h: Netlink| async move {
             h.add_addr4(&veth_a3, ip_a, 30).await?;
+            h.add_addr6(&veth_a3, ip6_a, 126).await?;
             h.set_link_up(&veth_a3).await?;
             h.add_route_v4(b_region_net, 20, ip_b).await?;
+            // Route B's v6 /64 via the v6 peer address.
+            if let Some(b_v6) = b_sub_v6 {
+                h.add_route_v6(b_v6.addr(), b_v6.prefix_len(), ip6_b).await?;
+            }
             Ok(())
         })
         .await?;
@@ -854,8 +888,13 @@ impl Lab {
         let a_region_net = region_base(a_idx);
         core::nl_run(netns, &b_ns, move |h: Netlink| async move {
             h.add_addr4(&veth_b3, ip_b, 30).await?;
+            h.add_addr6(&veth_b3, ip6_b, 126).await?;
             h.set_link_up(&veth_b3).await?;
             h.add_route_v4(a_region_net, 20, ip_a).await?;
+            // Route A's v6 /64 via the v6 peer address.
+            if let Some(a_v6) = a_sub_v6 {
+                h.add_route_v6(a_v6.addr(), a_v6.prefix_len(), ip6_a).await?;
+            }
             Ok(())
         })
         .await?;
