@@ -2,10 +2,12 @@
 
 /// Firewall preset for a router's forward chain.
 ///
-/// Firewall rules restrict which traffic can traverse the router.
-/// They are applied as nftables rules in a separate `inet fw` table
-/// (priority 10, after NAT filter rules at priority 0). Rules apply
-/// to both IPv4 and IPv6 traffic.
+/// Firewall rules are applied as nftables rules in a separate `inet fw` table
+/// (priority 10, after NAT filter rules at priority 0). Rules apply to both
+/// IPv4 and IPv6 traffic.
+///
+/// All presets expand to a [`FirewallConfig`] via [`Firewall::to_config`].
+/// Use [`Firewall::Custom`] for full control.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub enum Firewall {
     /// No filtering beyond NAT (default).
@@ -28,16 +30,17 @@ pub enum Firewall {
 
     /// Corporate/enterprise firewall.
     ///
-    /// Allows TCP 80, 443 and UDP 53 (DNS). Blocks all other TCP and UDP.
-    /// STUN/ICE fails, must use TURN-over-TLS on port 443.
+    /// Blocks unsolicited inbound. Outbound allows TCP 80, 443 and UDP 53
+    /// (DNS) only. All other TCP and UDP are dropped. STUN/ICE fails, must
+    /// use TURN-over-TLS on port 443.
     ///
     /// Observed on: Cisco ASA, Palo Alto, Fortinet in enterprise deployments.
     Corporate,
 
     /// Hotel/airport captive-portal style firewall.
     ///
-    /// Allows TCP 80, 443, 53 and UDP 53. Blocks all other UDP.
-    /// TCP to other ports is allowed (unlike Corporate).
+    /// Blocks unsolicited inbound. Outbound allows TCP on any port plus
+    /// UDP 53 (DNS). All other UDP is dropped.
     ///
     /// Observed on: hotel/airport guest WiFi after captive portal auth.
     CaptivePortal,
@@ -46,45 +49,62 @@ pub enum Firewall {
     Custom(FirewallConfig),
 }
 
-/// Custom firewall configuration for per-port allow/block rules.
+/// Outbound port policy for a protocol (TCP or UDP).
+///
+/// Controls which destination ports are allowed for outbound traffic
+/// traversing the router's forward chain.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub enum PortPolicy {
+    /// All destination ports are allowed (no filtering).
+    #[default]
+    AllowAll,
+    /// Only the listed destination ports are allowed; all others are dropped.
+    Allow(Vec<u16>),
+    /// All destination ports are blocked.
+    BlockAll,
+}
+
+/// Firewall configuration controlling inbound and outbound traffic.
 ///
 /// # Example
 /// ```
 /// # use patchbay::FirewallConfig;
 /// let cfg = FirewallConfig::builder()
-///     .allow_tcp(&[80, 443, 8443])
-///     .allow_udp(&[53])
-///     .block_udp()
+///     .block_inbound()
+///     .outbound_tcp(patchbay::PortPolicy::Allow(vec![80, 443, 8443]))
+///     .outbound_udp(patchbay::PortPolicy::Allow(vec![53]))
 ///     .build();
 /// ```
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct FirewallConfig {
-    /// Allowed outbound TCP destination ports. Empty + block_tcp = block all TCP.
-    pub allow_tcp: Vec<u16>,
-    /// Allowed outbound UDP destination ports. Empty + block_udp = block all UDP.
-    pub allow_udp: Vec<u16>,
-    /// If true, block TCP not in `allow_tcp`.
-    pub block_tcp: bool,
-    /// If true, block UDP not in `allow_udp`.
-    pub block_udp: bool,
+    /// Block unsolicited inbound traffic on the WAN interface (RFC 6092).
+    /// When true, only established/related return traffic is allowed inbound.
+    pub block_inbound: bool,
+    /// Outbound TCP port policy.
+    pub outbound_tcp: PortPolicy,
+    /// Outbound UDP port policy.
+    pub outbound_udp: PortPolicy,
 }
 
 impl Firewall {
     /// Expands a preset to a [`FirewallConfig`], or returns `None` for [`Firewall::None`].
     pub fn to_config(&self) -> Option<FirewallConfig> {
         match self {
-            Firewall::None | Firewall::BlockInbound => None,
+            Firewall::None => None,
+            Firewall::BlockInbound => Some(FirewallConfig {
+                block_inbound: true,
+                outbound_tcp: PortPolicy::AllowAll,
+                outbound_udp: PortPolicy::AllowAll,
+            }),
             Firewall::Corporate => Some(FirewallConfig {
-                allow_tcp: vec![80, 443],
-                allow_udp: vec![53],
-                block_tcp: true,
-                block_udp: true,
+                block_inbound: true,
+                outbound_tcp: PortPolicy::Allow(vec![80, 443]),
+                outbound_udp: PortPolicy::Allow(vec![53]),
             }),
             Firewall::CaptivePortal => Some(FirewallConfig {
-                allow_tcp: vec![80, 443, 53],
-                allow_udp: vec![53],
-                block_tcp: false,
-                block_udp: true,
+                block_inbound: true,
+                outbound_tcp: PortPolicy::AllowAll,
+                outbound_udp: PortPolicy::Allow(vec![53]),
             }),
             Firewall::Custom(cfg) => Some(cfg.clone()),
         }
@@ -101,44 +121,60 @@ impl FirewallConfig {
 /// Builder for [`FirewallConfig`].
 #[derive(Clone, Debug, Default)]
 pub struct FirewallConfigBuilder {
-    allow_tcp: Vec<u16>,
-    allow_udp: Vec<u16>,
-    block_tcp: bool,
-    block_udp: bool,
+    block_inbound: bool,
+    outbound_tcp: PortPolicy,
+    outbound_udp: PortPolicy,
 }
 
 impl FirewallConfigBuilder {
-    /// Allow outbound TCP to these destination ports.
+    /// Block unsolicited inbound traffic on the WAN interface.
+    pub fn block_inbound(&mut self) -> &mut Self {
+        self.block_inbound = true;
+        self
+    }
+
+    /// Set outbound TCP port policy.
+    pub fn outbound_tcp(&mut self, policy: PortPolicy) -> &mut Self {
+        self.outbound_tcp = policy;
+        self
+    }
+
+    /// Set outbound UDP port policy.
+    pub fn outbound_udp(&mut self, policy: PortPolicy) -> &mut Self {
+        self.outbound_udp = policy;
+        self
+    }
+
+    /// Convenience: allow only these outbound TCP destination ports.
     pub fn allow_tcp(&mut self, ports: &[u16]) -> &mut Self {
-        self.allow_tcp.extend_from_slice(ports);
+        self.outbound_tcp = PortPolicy::Allow(ports.to_vec());
         self
     }
 
-    /// Allow outbound UDP to these destination ports.
+    /// Convenience: allow only these outbound UDP destination ports.
     pub fn allow_udp(&mut self, ports: &[u16]) -> &mut Self {
-        self.allow_udp.extend_from_slice(ports);
+        self.outbound_udp = PortPolicy::Allow(ports.to_vec());
         self
     }
 
-    /// Block all outbound TCP not in the allow list.
+    /// Convenience: block all outbound TCP.
     pub fn block_tcp(&mut self) -> &mut Self {
-        self.block_tcp = true;
+        self.outbound_tcp = PortPolicy::BlockAll;
         self
     }
 
-    /// Block all outbound UDP not in the allow list.
+    /// Convenience: block all outbound UDP.
     pub fn block_udp(&mut self) -> &mut Self {
-        self.block_udp = true;
+        self.outbound_udp = PortPolicy::BlockAll;
         self
     }
 
     /// Builds the [`FirewallConfig`].
     pub fn build(&self) -> FirewallConfig {
         FirewallConfig {
-            allow_tcp: self.allow_tcp.clone(),
-            allow_udp: self.allow_udp.clone(),
-            block_tcp: self.block_tcp,
-            block_udp: self.block_udp,
+            block_inbound: self.block_inbound,
+            outbound_tcp: self.outbound_tcp.clone(),
+            outbound_udp: self.outbound_udp.clone(),
         }
     }
 }

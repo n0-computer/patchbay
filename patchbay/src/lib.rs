@@ -89,12 +89,13 @@ mod userns;
 /// String sanitizers for filenames and environment variable names.
 pub mod util;
 
+pub use firewall::PortPolicy;
 pub use ipnet::Ipv4Net;
 pub use lab::{
     ConntrackTimeouts, DefaultRegions, Device, DeviceBuilder, DeviceIface, Firewall,
     FirewallConfig, FirewallConfigBuilder, IpSupport, Ix, Lab, LinkCondition, LinkLimits, Nat,
     NatConfig, NatConfigBuilder, NatFiltering, NatMapping, NatV6Mode, ObservedAddr, Region,
-    RegionLink, Router, RouterBuilder,
+    RegionLink, Router, RouterBuilder, RouterPreset,
 };
 
 pub use crate::{

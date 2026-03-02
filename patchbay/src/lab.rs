@@ -537,6 +537,7 @@ impl Lab {
             nat: Nat::None,
             ip_support: IpSupport::V4Only,
             nat_v6: NatV6Mode::None,
+            downstream_pool: None,
             downstream_cidr: None,
             downlink_condition: None,
             mtu: None,
@@ -1164,6 +1165,120 @@ impl Lab {
 }
 
 // ─────────────────────────────────────────────
+// RouterPreset
+// ─────────────────────────────────────────────
+
+/// Common real-world router configurations.
+///
+/// Each preset sets NAT, firewall, IP support, and address pool to match
+/// a real-world deployment pattern. Individual knobs (`.nat()`, `.firewall()`,
+/// etc.) can override any preset value.
+///
+/// # Example
+/// ```ignore
+/// // One-liner for common case:
+/// let home = lab.add_router("home").preset(RouterPreset::Home).build().await?;
+///
+/// // Override one knob:
+/// let home = lab.add_router("home")
+///     .preset(RouterPreset::Home)
+///     .nat(Nat::FullCone)
+///     .build().await?;
+/// ```
+#[derive(Clone, Copy, Debug)]
+pub enum RouterPreset {
+    /// Home router (FritzBox, UniFi, TP-Link, ASUS, OpenWRT).
+    ///
+    /// - IPv4: NAT (EIM+APDF, port-preserving)
+    /// - IPv6: No NAT, public GUA
+    /// - Firewall: Block unsolicited inbound (RFC 6092)
+    /// - Dual-stack
+    Home,
+
+    /// ISP transit / datacenter / cloud VM / public server.
+    ///
+    /// - IPv4: No NAT, public addressing
+    /// - IPv6: No NAT, public GUA
+    /// - Firewall: None
+    /// - Dual-stack
+    ///
+    /// Use for relay servers, STUN servers, or any host with a public IP.
+    Datacenter,
+
+    /// ISP transit — IPv4 only.
+    ///
+    /// Same as [`Datacenter`](Self::Datacenter) but without IPv6.
+    IspV4,
+
+    /// Mobile carrier (T-Mobile, Jio, Vodafone, O2).
+    ///
+    /// - IPv4: CGNAT
+    /// - IPv6: No NAT, public GUA
+    /// - Firewall: None (carrier relies on per-device /64 isolation)
+    /// - Dual-stack
+    Mobile,
+
+    /// Enterprise / corporate network (Cisco ASA, Palo Alto, Fortinet).
+    ///
+    /// - IPv4: Symmetric NAT (EDM+APDF)
+    /// - IPv6: No NAT, public GUA
+    /// - Firewall: Block inbound + restrict outbound (TCP 80,443 + UDP 53)
+    /// - Dual-stack
+    Corporate,
+
+    /// Hotel / airport / guest WiFi (after captive portal auth).
+    ///
+    /// - IPv4: Symmetric NAT
+    /// - Firewall: Block inbound + block non-web UDP
+    /// - IPv4 only (most guest networks lack IPv6)
+    Hotel,
+
+    /// Cloud NAT gateway (AWS, Azure, GCP).
+    ///
+    /// - IPv4: Symmetric NAT with longer timeouts
+    /// - IPv6: No NAT, public GUA
+    /// - Firewall: None
+    /// - Dual-stack
+    Cloud,
+}
+
+impl RouterPreset {
+    fn nat(self) -> Nat {
+        match self {
+            Self::Home => Nat::Home,
+            Self::Datacenter | Self::IspV4 => Nat::None,
+            Self::Mobile => Nat::Cgnat,
+            Self::Corporate => Nat::Corporate,
+            Self::Hotel => Nat::Corporate,
+            Self::Cloud => Nat::CloudNat,
+        }
+    }
+
+    fn firewall(self) -> Firewall {
+        match self {
+            Self::Home | Self::Mobile => Firewall::BlockInbound,
+            Self::Datacenter | Self::IspV4 | Self::Cloud => Firewall::None,
+            Self::Corporate => Firewall::Corporate,
+            Self::Hotel => Firewall::CaptivePortal,
+        }
+    }
+
+    fn ip_support(self) -> IpSupport {
+        match self {
+            Self::Hotel | Self::IspV4 => IpSupport::V4Only,
+            _ => IpSupport::DualStack,
+        }
+    }
+
+    fn downstream_pool(self) -> DownstreamPool {
+        match self {
+            Self::Home | Self::Hotel => DownstreamPool::Private,
+            _ => DownstreamPool::Public,
+        }
+    }
+}
+
+// ─────────────────────────────────────────────
 // RouterBuilder
 // ─────────────────────────────────────────────
 
@@ -1177,6 +1292,7 @@ pub struct RouterBuilder {
     nat: Nat,
     ip_support: IpSupport,
     nat_v6: NatV6Mode,
+    downstream_pool: Option<DownstreamPool>,
     downstream_cidr: Option<Ipv4Net>,
     downlink_condition: Option<LinkCondition>,
     mtu: Option<u32>,
@@ -1202,6 +1318,7 @@ impl RouterBuilder {
             nat: Nat::None,
             ip_support: IpSupport::V4Only,
             nat_v6: NatV6Mode::None,
+            downstream_pool: None,
             downstream_cidr: None,
             downlink_condition: None,
             mtu: None,
@@ -1229,6 +1346,30 @@ impl RouterBuilder {
     pub fn upstream(mut self, parent: NodeId) -> Self {
         if self.result.is_ok() {
             self.upstream = Some(parent);
+        }
+        self
+    }
+
+    /// Applies a [`RouterPreset`] that sets NAT, firewall, IP support, and
+    /// address pool to match a real-world deployment pattern.
+    ///
+    /// Individual methods (`.nat()`, `.firewall()`, etc.) called **after**
+    /// `preset()` override the preset's values.
+    ///
+    /// # Example
+    /// ```ignore
+    /// // Home router with full-cone NAT instead of default port-restricted:
+    /// lab.add_router("home")
+    ///     .preset(RouterPreset::Home)
+    ///     .nat(Nat::FullCone)
+    ///     .build().await?;
+    /// ```
+    pub fn preset(mut self, p: RouterPreset) -> Self {
+        if self.result.is_ok() {
+            self.nat = p.nat();
+            self.firewall = p.firewall();
+            self.ip_support = p.ip_support();
+            self.downstream_pool = Some(p.downstream_pool());
         }
         self
     }
@@ -1337,11 +1478,11 @@ impl RouterBuilder {
         let (id, setup_data) = {
             let mut inner = self.inner.core.lock().unwrap();
             let nat = self.nat;
-            let downstream_pool = if nat == Nat::None {
+            let downstream_pool = self.downstream_pool.unwrap_or(if nat == Nat::None {
                 DownstreamPool::Public
             } else {
                 DownstreamPool::Private
-            };
+            });
             let id = inner.add_router(
                 &self.name,
                 nat,

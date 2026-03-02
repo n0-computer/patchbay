@@ -132,7 +132,7 @@ async fn custom_selective() -> Result<()> {
     let fw = lab
         .add_router("fw")
         .nat(Nat::Home)
-        .firewall_custom(|f| f.allow_udp(&[5000]).block_udp().block_tcp())
+        .firewall_custom(|f| f.allow_udp(&[5000]).block_tcp())
         .build()
         .await?;
 

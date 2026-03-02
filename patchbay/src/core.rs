@@ -2133,63 +2133,62 @@ table ip filter {
     .await
 }
 
-/// Generates nftables rules for a [`FirewallConfig`].
+/// Generates nftables rules from a [`FirewallConfig`].
 ///
-/// Uses a separate `table ip fw` at priority 10 to avoid conflicts with the
-/// NAT filter table (`ip filter` at priority 0).
-fn generate_firewall_rules(cfg: &crate::lab::FirewallConfig) -> String {
+/// Uses a separate `table inet fw` at priority 10 to avoid conflicts with the
+/// NAT filter table (`ip filter` at priority 0). Handles both inbound blocking
+/// and outbound port restrictions in a single unified chain.
+fn generate_firewall_rules(cfg: &crate::firewall::FirewallConfig, wan_if: &str) -> String {
+    use crate::firewall::PortPolicy;
+
     let mut rules = String::new();
     rules.push_str("table inet fw {\n");
     rules.push_str("    chain forward {\n");
     rules.push_str("        type filter hook forward priority 10; policy accept;\n");
     rules.push_str("        ct state established,related accept\n");
 
-    // Allow specific TCP ports.
-    if !cfg.allow_tcp.is_empty() {
-        let ports: Vec<String> = cfg.allow_tcp.iter().map(|p| p.to_string()).collect();
-        rules.push_str(&format!(
-            "        tcp dport {{ {} }} accept\n",
-            ports.join(", ")
-        ));
+    // Block unsolicited inbound on the WAN interface (RFC 6092).
+    if cfg.block_inbound {
+        rules.push_str(&format!("        iif \"{}\" drop\n", wan_if));
     }
 
-    // Allow specific UDP ports.
-    if !cfg.allow_udp.is_empty() {
-        let ports: Vec<String> = cfg.allow_udp.iter().map(|p| p.to_string()).collect();
-        rules.push_str(&format!(
-            "        udp dport {{ {} }} accept\n",
-            ports.join(", ")
-        ));
+    // Outbound TCP policy.
+    match &cfg.outbound_tcp {
+        PortPolicy::AllowAll => {}
+        PortPolicy::Allow(ports) if !ports.is_empty() => {
+            let ports: Vec<String> = ports.iter().map(|p| p.to_string()).collect();
+            rules.push_str(&format!(
+                "        tcp dport {{ {} }} accept\n",
+                ports.join(", ")
+            ));
+            rules.push_str("        meta l4proto tcp drop\n");
+        }
+        // Allow(empty) or BlockAll → drop all TCP.
+        _ => {
+            rules.push_str("        meta l4proto tcp drop\n");
+        }
     }
 
-    // Block remaining UDP if configured.
-    if cfg.block_udp {
-        rules.push_str("        meta l4proto udp drop\n");
-    }
-
-    // Block remaining TCP if configured.
-    if cfg.block_tcp {
-        rules.push_str("        meta l4proto tcp drop\n");
+    // Outbound UDP policy.
+    match &cfg.outbound_udp {
+        PortPolicy::AllowAll => {}
+        PortPolicy::Allow(ports) if !ports.is_empty() => {
+            let ports: Vec<String> = ports.iter().map(|p| p.to_string()).collect();
+            rules.push_str(&format!(
+                "        udp dport {{ {} }} accept\n",
+                ports.join(", ")
+            ));
+            rules.push_str("        meta l4proto udp drop\n");
+        }
+        // Allow(empty) or BlockAll → drop all UDP.
+        _ => {
+            rules.push_str("        meta l4proto udp drop\n");
+        }
     }
 
     rules.push_str("    }\n");
     rules.push_str("}\n");
     rules
-}
-
-/// Generates nftables rules for [`Firewall::BlockInbound`] (RFC 6092 CE router).
-fn generate_block_inbound_rules(wan_if: &str) -> String {
-    format!(
-        r#"table inet fw {{
-    chain forward {{
-        type filter hook forward priority 10; policy accept;
-        iif "{wan}" ct state established,related accept
-        iif "{wan}" drop
-    }}
-}}
-"#,
-        wan = wan_if,
-    )
 }
 
 /// Applies firewall rules for a router. No-op for [`Firewall::None`].
@@ -2199,14 +2198,10 @@ pub(crate) async fn apply_firewall(
     firewall: &Firewall,
     wan_if: &str,
 ) -> Result<()> {
-    if let Firewall::BlockInbound = firewall {
-        let rules = generate_block_inbound_rules(wan_if);
-        return run_nft_in(netns, ns, &rules).await;
-    }
     match firewall.to_config() {
         None => Ok(()),
         Some(cfg) => {
-            let rules = generate_firewall_rules(&cfg);
+            let rules = generate_firewall_rules(&cfg, wan_if);
             run_nft_in(netns, ns, &rules).await
         }
     }

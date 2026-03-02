@@ -88,25 +88,46 @@ in the real world.
 
 ## Simulating Real-World Scenarios in Patchbay
 
+### Using Router Presets
+
+[`RouterPreset`] configures NAT, firewall, IP support, and address pool in
+one call. Individual methods override preset values when called after
+`preset()`.
+
+```rust
+// One-liner for each common case:
+let home = lab.add_router("home").preset(RouterPreset::Home).build().await?;
+let dc   = lab.add_router("dc").preset(RouterPreset::Datacenter).build().await?;
+let corp = lab.add_router("corp").preset(RouterPreset::Corporate).build().await?;
+
+// Override one knob:
+let home = lab.add_router("home")
+    .preset(RouterPreset::Home)
+    .nat(Nat::FullCone)   // swap NAT type, keep everything else
+    .build().await?;
+```
+
+| Preset | NAT | Firewall | IP | Pool |
+|--------|-----|----------|----|------|
+| `Home` | Home (EIM+APDF) | BlockInbound | DualStack | Private v4, Private v6 |
+| `Datacenter` | None | None | DualStack | Public |
+| `IspV4` | None | None | V4Only | Public |
+| `Mobile` | Cgnat | BlockInbound | DualStack | Public |
+| `Corporate` | Corporate (sym) | Corporate | DualStack | Public |
+| `Hotel` | Corporate (sym) | CaptivePortal | V4Only | Private |
+| `Cloud` | CloudNat | None | DualStack | Public |
+
 ### Scenario 1: Residential Dual-Stack (Most Common)
 
-A home router with public IPv6 and NATted IPv4. The CE router firewall
+A home router with NATted IPv4 and public IPv6. The CE router firewall
 blocks unsolicited inbound on both families.
 
 ```rust
-let home = lab.add_router("home")
-    .nat(Nat::PortRestricted)          // IPv4: NAT44 (EIM/ADF)
-    .downstream_pool(DownstreamPool::Public)  // IPv6: public GUA /64
-    .firewall(Firewall::BlockInbound)  // RFC 6092 CE router behavior
-    .build().await?;
+let home = lab.add_router("home").preset(RouterPreset::Home).build().await?;
 let laptop = lab.add_device("laptop").uplink(home.id()).build().await?;
-// laptop.ip()  → 198.18.x.x (public IPv4, NATted)
-// laptop.ip6() → 2001:db8:1:x::2 (public GUA, firewalled)
+// laptop.ip()  → 10.0.x.x (private IPv4, NATted)
+// laptop.ip6() → fd10:0:x::2 (ULA v6, firewalled)
 ```
-
-IPv4 behaves like today's internet (NAT + port mapping). IPv6 has direct
-connectivity but the firewall drops unsolicited inbound — exactly like a
-FritzBox or UniFi router.
 
 ### Scenario 2: IPv6-Only Mobile with NAT64
 
@@ -119,9 +140,8 @@ reached via NAT64 (translating IPv6 packets to IPv4).
 
 ```rust
 let carrier = lab.add_router("carrier")
-    .ip_support(IpSupport::V6Only)
-    .downstream_pool(DownstreamPool::Public)
-    // .nat_v6(NatV6Mode::Nat64)  // TODO: not yet implemented
+    .preset(RouterPreset::Mobile)
+    .ip_support(IpSupport::V6Only)  // override to v6-only
     .build().await?;
 let phone = lab.add_device("phone").uplink(carrier.id()).build().await?;
 // phone.ip6() → 2001:db8:1:x::2 (public GUA)
@@ -134,11 +154,7 @@ Enterprise network that blocks everything except web traffic. STUN/ICE
 fails — P2P apps must fall back to TURN-over-TLS on port 443.
 
 ```rust
-let corp = lab.add_router("corp")
-    .nat(Nat::PortRestricted)
-    .firewall(Firewall::Corporate)  // TCP 80,443 + UDP 53 only
-    .downstream_pool(DownstreamPool::Public)  // GUA v6
-    .build().await?;
+let corp = lab.add_router("corp").preset(RouterPreset::Corporate).build().await?;
 let workstation = lab.add_device("ws").uplink(corp.id()).build().await?;
 ```
 
@@ -147,25 +163,18 @@ let workstation = lab.add_device("ws").uplink(corp.id()).build().await?;
 Guest WiFi that allows web traffic but blocks most UDP.
 
 ```rust
-let hotel = lab.add_router("hotel")
-    .nat(Nat::Symmetric)               // Aggressive NAT
-    .firewall(Firewall::CaptivePortal) // TCP 80,443,53 + UDP 53
-    .build().await?;
+let hotel = lab.add_router("hotel").preset(RouterPreset::Hotel).build().await?;
 let guest = lab.add_device("guest").uplink(hotel.id()).build().await?;
 ```
 
-### Scenario 5: CGNAT (Carrier-Grade NAT)
+### Scenario 5: Mobile Carrier (CGNAT + Dual-Stack)
 
 Multiple subscribers sharing a single public IPv4 address. Common on
 mobile and some fixed-line ISPs.
 
 ```rust
-let isp = lab.add_router("isp")
-    .nat(Nat::Cgnat)
-    .downstream_pool(DownstreamPool::Public)  // public GUA v6
-    .firewall(Firewall::BlockInbound)
-    .build().await?;
-let sub = lab.add_device("sub").uplink(isp.id()).build().await?;
+let carrier = lab.add_router("carrier").preset(RouterPreset::Mobile).build().await?;
+let phone = lab.add_device("phone").uplink(carrier.id()).build().await?;
 ```
 
 ### Scenario 6: Peer-to-Peer Connectivity Test Matrix
@@ -173,26 +182,19 @@ let sub = lab.add_device("sub").uplink(isp.id()).build().await?;
 Test how two peers connect across different network types:
 
 ```rust
-// Home user: easy NAT, public v6
+// Home user: easy NAT, firewalled
 let home = lab.add_router("home")
+    .preset(RouterPreset::Home)
     .nat(Nat::FullCone)
-    .downstream_pool(DownstreamPool::Public)
-    .firewall(Firewall::BlockInbound)
     .build().await?;
 let alice = lab.add_device("alice").uplink(home.id()).build().await?;
 
-// Mobile user: symmetric NAT, restricted
-let mobile = lab.add_router("mobile")
-    .nat(Nat::Symmetric)
-    .firewall(Firewall::BlockInbound)
-    .build().await?;
+// Mobile user: CGNAT
+let mobile = lab.add_router("mobile").preset(RouterPreset::Mobile).build().await?;
 let bob = lab.add_device("bob").uplink(mobile.id()).build().await?;
 
 // Corporate user: strict firewall
-let corp = lab.add_router("corp")
-    .nat(Nat::PortRestricted)
-    .firewall(Firewall::Corporate)
-    .build().await?;
+let corp = lab.add_router("corp").preset(RouterPreset::Corporate).build().await?;
 let charlie = lab.add_device("charlie").uplink(corp.id()).build().await?;
 
 // Test: can alice reach bob? bob reach charlie? etc.
@@ -204,16 +206,15 @@ let charlie = lab.add_device("charlie").uplink(corp.id()).build().await?;
 
 | Feature | API | Notes |
 |---------|-----|-------|
-| Dual-stack (default) | `IpSupport::DualStack` | Both v4 and v6 |
+| Dual-stack | `IpSupport::DualStack` | Both v4 and v6 |
 | IPv6-only | `IpSupport::V6Only` | No v4 routes |
-| IPv4-only | `IpSupport::V4Only` | No v6 routes |
-| Private v6 (ULA) | `DownstreamPool::Private` | fd10::/48 pool (default) |
-| Public v6 (GUA) | `DownstreamPool::Public` | 2001:db8:1::/48 pool |
+| IPv4-only | `IpSupport::V4Only` | No v6 routes (default) |
 | NPTv6 | `NatV6Mode::Nptv6` | Stateless 1:1 prefix translation |
 | NAT66 (masquerade) | `NatV6Mode::Masquerade` | Like NAT44 but for v6 |
 | Block inbound | `Firewall::BlockInbound` | RFC 6092 CE router |
-| Corporate FW | `Firewall::Corporate` | TCP 80,443 + UDP 53 |
-| Captive portal FW | `Firewall::CaptivePortal` | TCP 80,443,53 + UDP 53 |
+| Corporate FW | `Firewall::Corporate` | Block inbound + TCP 80,443 + UDP 53 |
+| Captive portal FW | `Firewall::CaptivePortal` | Block inbound + block non-web UDP |
+| Custom FW | `Firewall::Custom(cfg)` | Full control via `FirewallConfig` |
 | NAT64 | *planned* | See `plans/nat64.md` |
 | DHCPv6-PD | *not planned* | Use static /64 allocation |
 
