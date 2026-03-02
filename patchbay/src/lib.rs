@@ -51,11 +51,7 @@
 //! # #[tokio::main(flavor = "current_thread")]
 //! # async fn main() -> anyhow::Result<()> {
 //! let lab = Lab::new().await?;
-//! let isp = lab
-//!     .add_router("isp1")
-//!     .nat(Nat::Cgnat)
-//!     .build()
-//!     .await?;
+//! let isp = lab.add_router("isp1").nat(Nat::Cgnat).build().await?;
 //! let home = lab
 //!     .add_router("home1")
 //!     .upstream(isp.id())
@@ -93,6 +89,7 @@ mod userns;
 /// String sanitizers for filenames and environment variable names.
 pub mod util;
 
+pub use ipnet::Ipv4Net;
 pub use lab::{
     ConntrackTimeouts, DefaultRegions, Device, DeviceBuilder, DeviceIface, Firewall,
     FirewallConfig, FirewallConfigBuilder, IpSupport, Ix, Lab, LinkCondition, LinkLimits, Nat,
@@ -104,8 +101,6 @@ pub use crate::{
     core::NodeId,
     userns::{init_userns, init_userns_for_ctor},
 };
-
-pub use ipnet::Ipv4Net;
 
 /// Verifies the process has enough privileges to manage namespaces, routes, and raw sockets.
 ///

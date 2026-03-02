@@ -115,14 +115,14 @@ async fn conntrack_flush() -> Result<()> {
     let nat_handle = lab.router_by_name("nat").context("missing nat")?;
     let bind = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0);
     let r_dc = ctx.r_dc;
-    let o1 = ctx.dev.run_sync(move || {
-        test_utils::probe_udp(r_dc, Duration::from_millis(500), Some(bind))
-    })?;
+    let o1 = ctx
+        .dev
+        .run_sync(move || test_utils::probe_udp(r_dc, Duration::from_millis(500), Some(bind)))?;
     nat_handle.flush_nat_state().await?;
     tokio::time::sleep(Duration::from_millis(50)).await;
-    let o2 = ctx.dev.run_sync(move || {
-        test_utils::probe_udp(r_dc, Duration::from_millis(500), Some(bind))
-    })?;
+    let o2 = ctx
+        .dev
+        .run_sync(move || test_utils::probe_udp(r_dc, Duration::from_millis(500), Some(bind)))?;
     assert_ne!(
         o1.port(),
         o2.port(),

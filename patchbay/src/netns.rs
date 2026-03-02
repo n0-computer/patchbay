@@ -429,7 +429,11 @@ impl NetnsManager {
     }
 
     /// Spawn a dedicated OS thread inside `ns`. Non-blocking.
-    pub(crate) fn spawn_thread_in<F, R>(&self, ns: &str, f: F) -> Result<thread::JoinHandle<Result<R>>>
+    pub(crate) fn spawn_thread_in<F, R>(
+        &self,
+        ns: &str,
+        f: F,
+    ) -> Result<thread::JoinHandle<Result<R>>>
     where
         F: FnOnce() -> Result<R> + Send + 'static,
         R: Send + 'static,

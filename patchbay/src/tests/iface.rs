@@ -36,7 +36,11 @@ async fn add_remove_runtime() -> Result<()> {
     assert!(dev.iface("eth1").is_some(), "eth1 should exist after add");
 
     // eth1 got a public IP from dc's pool.
-    let eth1_ip = dev.iface("eth1").unwrap().ip().expect("eth1 should have an IP");
+    let eth1_ip = dev
+        .iface("eth1")
+        .unwrap()
+        .ip()
+        .expect("eth1 should have an IP");
     assert!(
         eth1_ip.octets()[0] == 198,
         "eth1 IP should be in the public range, got {eth1_ip}"

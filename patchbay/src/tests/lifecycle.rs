@@ -187,7 +187,10 @@ async fn remove_router() -> Result<()> {
 
     // Router is gone — cached fields still work, data accessors return None.
     assert_eq!(dc.name(), "dc");
-    assert!(dc.uplink_ip().is_none(), "uplink_ip() should be None after removal");
+    assert!(
+        dc.uplink_ip().is_none(),
+        "uplink_ip() should be None after removal"
+    );
 
     Ok(())
 }

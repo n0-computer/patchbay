@@ -82,11 +82,13 @@ pub enum Nat {
     /// # Example
     /// ```no_run
     /// # use patchbay::*;
-    /// let custom = Nat::Custom(NatConfig::builder()
-    ///     .mapping(NatMapping::EndpointIndependent)
-    ///     .filtering(NatFiltering::EndpointIndependent)
-    ///     .udp_stream_timeout(120)
-    ///     .build());
+    /// let custom = Nat::Custom(
+    ///     NatConfig::builder()
+    ///         .mapping(NatMapping::EndpointIndependent)
+    ///         .filtering(NatFiltering::EndpointIndependent)
+    ///         .udp_stream_timeout(120)
+    ///         .build(),
+    /// );
     /// ```
     #[serde(skip)]
     #[strum(disabled)]

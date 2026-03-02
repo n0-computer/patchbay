@@ -16,6 +16,7 @@ use ipnet::{Ipv4Net, Ipv6Net};
 use serde::Deserialize;
 use tracing::{debug, debug_span, Instrument as _};
 
+pub use crate::qdisc::LinkLimits;
 use crate::{
     core::{
         self, apply_or_remove_impair, setup_device_async, setup_root_ns_async, setup_router_async,
@@ -23,8 +24,6 @@ use crate::{
     },
     netlink::Netlink,
 };
-
-pub use crate::qdisc::LinkLimits;
 
 pub(crate) static LAB_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -49,11 +48,13 @@ fn region_base(idx: u8) -> Ipv4Addr {
     )
 }
 
-pub use crate::firewall::{Firewall, FirewallConfig, FirewallConfigBuilder};
-pub use crate::handles::{Device, DeviceIface, Ix, Router};
-pub use crate::nat::{
-    ConntrackTimeouts, IpSupport, Nat, NatConfig, NatConfigBuilder, NatFiltering, NatMapping,
-    NatV6Mode,
+pub use crate::{
+    firewall::{Firewall, FirewallConfig, FirewallConfigBuilder},
+    handles::{Device, DeviceIface, Ix, Router},
+    nat::{
+        ConntrackTimeouts, IpSupport, Nat, NatConfig, NatConfigBuilder, NatFiltering, NatMapping,
+        NatV6Mode,
+    },
 };
 
 /// Link-layer impairment profile applied via `tc netem`.
@@ -877,7 +878,8 @@ impl Lab {
             h.add_route_v4(b_region_net, 20, ip_b).await?;
             // Route B's v6 /64 via the v6 peer address.
             if let Some(b_v6) = b_sub_v6 {
-                h.add_route_v6(b_v6.addr(), b_v6.prefix_len(), ip6_b).await?;
+                h.add_route_v6(b_v6.addr(), b_v6.prefix_len(), ip6_b)
+                    .await?;
             }
             Ok(())
         })
@@ -893,7 +895,8 @@ impl Lab {
             h.add_route_v4(a_region_net, 20, ip_a).await?;
             // Route A's v6 /64 via the v6 peer address.
             if let Some(a_v6) = a_sub_v6 {
-                h.add_route_v6(a_v6.addr(), a_v6.prefix_len(), ip6_a).await?;
+                h.add_route_v6(a_v6.addr(), a_v6.prefix_len(), ip6_a)
+                    .await?;
             }
             Ok(())
         })

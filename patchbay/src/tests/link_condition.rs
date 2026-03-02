@@ -895,8 +895,7 @@ async fn presets_rtt_and_loss() -> Result<()> {
             if loss_pct > 0.0 {
                 let (_, received) = dev
                     .spawn(move |_| async move {
-                        test_utils::udp_send_recv_count(r, 1000, 64, Duration::from_secs(5))
-                            .await
+                        test_utils::udp_send_recv_count(r, 1000, 64, Duration::from_secs(5)).await
                     })?
                     .await??;
                 if received == 1000 {

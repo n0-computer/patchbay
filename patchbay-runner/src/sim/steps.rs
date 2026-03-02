@@ -372,7 +372,11 @@ pub(crate) async fn execute_step(state: &mut SimState, step: &Step) -> Result<()
                 .ok_or_else(|| anyhow::anyhow!("unknown device '{}'", device))?;
             let ifname = match interface.as_deref() {
                 Some(n) => n.to_string(),
-                None => dev.default_iface().context("device removed")?.name().to_string(),
+                None => dev
+                    .default_iface()
+                    .context("device removed")?
+                    .name()
+                    .to_string(),
             };
             dev.set_link_condition(&ifname, condition).await?;
         }

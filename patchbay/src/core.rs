@@ -404,20 +404,12 @@ impl LabInner {
 
     // ── with() helpers ──────────────────────────────────────────────────
 
-    pub(crate) fn with_device<R>(
-        &self,
-        id: NodeId,
-        f: impl FnOnce(&DeviceData) -> R,
-    ) -> Option<R> {
+    pub(crate) fn with_device<R>(&self, id: NodeId, f: impl FnOnce(&DeviceData) -> R) -> Option<R> {
         let core = self.core.lock().unwrap();
         core.device(id).map(f)
     }
 
-    pub(crate) fn with_router<R>(
-        &self,
-        id: NodeId,
-        f: impl FnOnce(&RouterData) -> R,
-    ) -> Option<R> {
+    pub(crate) fn with_router<R>(&self, id: NodeId, f: impl FnOnce(&RouterData) -> R) -> Option<R> {
         let core = self.core.lock().unwrap();
         core.router(id).map(f)
     }

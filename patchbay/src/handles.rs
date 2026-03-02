@@ -31,11 +31,10 @@ use crate::{
         NodeId,
     },
     firewall::Firewall,
+    lab::{net6, LinkCondition, ObservedAddr},
     nat::{IpSupport, Nat, NatV6Mode},
     netlink::Netlink,
 };
-
-use crate::lab::{net6, LinkCondition, ObservedAddr};
 
 // ─────────────────────────────────────────────
 // Device / Router / DeviceIface handles
@@ -517,11 +516,7 @@ impl Device {
 
             // Now snapshot what we need for wiring.
             let dev = inner.device(self.id).unwrap();
-            let iface = dev
-                .interfaces
-                .iter()
-                .find(|i| i.ifname == ifname)
-                .unwrap();
+            let iface = dev.interfaces.iter().find(|i| i.ifname == ifname).unwrap();
             let sw = inner
                 .switch(iface.uplink)
                 .ok_or_else(|| anyhow!("switch missing"))?;
@@ -907,9 +902,7 @@ impl Router {
     ///
     /// Returns `None` if the router has been removed or no uplink IP is assigned.
     pub fn uplink_ip(&self) -> Option<Ipv4Addr> {
-        self.lab
-            .with_router(self.id, |r| r.upstream_ip)
-            .flatten()
+        self.lab.with_router(self.id, |r| r.upstream_ip).flatten()
     }
 
     /// Returns the downstream subnet CIDR, if allocated.
@@ -925,9 +918,7 @@ impl Router {
     ///
     /// Returns `None` if the router has been removed or no downstream is allocated.
     pub fn downstream_gw(&self) -> Option<Ipv4Addr> {
-        self.lab
-            .with_router(self.id, |r| r.downstream_gw)
-            .flatten()
+        self.lab.with_router(self.id, |r| r.downstream_gw).flatten()
     }
 
     /// Returns which IP address families this router supports, or `None` if
