@@ -116,12 +116,34 @@ You can also tear down and restore region links at runtime with
 `lab.break_region_link()` and `lab.restore_region_link()` for fault
 injection scenarios.
 
+### Router presets
+
+`RouterPreset` configures NAT, firewall, IP support, and address pool in
+one call to match real-world deployment patterns:
+
+```rust
+let home = lab.add_router("home").preset(RouterPreset::Home).build().await?;
+let dc   = lab.add_router("dc").preset(RouterPreset::Datacenter).build().await?;
+let corp = lab.add_router("corp").preset(RouterPreset::Corporate).build().await?;
+```
+
+Available presets: `Home`, `Datacenter`, `IspV4`, `Mobile`, `Corporate`,
+`Hotel`, `Cloud`. Individual methods called after `preset()` override preset
+values. See `docs/ipv6.md` for the full reference table.
+
 ### NAT
 
 Routers support six IPv4 NAT presets (`None`, `Home`, `Corporate`,
 `CloudNat`, `FullCone`, `Cgnat`) and three IPv6 modes (`None`, `Nptv6`,
 `Masquerade`), all configured via nftables rules. You can also build custom
 NAT configs from mapping + filtering + timeout parameters.
+
+### Firewalls
+
+Firewall presets control both inbound and outbound traffic:
+`BlockInbound` (RFC 6092 CE router), `Corporate` (TCP 80,443 + UDP 53),
+`CaptivePortal` (block non-web UDP). All presets expand to a
+`FirewallConfig` which can also be built from scratch via the builder API.
 
 ### Link conditions
 

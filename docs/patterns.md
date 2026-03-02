@@ -152,11 +152,13 @@ Test by waiting beyond the timeout period then verifying connectivity.
 ```rust
 // Custom short timeout for fast testing
 let nat = lab.add_router("nat")
-    .nat_custom(|n| n
-        .mapping(NatMapping::EndpointIndependent)
-        .filtering(NatFiltering::AddressAndPortDependent)
-        .udp_timeout(Duration::from_secs(5))  // short for testing
-    )
+    .nat(Nat::Custom(
+        NatConfig::builder()
+            .mapping(NatMapping::EndpointIndependent)
+            .filtering(NatFiltering::AddressAndPortDependent)
+            .udp_timeout(5)  // seconds, short for testing
+            .build(),
+    ))
     .build().await?;
 
 // Wait for timeout, verify mapping expired
@@ -177,11 +179,10 @@ let wifi_router = lab.add_router("wifi").nat(Nat::Home).build().await?;
 let cell_router = lab.add_router("cell").nat(Nat::Cgnat).build().await?;
 
 let device = lab.add_device("phone")
-    .uplink(wifi_router.id())
-    .link_condition(LinkCondition::Wifi)
+    .iface("eth0", wifi_router.id(), Some(LinkCondition::Wifi))
     .build().await?;
 
-// Simulate replug_iface with connectivity gap
+// Simulate handoff with connectivity gap
 device.link_down("eth0").await?;
 tokio::time::sleep(Duration::from_millis(500)).await;
 device.replug_iface("eth0", cell_router.id()).await?;

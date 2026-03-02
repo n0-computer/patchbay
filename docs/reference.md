@@ -484,10 +484,10 @@ NAT, and devices with their interfaces and gateways.
 [[router]]
 name = "dc"
 
-# A NAT router (endpoint-independent mapping)
+# A home NAT router (endpoint-independent mapping, port-restricted filtering)
 [[router]]
 name = "lan-client"
-nat  = "destination-independent"
+nat  = "home"
 
 # A device with one interface behind the DC router
 [device.server.eth0]
@@ -507,12 +507,14 @@ gateway = "dc"
 
 **NAT modes:**
 
-| Value                      | Behavior |
-|----------------------------|----------|
-| (absent)                   | No NAT; device has a public IP on the upstream network. |
-| `"destination-independent"`| EIM: same external port for all destinations (cone NAT). |
-| `"destination-dependent"`  | EDM: different port per destination (symmetric-like). |
-| `"cgnat"`                  | SNAT without port mapping; subscriber traffic only. |
+| Value          | Behavior |
+|----------------|----------|
+| (absent)       | No NAT; device has a public IP on the upstream network. |
+| `"home"`       | EIM+APDF: same external port for all destinations (port-restricted cone). |
+| `"corporate"`  | EDM+APDF: different port per destination (symmetric NAT). |
+| `"cgnat"`      | EIM+EIF: carrier-grade NAT, stacks with home NAT. |
+| `"cloud-nat"`  | EDM+APDF: symmetric NAT with longer timeouts (AWS/Azure/GCP). |
+| `"full-cone"`  | EIM+EIF: any host can reach the mapped port. |
 
 **Region latency** can be added to introduce inter-router delays:
 
