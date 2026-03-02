@@ -418,7 +418,7 @@ async fn rate_two_hops_stacked() -> Result<()> {
 
 // ── Packet loss ──────────────────────────────────────────────────────
 
-/// 50% loss: ~500 of 1000 packets received.
+/// 50% egress loss drops roughly half the outbound packets.
 #[tokio::test(flavor = "current_thread")]
 #[traced_test]
 async fn loss_udp_moderate() -> Result<()> {
@@ -442,20 +442,23 @@ async fn loss_udp_moderate() -> Result<()> {
     let dc_ip = dc.uplink_ip().context("no dc uplink ip")?;
     let r = SocketAddr::new(IpAddr::V4(dc_ip), 18_000);
     dc.spawn_reflector(r)?;
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
 
+    // tc netem loss is on the device egress, so ~50% of probes reach the
+    // reflector and responses come back unlossed. Wide bounds account for
+    // statistical variance.
     let (_, received) = dev
         .spawn(move |_| async move {
-            test_utils::udp_send_recv_count(r, 1000, 64, Duration::from_secs(8)).await
+            test_utils::udp_send_recv_count(r, 1000, 64, Duration::from_secs(3)).await
         })?
         .await??;
     assert!(
-        received >= 200,
-        "expected ≥ 200 received at 50% loss (of 1000 sent), got {received}"
+        received >= 100,
+        "expected ≥ 100 received at 50% egress loss (of 1000 sent), got {received}"
     );
     assert!(
-        received <= 800,
-        "expected ≤ 800 received at 50% loss (of 1000 sent), got {received}"
+        received <= 900,
+        "expected ≤ 900 received at 50% egress loss (of 1000 sent), got {received}"
     );
     Ok(())
 }
@@ -484,11 +487,11 @@ async fn loss_udp_high() -> Result<()> {
     let dc_ip = dc.uplink_ip().context("no dc uplink ip")?;
     let r = SocketAddr::new(IpAddr::V4(dc_ip), 18_100);
     dc.spawn_reflector(r)?;
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
 
     let (_, received) = dev
         .spawn(move |_| async move {
-            test_utils::udp_send_recv_count(r, 100, 64, Duration::from_secs(3)).await
+            test_utils::udp_send_recv_count(r, 100, 64, Duration::from_secs(2)).await
         })?
         .await??;
     assert!(

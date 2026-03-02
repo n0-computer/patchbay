@@ -123,8 +123,13 @@ pub async fn udp_rtt_async(reflector: SocketAddr) -> Result<Duration> {
 
 /// Async UDP send/recv with paced sending for loss measurement.
 ///
-/// Sends `total` packets of `payload` bytes at a paced rate (1ms apart),
-/// then collects responses until `wait` elapses. Returns `(sent, received)`.
+/// Sends `total` packets of `payload` bytes at a paced rate (1ms apart)
+/// while concurrently collecting responses. Returns `(sent, received)` after
+/// all packets are sent and `wait` has elapsed since the last send.
+///
+/// Before the main burst, sends warmup probes to confirm the reflector is
+/// reachable (retries up to 2 seconds). This prevents false zeros from
+/// reflector startup races.
 ///
 /// Use inside `handle.spawn(|_| async move { udp_send_recv_count(r, 1000, 64, dur).await })`.
 pub async fn udp_send_recv_count(
@@ -136,24 +141,54 @@ pub async fn udp_send_recv_count(
     let sock = tokio::net::UdpSocket::bind("0.0.0.0:0")
         .await
         .context("udp bind")?;
-    let buf = vec![0u8; payload];
-    let mut recv_buf = vec![0u8; payload + 64];
 
-    // Send all packets with 1ms pacing to avoid overwhelming socket buffers.
-    for _ in 0..total {
-        let _ = sock.send_to(&buf, target).await;
-        tokio::time::sleep(Duration::from_millis(1)).await;
-    }
-
-    // Collect responses until deadline.
-    let deadline = tokio::time::Instant::now() + wait;
-    let mut received = 0usize;
+    // Warmup: confirm the reflector is live before starting the measured burst.
+    // Probes may traverse a lossy link, so we retry aggressively (50ms apart)
+    // for up to 5 seconds to handle both reflector startup delay and packet loss.
+    let mut warmup_buf = [0u8; 64];
+    let warmup_deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     loop {
-        match tokio::time::timeout_at(deadline, sock.recv_from(&mut recv_buf)).await {
-            Ok(Ok(_)) => received += 1,
-            Ok(Err(_)) => break,
-            Err(_) => break, // deadline reached
+        let _ = sock.send_to(b"WARMUP", target).await;
+        match tokio::time::timeout(Duration::from_millis(50), sock.recv_from(&mut warmup_buf))
+            .await
+        {
+            Ok(Ok(_)) => break,
+            _ if tokio::time::Instant::now() >= warmup_deadline => {
+                anyhow::bail!("reflector at {target} did not respond within 5s warmup");
+            }
+            _ => continue,
         }
     }
+
+    let buf = vec![0u8; payload];
+    let mut recv_buf = vec![0u8; payload + 64];
+    let mut received = 0usize;
+    let mut sent = 0usize;
+
+    // Send and receive concurrently so the socket buffer never overflows.
+    let mut next_send = tokio::time::Instant::now();
+    let mut deadline: Option<tokio::time::Instant> = None;
+    loop {
+        tokio::select! {
+            result = sock.recv_from(&mut recv_buf) => {
+                match result {
+                    Ok(_) => received += 1,
+                    Err(_) => break,
+                }
+            }
+            _ = tokio::time::sleep_until(next_send), if sent < total => {
+                let _ = sock.send_to(&buf, target).await;
+                sent += 1;
+                if sent >= total {
+                    deadline = Some(tokio::time::Instant::now() + wait);
+                }
+                next_send = tokio::time::Instant::now() + Duration::from_millis(1);
+            }
+            _ = tokio::time::sleep_until(deadline.unwrap_or(next_send)), if deadline.is_some() => {
+                break;
+            }
+        }
+    }
+
     Ok((total, received))
 }

@@ -30,6 +30,25 @@ revisiting virtual-time or advanced region latency.
 `from_config()` parses `regions` from TOML but does not call `add_region()`
 or `link_regions()`. Region topologies can only be built programmatically.
 
+#### Link condition loss is egress-only (medium)
+
+`tc netem loss` on a device interface only affects outbound packets. A "50%
+loss" link actually delivers ~50% in one direction and 100% in the other,
+which does not match how real lossy links (e.g. WiFi) behave. We should
+either apply netem on both ends of the veth pair, or use a single ingress +
+egress qdisc setup (e.g. ifb mirroring) so that `LinkCondition::Wifi` gives
+symmetric loss. The test bounds in `loss_udp_moderate` are currently widened
+to paper over this. Needs a design decision on where to apply qdiscs.
+
+#### `spawn_reflector` is fire-and-forget (medium)
+
+`spawn_reflector` enqueues a task on the namespace worker and returns
+immediately. There is no guarantee the reflector socket is bound by the time
+callers start sending probes, which causes intermittent test failures. The
+API should be async (return once the socket is bound) and return a drop
+guard that stops the reflector when dropped. This would eliminate the manual
+`sleep(300ms)` after every `spawn_reflector` call in tests.
+
 #### `ip route replace` shelling in break/restore (low)
 
 `break_region_link()` and `restore_region_link()` use `Command::new("ip")`
