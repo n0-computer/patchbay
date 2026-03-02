@@ -24,6 +24,9 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      - name: Enable unprivileged user namespaces
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+
       - name: Check
         run: cargo check --workspace --tests
 
