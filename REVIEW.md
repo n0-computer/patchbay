@@ -6,6 +6,8 @@ Higher-level suggestions that were not applied directly.
 
 ## Open
 
+* add RegionLink::is_empty and same for link conditions to remove manual > 0 checks at callsites. break region link should be async. never use run_closure_in with Command if you can easily make the call site async, use async command then to not block calling thread on sync cmds
+
 #### `add_host` hardcodes /24 assumption (low)
 
 `add_host(cidr, host)` replaces only the last octet, which only works for /24
@@ -60,6 +62,7 @@ for these rare operations.
 
 ## Completed
 
+59. **Arc\<str\> migration + NetworkCore method extraction** - All internal `String` fields migrated to `Arc<str>` (clones become refcount bumps). Lock-body logic extracted into `NetworkCore` methods (`prepare_link_regions`, `prepare_add_iface`, `prepare_replug_iface`, `remove_device`, `remove_router`, `resolve_link_target`, `remove_device_iface`, `renew_device_ip`, `add_dns_entry`, `router_nat_v6_params`, etc.) with purpose-built setup structs. Eliminates `let x; { lock; x = ...; }` pattern throughout `lab.rs` and `handles.rs`.
 57. **Mutex/lock architecture overhaul** - `LabInner` struct with `netns` + `cancel` outside the mutex; `with()`/`with_mut()` helpers on handles; cached `name`/`ns` on Device/Router/Ix; per-node `tokio::sync::Mutex<()>` for operation serialization; `parking_lot::Mutex` for topology lock; all handle mutation methods made async; pre-await reads combined into single lock; `set_nat_v6_mode` write order fixed
 58. **No-panics refactor** - Device/Router handles return `Result` or `Option` instead of panicking on removed nodes; `spawn()` returns `Result<JoinHandle>`; `with_device`/`with_router` return `Option<R>`; all test call sites updated
 56. **Region index overflow** - `region_base(idx)` uses `checked_mul(16).expect()` instead of unchecked arithmetic

@@ -149,8 +149,7 @@ pub async fn udp_send_recv_count(
     let warmup_deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     loop {
         let _ = sock.send_to(b"WARMUP", target).await;
-        match tokio::time::timeout(Duration::from_millis(50), sock.recv_from(&mut warmup_buf))
-            .await
+        match tokio::time::timeout(Duration::from_millis(50), sock.recv_from(&mut warmup_buf)).await
         {
             Ok(Ok(_)) => break,
             _ if tokio::time::Instant::now() >= warmup_deadline => {

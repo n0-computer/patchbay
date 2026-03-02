@@ -21,13 +21,13 @@ pub(crate) struct CoreConfig {
     /// Process-wide sequential lab identifier (from `LAB_COUNTER`).
     pub lab_id: u64,
     /// Process-unique lab prefix used for namespacing resources.
-    pub prefix: String,
+    pub prefix: Arc<str>,
     /// Dedicated lab root namespace name.
-    pub root_ns: String,
+    pub root_ns: Arc<str>,
     /// Short tag used to generate bridge interface names (e.g. `"p1230"`).
-    pub bridge_tag: String,
+    pub bridge_tag: Arc<str>,
     /// IX bridge interface name inside the lab root namespace.
-    pub ix_br: String,
+    pub ix_br: Arc<str>,
     /// IX gateway IPv4 address.
     pub ix_gw: Ipv4Addr,
     /// IX subnet CIDR.
@@ -90,11 +90,43 @@ impl RouterConfig {
     }
 }
 
+/// Parameters needed to (re-)configure NAT on a router.
+#[allow(dead_code)]
+pub(crate) struct RouterNatParams {
+    pub ns: Arc<str>,
+    pub lan_if: Arc<str>,
+    pub wan_if: Arc<str>,
+    pub upstream_ip: Ipv4Addr,
+}
+
+/// Parameters needed to (re-)configure IPv6 NAT on a router.
+pub(crate) struct RouterNatV6Params {
+    pub ns: Arc<str>,
+    pub wan_if: String,
+    pub lan_prefix: Ipv6Net,
+    pub wan_prefix: Ipv6Net,
+}
+
+/// Everything needed to wire a newly-added interface after the lock drops.
+pub(crate) struct AddIfaceSetup {
+    pub iface_build: IfaceBuild,
+    pub prefix: Arc<str>,
+    pub root_ns: Arc<str>,
+    pub mtu: Option<u32>,
+}
+
+/// Everything needed to wire a replugged interface after the lock drops.
+pub(crate) struct ReplugIfaceSetup {
+    pub iface_build: IfaceBuild,
+    pub prefix: Arc<str>,
+    pub root_ns: Arc<str>,
+}
+
 /// One network interface on a device, connected to a router's downstream switch.
 #[derive(Clone, Debug)]
 pub(crate) struct DeviceIfaceData {
     /// Interface name inside the device namespace (e.g. `"eth0"`).
-    pub ifname: String,
+    pub ifname: Arc<str>,
     /// Switch this interface is attached to.
     pub uplink: NodeId,
     /// Assigned IPv4 address.
@@ -113,13 +145,13 @@ pub(crate) struct DeviceData {
     /// Identifies the device node.
     pub id: NodeId,
     /// Device name.
-    pub name: String,
+    pub name: Arc<str>,
     /// Device namespace name.
-    pub ns: String,
+    pub ns: Arc<str>,
     /// Interfaces in declaration order.
     pub interfaces: Vec<DeviceIfaceData>,
     /// `ifname` of the interface that carries the default route.
-    pub default_via: String,
+    pub default_via: Arc<str>,
     /// Optional MTU for all interfaces.
     pub mtu: Option<u32>,
     /// Per-device operation lock — serializes multi-step mutations.
@@ -129,12 +161,12 @@ pub(crate) struct DeviceData {
 impl DeviceData {
     /// Looks up an interface by name.
     pub(crate) fn iface(&self, name: &str) -> Option<&DeviceIfaceData> {
-        self.interfaces.iter().find(|i| i.ifname == name)
+        self.interfaces.iter().find(|i| &*i.ifname == name)
     }
 
     /// Looks up an interface mutably by name.
     pub(crate) fn iface_mut(&mut self, name: &str) -> Option<&mut DeviceIfaceData> {
-        self.interfaces.iter_mut().find(|i| i.ifname == name)
+        self.interfaces.iter_mut().find(|i| &*i.ifname == name)
     }
 
     /// Returns the interface that carries the default route.
@@ -154,15 +186,15 @@ pub(crate) struct RouterData {
     /// Identifies the router.
     pub id: NodeId,
     /// Router name.
-    pub name: String,
+    pub name: Arc<str>,
     /// Router namespace name.
-    pub ns: String,
+    pub ns: Arc<str>,
     /// Optional region label.
-    pub region: Option<String>,
+    pub region: Option<Arc<str>>,
     /// Static router configuration.
     pub cfg: RouterConfig,
     /// Bridge name for the downstream LAN side.
-    pub downlink_bridge: String,
+    pub downlink_bridge: Arc<str>,
     /// Uplink switch identifier.
     pub uplink: Option<NodeId>,
     /// Router uplink IPv4 address.
@@ -198,7 +230,7 @@ impl RouterData {
 #[derive(Clone, Debug)]
 pub(crate) struct Switch {
     /// Switch name.
-    pub name: String,
+    pub name: Arc<str>,
     /// IPv4 subnet, if assigned.
     pub cidr: Option<Ipv4Net>,
     /// IPv4 gateway address, if assigned.
@@ -210,7 +242,7 @@ pub(crate) struct Switch {
     /// Owning router for managed downstream switches.
     pub owner_router: Option<NodeId>,
     /// Backing bridge name.
-    pub bridge: Option<String>,
+    pub bridge: Option<Arc<str>>,
     pub(crate) next_host: u8,
     pub(crate) next_host_v6: u8,
 }
@@ -218,17 +250,17 @@ pub(crate) struct Switch {
 /// Per-interface wiring job collected by `build()`.
 #[derive(Clone)]
 pub(crate) struct IfaceBuild {
-    pub(crate) dev_ns: String,
-    pub(crate) gw_ns: String,
+    pub(crate) dev_ns: Arc<str>,
+    pub(crate) gw_ns: Arc<str>,
     pub(crate) gw_ip: Option<Ipv4Addr>,
-    pub(crate) gw_br: String,
+    pub(crate) gw_br: Arc<str>,
     pub(crate) dev_ip: Option<Ipv4Addr>,
     pub(crate) prefix_len: u8,
     pub(crate) gw_ip_v6: Option<Ipv6Addr>,
     pub(crate) dev_ip_v6: Option<Ipv6Addr>,
     pub(crate) prefix_len_v6: u8,
     pub(crate) impair: Option<LinkCondition>,
-    pub(crate) ifname: String,
+    pub(crate) ifname: Arc<str>,
     pub(crate) is_default: bool,
     pub(crate) idx: u64,
 }
@@ -371,6 +403,44 @@ pub(crate) struct RegionLinkData {
     pub broken: bool,
 }
 
+/// One side of an inter-region link.
+pub(crate) struct RegionSide {
+    pub ns: Arc<str>,
+    pub idx: u8,
+    pub ip: Ipv4Addr,
+    pub ip6: Ipv6Addr,
+    pub sub_v6: Option<Ipv6Net>,
+}
+
+/// Setup data returned by [`NetworkCore::prepare_link_regions`].
+pub(crate) struct LinkRegionsSetup {
+    pub a: RegionSide,
+    pub b: RegionSide,
+    pub root_ns: Arc<str>,
+}
+
+/// Setup data returned by [`NetworkCore::prepare_break_region_link`].
+pub(crate) struct BreakRegionSetup {
+    pub a_ns: Arc<str>,
+    pub b_ns: Arc<str>,
+    pub link_key: (Arc<str>, Arc<str>),
+    /// IP of intermediate region `m` on the m↔a veth.
+    pub m_ip_on_ma: Ipv4Addr,
+    /// IP of intermediate region `m` on the m↔b veth.
+    pub m_ip_on_mb: Ipv4Addr,
+}
+
+/// Setup data returned by [`NetworkCore::prepare_restore_region_link`].
+pub(crate) struct RestoreRegionSetup {
+    pub a_ns: Arc<str>,
+    pub b_ns: Arc<str>,
+    pub link_key: (Arc<str>, Arc<str>),
+    /// b's IP on the direct a↔b veth (route target from a's side).
+    pub b_direct_ip: Ipv4Addr,
+    /// a's IP on the direct a↔b veth (route target from b's side).
+    pub a_direct_ip: Ipv4Addr,
+}
+
 /// Shared lab interior — holds both the topology mutex and the namespace
 /// manager. `netns` and `cancel` live here (not behind the mutex) because
 /// they are `Arc`-shared and internally synchronized.
@@ -431,11 +501,11 @@ pub(crate) struct NetworkCore {
     devices: HashMap<NodeId, DeviceData>,
     routers: HashMap<NodeId, RouterData>,
     switches: HashMap<NodeId, Switch>,
-    nodes_by_name: HashMap<String, NodeId>,
+    nodes_by_name: HashMap<Arc<str>, NodeId>,
     /// Named regions. Key = user-facing name (e.g. "us"), not "region_us".
-    pub(crate) regions: HashMap<String, RegionInfo>,
+    pub(crate) regions: HashMap<Arc<str>, RegionInfo>,
     /// Inter-region links. Key = canonically ordered (min, max) region names.
-    pub(crate) region_links: HashMap<(String, String), RegionLinkData>,
+    pub(crate) region_links: HashMap<(Arc<str>, Arc<str>), RegionLinkData>,
     /// Next region index (1–16).
     next_region_idx: u8,
     /// Next /30 offset for inter-region veths in 203.0.113.0/24.
@@ -561,28 +631,67 @@ impl NetworkCore {
         self.devices.contains_key(&id).then_some(id)
     }
 
-    /// Returns `(ns, downlink_bridge_name, wan_if_name, upstream_ip)` for a built router.
-    pub(crate) fn router_nat_params(
-        &self,
-        id: NodeId,
-    ) -> Result<(String, String, String, Ipv4Addr)> {
+    /// Returns the namespace, interface names, and upstream IP needed for NAT configuration.
+    pub(crate) fn router_nat_params(&self, id: NodeId) -> Result<RouterNatParams> {
         let router = self.routers.get(&id).context("unknown router id")?;
-        let wan_if = router.wan_ifname(self.ix_sw);
         let upstream_ip = router
             .upstream_ip
             .context("router has no upstream ip (not yet built?)")?;
-        Ok((
-            router.ns.clone(),
-            router.downlink_bridge.clone(),
-            wan_if.to_string(),
+        Ok(RouterNatParams {
+            ns: router.ns.clone(),
+            lan_if: router.downlink_bridge.clone(),
+            wan_if: router.wan_ifname(self.ix_sw).into(),
             upstream_ip,
-        ))
+        })
     }
 
     /// Stores an updated NAT mode on the router record.
     pub(crate) fn set_router_nat_mode(&mut self, id: NodeId, mode: Nat) -> Result<()> {
         let router = self.routers.get_mut(&id).context("unknown router id")?;
         router.cfg.nat = mode;
+        Ok(())
+    }
+
+    /// Returns parameters needed to configure IPv6 NAT on a router.
+    pub(crate) fn router_nat_v6_params(&self, id: NodeId) -> Result<RouterNatV6Params> {
+        let router = self.routers.get(&id).context("router removed")?;
+        let wan_if = router.wan_ifname(self.ix_sw()).to_string();
+        let lan_prefix = router.downstream_cidr_v6.unwrap_or_else(|| {
+            Ipv6Net::new(Ipv6Addr::new(0xfd10, 0, 0, 0, 0, 0, 0, 0), 64).unwrap()
+        });
+        let wan_prefix = {
+            let up_ip = router.upstream_ip_v6.unwrap_or(Ipv6Addr::UNSPECIFIED);
+            let up_prefix = if router.uplink == Some(self.ix_sw()) {
+                self.cfg.ix_cidr_v6.prefix_len()
+            } else {
+                router
+                    .uplink
+                    .and_then(|sw| self.switches.get(&sw))
+                    .and_then(|sw| sw.cidr_v6)
+                    .map(|c| c.prefix_len())
+                    .unwrap_or(64)
+            };
+            Ipv6Net::new(up_ip, up_prefix).unwrap_or_else(|_| Ipv6Net::new(up_ip, 128).unwrap())
+        };
+        Ok(RouterNatV6Params {
+            ns: router.ns.clone(),
+            wan_if,
+            lan_prefix,
+            wan_prefix,
+        })
+    }
+
+    /// Stores an updated IPv6 NAT mode on the router record.
+    pub(crate) fn set_router_nat_v6_mode(&mut self, id: NodeId, mode: NatV6Mode) -> Result<()> {
+        let router = self.routers.get_mut(&id).context("router removed")?;
+        router.cfg.nat_v6 = mode;
+        Ok(())
+    }
+
+    /// Stores an updated firewall config on the router record.
+    pub(crate) fn set_router_firewall(&mut self, id: NodeId, fw: Firewall) -> Result<()> {
+        let router = self.routers.get_mut(&id).context("router removed")?;
+        router.cfg.firewall = fw;
         Ok(())
     }
 
@@ -600,19 +709,19 @@ impl NetworkCore {
         name: &str,
         nat: Nat,
         downstream_pool: DownstreamPool,
-        region: Option<String>,
+        region: Option<Arc<str>>,
         ip_support: IpSupport,
         nat_v6: NatV6Mode,
     ) -> NodeId {
         let id = NodeId(self.alloc_id());
-        let ns = format!("lab{}-r{}", self.cfg.lab_id, id.0);
-        let downlink_bridge = self.next_bridge_name();
-        self.nodes_by_name.insert(name.to_string(), id);
+        let ns: Arc<str> = format!("lab{}-r{}", self.cfg.lab_id, id.0).into();
+        let downlink_bridge: Arc<str> = self.next_bridge_name().into();
+        self.nodes_by_name.insert(name.into(), id);
         self.routers.insert(
             id,
             RouterData {
                 id,
-                name: name.to_string(),
+                name: name.into(),
                 ns,
                 region,
                 cfg: RouterConfig {
@@ -647,16 +756,16 @@ impl NetworkCore {
     /// interface (first interface by default).
     pub(crate) fn add_device(&mut self, name: &str) -> NodeId {
         let id = NodeId(self.alloc_id());
-        let ns = format!("lab{}-d{}", self.cfg.lab_id, id.0);
-        self.nodes_by_name.insert(name.to_string(), id);
+        let ns: Arc<str> = format!("lab{}-d{}", self.cfg.lab_id, id.0).into();
+        self.nodes_by_name.insert(name.into(), id);
         self.devices.insert(
             id,
             DeviceData {
                 id,
-                name: name.to_string(),
+                name: name.into(),
                 ns,
                 interfaces: vec![],
-                default_via: String::new(),
+                default_via: "".into(),
                 mtu: None,
                 op: Arc::new(tokio::sync::Mutex::new(())),
             },
@@ -706,10 +815,10 @@ impl NetworkCore {
             .ok_or_else(|| anyhow!("unknown device id"))?;
         // First interface becomes the default unless overridden later.
         if dev.default_via.is_empty() {
-            dev.default_via = ifname.to_string();
+            dev.default_via = ifname.into();
         }
         dev.interfaces.push(DeviceIfaceData {
-            ifname: ifname.to_string(),
+            ifname: ifname.into(),
             uplink: downlink,
             ip: assigned,
             ip_v6: assigned_v6,
@@ -719,16 +828,172 @@ impl NetworkCore {
         Ok(assigned)
     }
 
+    /// Registers a new interface on a device and returns everything needed to wire it.
+    ///
+    /// Validates uniqueness, allocates IPs, snapshots switch/gateway data.
+    pub(crate) fn prepare_add_iface(
+        &mut self,
+        device: NodeId,
+        ifname: &str,
+        router: NodeId,
+        impair: Option<LinkCondition>,
+    ) -> Result<AddIfaceSetup> {
+        let dev = self
+            .device(device)
+            .ok_or_else(|| anyhow!("device removed"))?;
+        if dev.interfaces.iter().any(|i| &*i.ifname == ifname) {
+            bail!("device '{}' already has interface '{}'", dev.name, ifname);
+        }
+        let dev_ns = dev.ns.clone();
+        let mtu = dev.mtu;
+
+        self.add_device_iface(device, ifname, router, impair)?;
+
+        let dev = self.device(device).unwrap();
+        let iface = dev
+            .interfaces
+            .iter()
+            .find(|i| &*i.ifname == ifname)
+            .unwrap();
+        let sw = self
+            .switch(iface.uplink)
+            .ok_or_else(|| anyhow!("switch missing"))?;
+        let gw_router = sw
+            .owner_router
+            .ok_or_else(|| anyhow!("switch missing owner"))?;
+        let gw_br = sw.bridge.clone().unwrap_or_else(|| "br-lan".into());
+        let gw_ns = self.router(gw_router).unwrap().ns.clone();
+
+        let iface_build = IfaceBuild {
+            dev_ns,
+            gw_ns,
+            gw_ip: sw.gw,
+            gw_br,
+            dev_ip: iface.ip,
+            prefix_len: sw.cidr.map(|c| c.prefix_len()).unwrap_or(24),
+            gw_ip_v6: sw.gw_v6,
+            dev_ip_v6: iface.ip_v6,
+            prefix_len_v6: sw.cidr_v6.map(|c| c.prefix_len()).unwrap_or(64),
+            impair,
+            ifname: ifname.into(),
+            is_default: false,
+            idx: iface.idx,
+        };
+        Ok(AddIfaceSetup {
+            iface_build,
+            prefix: self.cfg.prefix.clone(),
+            root_ns: self.cfg.root_ns.clone(),
+            mtu,
+        })
+    }
+
+    /// Prepares data for replugging an interface to a different router.
+    ///
+    /// Extracts old interface info, allocates new IPs from target router's pool,
+    /// and builds the `IfaceBuild` snapshot.
+    pub(crate) fn prepare_replug_iface(
+        &mut self,
+        device: NodeId,
+        ifname: &str,
+        to_router: NodeId,
+    ) -> Result<ReplugIfaceSetup> {
+        let dev = self
+            .device(device)
+            .ok_or_else(|| anyhow!("device removed"))?
+            .clone();
+        let iface = dev
+            .interfaces
+            .iter()
+            .find(|i| &*i.ifname == ifname)
+            .ok_or_else(|| anyhow!("device '{}' has no interface '{}'", dev.name, ifname))?;
+        let old_idx = iface.idx;
+        let impair = iface.impair;
+        let is_default = ifname == &*dev.default_via;
+
+        let target_router = self
+            .router(to_router)
+            .ok_or_else(|| anyhow!("unknown target router id"))?
+            .clone();
+        let downlink_sw = target_router.downlink.ok_or_else(|| {
+            anyhow!(
+                "target router '{}' has no downstream switch",
+                target_router.name
+            )
+        })?;
+        let sw = self
+            .switch(downlink_sw)
+            .ok_or_else(|| anyhow!("target router's downlink switch missing"))?
+            .clone();
+        let gw_br = sw.bridge.clone().unwrap_or_else(|| "br-lan".into());
+        let new_ip = if sw.cidr.is_some() {
+            Some(self.alloc_from_switch(downlink_sw)?)
+        } else {
+            None
+        };
+        let new_ip_v6 = if sw.cidr_v6.is_some() {
+            Some(self.alloc_from_switch_v6(downlink_sw)?)
+        } else {
+            None
+        };
+        let prefix_len = sw.cidr.map(|c| c.prefix_len()).unwrap_or(24);
+
+        let iface_build = IfaceBuild {
+            dev_ns: dev.ns.clone(),
+            gw_ns: target_router.ns.clone(),
+            gw_ip: sw.gw,
+            gw_br,
+            dev_ip: new_ip,
+            prefix_len,
+            gw_ip_v6: sw.gw_v6,
+            dev_ip_v6: new_ip_v6,
+            prefix_len_v6: sw.cidr_v6.map(|c| c.prefix_len()).unwrap_or(64),
+            impair,
+            ifname: ifname.into(),
+            is_default,
+            idx: old_idx,
+        };
+        Ok(ReplugIfaceSetup {
+            iface_build,
+            prefix: self.cfg.prefix.clone(),
+            root_ns: self.cfg.root_ns.clone(),
+        })
+    }
+
+    /// Updates interface records after a replug (new uplink, IPs).
+    pub(crate) fn finish_replug_iface(
+        &mut self,
+        device: NodeId,
+        ifname: &str,
+        to_router: NodeId,
+        new_ip: Option<Ipv4Addr>,
+        new_ip_v6: Option<Ipv6Addr>,
+    ) -> Result<()> {
+        let new_uplink = self
+            .router(to_router)
+            .ok_or_else(|| anyhow!("target router disappeared"))?
+            .downlink
+            .ok_or_else(|| anyhow!("target router has no downlink"))?;
+        let dev = self
+            .device_mut(device)
+            .ok_or_else(|| anyhow!("device disappeared"))?;
+        if let Some(iface) = dev.interfaces.iter_mut().find(|i| &*i.ifname == ifname) {
+            iface.uplink = new_uplink;
+            iface.ip = new_ip;
+            iface.ip_v6 = new_ip_v6;
+        }
+        Ok(())
+    }
+
     /// Changes which interface carries the default route.
     pub(crate) fn set_device_default_via(&mut self, device: NodeId, ifname: &str) -> Result<()> {
         let dev = self
             .devices
             .get_mut(&device)
             .ok_or_else(|| anyhow!("unknown device id"))?;
-        if !dev.interfaces.iter().any(|i| i.ifname == ifname) {
+        if !dev.interfaces.iter().any(|i| &*i.ifname == ifname) {
             bail!("interface '{}' not found on device '{}'", ifname, dev.name);
         }
-        dev.default_via = ifname.to_string();
+        dev.default_via = ifname.into();
         Ok(())
     }
 
@@ -752,11 +1017,11 @@ impl NetworkCore {
         gw_v6: Option<Ipv6Addr>,
     ) -> NodeId {
         let id = NodeId(self.alloc_id());
-        self.nodes_by_name.insert(name.to_string(), id);
+        self.nodes_by_name.insert(name.into(), id);
         self.switches.insert(
             id,
             Switch {
-                name: name.to_string(),
+                name: name.into(),
                 cidr,
                 gw,
                 cidr_v6,
@@ -1065,20 +1330,381 @@ impl NetworkCore {
         self.routers.keys().copied().collect()
     }
 
-    /// Removes a device from the internal data structures.
-    pub(crate) fn remove_device(&mut self, id: NodeId) {
-        if let Some(dev) = self.devices.remove(&id) {
-            self.nodes_by_name.remove(&dev.name);
+    /// Validates and removes a device, returning its namespace for worker cleanup.
+    pub(crate) fn remove_device(&mut self, id: NodeId) -> Result<Arc<str>> {
+        let dev = self
+            .devices
+            .get(&id)
+            .ok_or_else(|| anyhow!("unknown device id {:?}", id))?;
+        let ns = dev.ns.clone();
+        self.nodes_by_name.remove(&dev.name);
+        self.devices.remove(&id);
+        Ok(ns)
+    }
+
+    /// Validates and removes a router, returning its namespace for worker cleanup.
+    ///
+    /// Fails if any devices are still connected to this router's downstream switch.
+    pub(crate) fn remove_router(&mut self, id: NodeId) -> Result<Arc<str>> {
+        let router = self
+            .routers
+            .get(&id)
+            .ok_or_else(|| anyhow!("unknown router id {:?}", id))?;
+        // Check that no devices are connected to this router's downstream switch.
+        if let Some(sw_id) = router.downlink {
+            for dev in self.devices.values() {
+                for iface in &dev.interfaces {
+                    if iface.uplink == sw_id {
+                        bail!(
+                            "cannot remove router '{}': device '{}' is still connected",
+                            router.name,
+                            dev.name
+                        );
+                    }
+                }
+            }
+        }
+        let ns = router.ns.clone();
+        self.nodes_by_name.remove(&router.name);
+        if let Some(sw_id) = self.routers.remove(&id).unwrap().downlink {
+            self.switches.remove(&sw_id);
+        }
+        Ok(ns)
+    }
+
+    /// Validates and removes an interface from a device, returning the device ns.
+    ///
+    /// Ensures the device keeps at least one interface and fixes `default_via`
+    /// if the removed interface was the default.
+    pub(crate) fn remove_device_iface(&mut self, dev_id: NodeId, ifname: &str) -> Result<Arc<str>> {
+        let dev = self
+            .device_mut(dev_id)
+            .ok_or_else(|| anyhow!("device removed"))?;
+        if dev.interfaces.len() <= 1 {
+            bail!(
+                "cannot remove '{}': device '{}' must keep at least one interface",
+                ifname,
+                dev.name
+            );
+        }
+        let pos = dev
+            .interfaces
+            .iter()
+            .position(|i| &*i.ifname == ifname)
+            .ok_or_else(|| anyhow!("device '{}' has no interface '{}'", dev.name, ifname))?;
+        dev.interfaces.remove(pos);
+        if &*dev.default_via == ifname {
+            dev.default_via = dev.interfaces[0].ifname.clone();
+        }
+        Ok(dev.ns.clone())
+    }
+
+    /// Allocates a new IP for a device interface, updates the record, returns
+    /// `(ns, old_ip, new_ip, prefix_len)`.
+    pub(crate) fn renew_device_ip(
+        &mut self,
+        dev_id: NodeId,
+        ifname: &str,
+    ) -> Result<(Arc<str>, Ipv4Addr, Ipv4Addr, u8)> {
+        let dev = self
+            .device(dev_id)
+            .ok_or_else(|| anyhow!("device removed"))?;
+        let iface = dev
+            .iface(ifname)
+            .ok_or_else(|| anyhow!("device '{}' has no interface '{}'", dev.name, ifname))?;
+        let old_ip = iface
+            .ip
+            .ok_or_else(|| anyhow!("interface '{}' has no IPv4 address", ifname))?;
+        let sw_id = iface.uplink;
+        let prefix_len = self
+            .switch(sw_id)
+            .ok_or_else(|| anyhow!("switch for interface '{}' missing", ifname))?
+            .cidr
+            .map(|c| c.prefix_len())
+            .unwrap_or(24);
+        let ns = dev.ns.clone();
+        let new_ip = self.alloc_from_switch(sw_id)?;
+        let dev = self.device_mut(dev_id).unwrap();
+        dev.iface_mut(ifname).unwrap().ip = Some(new_ip);
+        Ok((ns, old_ip, new_ip, prefix_len))
+    }
+
+    /// Adds a global DNS entry and writes all hosts files.
+    pub(crate) fn add_dns_entry(&mut self, name: &str, ip: IpAddr) -> Result<()> {
+        self.dns.global.push((name.to_string(), ip));
+        let ids: Vec<_> = self.all_device_ids();
+        self.dns.write_all_hosts_files(&ids)
+    }
+
+    // ── Link target resolution ───────────────────────────────────────
+
+    /// Resolves the `(namespace, ifname)` for impairment between two connected nodes.
+    ///
+    /// Handles Device↔Router (in either order) and Router↔Router (upstream/downstream).
+    pub(crate) fn resolve_link_target(&self, a: NodeId, b: NodeId) -> Result<(Arc<str>, Arc<str>)> {
+        // Try Device ↔ Router in both orderings.
+        for (dev_id, router_id) in [(a, b), (b, a)] {
+            if let (Some(dev), Some(router)) = (self.device(dev_id), self.router(router_id)) {
+                let downlink_sw = router
+                    .downlink
+                    .ok_or_else(|| anyhow!("router '{}' has no downstream switch", router.name))?;
+                let iface = dev
+                    .interfaces
+                    .iter()
+                    .find(|i| i.uplink == downlink_sw)
+                    .ok_or_else(|| {
+                        anyhow!(
+                            "device '{}' is not connected to router '{}'",
+                            dev.name,
+                            router.name
+                        )
+                    })?;
+                return Ok((dev.ns.clone(), iface.ifname.clone()));
+            }
+        }
+
+        // Router ↔ Router — one must be upstream of the other.
+        if let (Some(ra), Some(rb)) = (self.router(a), self.router(b)) {
+            let ix_sw = self.ix_sw();
+            // Check if b is downstream of a.
+            if let Some(a_down) = ra.downlink {
+                if rb.uplink == Some(a_down) {
+                    return Ok((rb.ns.clone(), rb.wan_ifname(ix_sw).into()));
+                }
+            }
+            // Check if a is downstream of b.
+            if let Some(b_down) = rb.downlink {
+                if ra.uplink == Some(b_down) {
+                    return Ok((ra.ns.clone(), ra.wan_ifname(ix_sw).into()));
+                }
+            }
+            bail!(
+                "routers '{}' and '{}' are not directly connected",
+                ra.name,
+                rb.name
+            );
+        }
+
+        bail!(
+            "nodes {:?} and {:?} are not a connected device-router or router-router pair",
+            a,
+            b
+        );
+    }
+
+    // ── Region link helpers ────────────────────────────────────────────
+
+    /// Canonical sorted key for a region-pair link.
+    pub(crate) fn region_link_key(a: &str, b: &str) -> (Arc<str>, Arc<str>) {
+        if a < b {
+            (Arc::from(a), Arc::from(b))
+        } else {
+            (Arc::from(b), Arc::from(a))
         }
     }
 
-    /// Removes a router and its downstream switch from the internal data structures.
-    pub(crate) fn remove_router(&mut self, id: NodeId) {
-        if let Some(router) = self.routers.remove(&id) {
-            self.nodes_by_name.remove(&router.name);
-            if let Some(sw_id) = router.downlink {
-                self.switches.remove(&sw_id);
-            }
+    /// Validates and allocates everything needed to create an inter-region link.
+    ///
+    /// Caller is responsible for the async network setup after releasing the lock.
+    pub(crate) fn prepare_link_regions(
+        &mut self,
+        a_name: &str,
+        b_name: &str,
+    ) -> Result<LinkRegionsSetup> {
+        let link_key = Self::region_link_key(a_name, b_name);
+        if self.region_links.contains_key(&link_key) {
+            bail!("regions '{a_name}' and '{b_name}' are already linked");
+        }
+
+        let a_info = self
+            .regions
+            .get(a_name)
+            .ok_or_else(|| anyhow!("region '{a_name}' not found"))?
+            .clone();
+        let b_info = self
+            .regions
+            .get(b_name)
+            .ok_or_else(|| anyhow!("region '{b_name}' not found"))?
+            .clone();
+
+        let a_ns = self.router(a_info.router_id).unwrap().ns.clone();
+        let b_ns = self.router(b_info.router_id).unwrap().ns.clone();
+        let root_ns = self.cfg.root_ns.clone();
+
+        // v6 CIDRs from region sub-switches.
+        let a_downlink = self.router(a_info.router_id).unwrap().downlink;
+        let b_downlink = self.router(b_info.router_id).unwrap().downlink;
+        let a_sub_v6 = a_downlink.and_then(|sw| self.switch(sw).and_then(|s| s.cidr_v6));
+        let b_sub_v6 = b_downlink.and_then(|sw| self.switch(sw).and_then(|s| s.cidr_v6));
+
+        let (ip_a, ip_b) = self.alloc_interregion_ips()?;
+        let (ip6_a, ip6_b) = self.alloc_interregion_ips_v6()?;
+
+        // Store IPs in sorted key order: ip_a belongs to link_key.0, ip_b to link_key.1.
+        let (stored_ip_a, stored_ip_b) = if a_name < b_name {
+            (ip_a, ip_b)
+        } else {
+            (ip_b, ip_a)
+        };
+        self.region_links.insert(
+            link_key,
+            RegionLinkData {
+                ip_a: stored_ip_a,
+                ip_b: stored_ip_b,
+                broken: false,
+            },
+        );
+
+        Ok(LinkRegionsSetup {
+            a: RegionSide {
+                ns: a_ns,
+                idx: a_info.idx,
+                ip: ip_a,
+                ip6: ip6_a,
+                sub_v6: a_sub_v6,
+            },
+            b: RegionSide {
+                ns: b_ns,
+                idx: b_info.idx,
+                ip: ip_b,
+                ip6: ip6_b,
+                sub_v6: b_sub_v6,
+            },
+            root_ns,
+        })
+    }
+
+    /// Validates and resolves the intermediate region for breaking a region link.
+    ///
+    /// Does **not** mark the link as broken — caller must do that after the
+    /// route-replace commands succeed.
+    pub(crate) fn prepare_break_region_link(
+        &self,
+        a_name: &str,
+        b_name: &str,
+    ) -> Result<BreakRegionSetup> {
+        let link_key = Self::region_link_key(a_name, b_name);
+        let link = self
+            .region_links
+            .get(&link_key)
+            .ok_or_else(|| anyhow!("no link between '{a_name}' and '{b_name}'"))?;
+        if link.broken {
+            bail!("link between '{a_name}' and '{b_name}' is already broken");
+        }
+
+        let a_rid = self
+            .regions
+            .get(a_name)
+            .ok_or_else(|| anyhow!("region '{a_name}' not found"))?
+            .router_id;
+        let b_rid = self
+            .regions
+            .get(b_name)
+            .ok_or_else(|| anyhow!("region '{b_name}' not found"))?
+            .router_id;
+
+        // Find intermediate region m with non-broken links to both a and b.
+        let m_name = self
+            .regions
+            .keys()
+            .find(|name| {
+                let n: &str = name;
+                if n == a_name || n == b_name {
+                    return false;
+                }
+                let key_ma = Self::region_link_key(n, a_name);
+                let key_mb = Self::region_link_key(n, b_name);
+                let link_ma = self.region_links.get(&key_ma);
+                let link_mb = self.region_links.get(&key_mb);
+                matches!((link_ma, link_mb), (Some(la), Some(lb)) if !la.broken && !lb.broken)
+            })
+            .cloned()
+            .ok_or_else(|| {
+                anyhow!("no intermediate region found to reroute '{a_name}'↔'{b_name}'")
+            })?;
+
+        // Get the veth IPs for m↔a and m↔b links.
+        let key_ma = Self::region_link_key(&m_name, a_name);
+        let link_ma = self.region_links.get(&key_ma).unwrap();
+        let m_ip_on_ma = if &*key_ma.0 == a_name {
+            link_ma.ip_b
+        } else {
+            link_ma.ip_a
+        };
+
+        let key_mb = Self::region_link_key(&m_name, b_name);
+        let link_mb = self.region_links.get(&key_mb).unwrap();
+        let m_ip_on_mb = if &*key_mb.0 == b_name {
+            link_mb.ip_b
+        } else {
+            link_mb.ip_a
+        };
+
+        let a_ns = self.router(a_rid).unwrap().ns.clone();
+        let b_ns = self.router(b_rid).unwrap().ns.clone();
+
+        Ok(BreakRegionSetup {
+            a_ns,
+            b_ns,
+            link_key,
+            m_ip_on_ma,
+            m_ip_on_mb,
+        })
+    }
+
+    /// Validates and resolves IPs for restoring a broken region link.
+    ///
+    /// Does **not** mark the link as restored — caller must do that after the
+    /// route-replace commands succeed.
+    pub(crate) fn prepare_restore_region_link(
+        &self,
+        a_name: &str,
+        b_name: &str,
+    ) -> Result<RestoreRegionSetup> {
+        let link_key = Self::region_link_key(a_name, b_name);
+        let link = self
+            .region_links
+            .get(&link_key)
+            .ok_or_else(|| anyhow!("no link between '{a_name}' and '{b_name}'"))?;
+        if !link.broken {
+            bail!("link between '{a_name}' and '{b_name}' is not broken");
+        }
+
+        let a_rid = self
+            .regions
+            .get(a_name)
+            .ok_or_else(|| anyhow!("region '{a_name}' not found"))?
+            .router_id;
+        let b_rid = self
+            .regions
+            .get(b_name)
+            .ok_or_else(|| anyhow!("region '{b_name}' not found"))?
+            .router_id;
+        let a_ns = self.router(a_rid).unwrap().ns.clone();
+        let b_ns = self.router(b_rid).unwrap().ns.clone();
+
+        // link_key.0 is the alphabetically-first region name.
+        // link.ip_a belongs to link_key.0, link.ip_b to link_key.1.
+        let (b_direct_ip, a_direct_ip) = if &*link_key.0 == a_name {
+            // a == link_key.0 → b's direct IP is link.ip_b, a's is link.ip_a
+            (link.ip_b, link.ip_a)
+        } else {
+            (link.ip_a, link.ip_b)
+        };
+
+        Ok(RestoreRegionSetup {
+            a_ns,
+            b_ns,
+            link_key,
+            b_direct_ip,
+            a_direct_ip,
+        })
+    }
+
+    /// Marks a region link as broken or restored.
+    pub(crate) fn set_region_link_broken(&mut self, link_key: &(Arc<str>, Arc<str>), broken: bool) {
+        if let Some(link) = self.region_links.get_mut(link_key) {
+            link.broken = broken;
         }
     }
 }
@@ -1134,23 +1760,24 @@ pub(crate) async fn setup_root_ns_async(
 
 /// Data snapshot needed to set up a single router.
 #[derive(Clone)]
+#[allow(clippy::type_complexity)]
 pub(crate) struct RouterSetupData {
     pub router: RouterData,
-    pub root_ns: String,
-    pub prefix: String,
+    pub root_ns: Arc<str>,
+    pub prefix: Arc<str>,
     pub ix_sw: NodeId,
-    pub ix_br: String,
+    pub ix_br: Arc<str>,
     pub ix_gw: Ipv4Addr,
     pub ix_cidr_prefix: u8,
     /// For sub-routers: upstream switch info.
-    pub upstream_owner_ns: Option<String>,
-    pub upstream_bridge: Option<String>,
+    pub upstream_owner_ns: Option<Arc<str>>,
+    pub upstream_bridge: Option<Arc<str>>,
     pub upstream_gw: Option<Ipv4Addr>,
     pub upstream_cidr_prefix: Option<u8>,
     /// For IX-level public routers: downstream CIDR for return route.
     pub return_route: Option<(Ipv4Addr, u8, Ipv4Addr)>,
     /// Downlink bridge name (if router has downstream switch) and optional v4 address.
-    pub downlink_bridge: Option<(String, Option<(Ipv4Addr, u8)>)>,
+    pub downlink_bridge: Option<(Arc<str>, Option<(Ipv4Addr, u8)>)>,
     // ── IPv6 fields ──
     pub ix_gw_v6: Option<Ipv6Addr>,
     pub ix_cidr_v6_prefix: Option<u8>,
@@ -1160,10 +1787,10 @@ pub(crate) struct RouterSetupData {
     pub downlink_bridge_v6: Option<(Ipv6Addr, u8)>,
     /// For sub-routers with NatV6Mode::None: route in the parent router's ns
     /// for the sub-router's downstream v6 subnet via the sub-router's WAN IP.
-    pub parent_route_v6: Option<(String, Ipv6Addr, u8, Ipv6Addr)>, // (parent_ns, net, prefix, via)
+    pub parent_route_v6: Option<(Arc<str>, Ipv6Addr, u8, Ipv6Addr)>, // (parent_ns, net, prefix, via)
     /// For sub-routers with public downstream in a region: route in the parent
     /// (region) router's ns for this sub-router's downstream /24 via its WAN IP.
-    pub parent_route_v4: Option<(String, Ipv4Addr, u8, Ipv4Addr)>, // (parent_ns, net, prefix, via)
+    pub parent_route_v4: Option<(Arc<str>, Ipv4Addr, u8, Ipv4Addr)>, // (parent_ns, net, prefix, via)
 }
 
 /// Sets up a single router's namespaces, links, and NAT. No lock held.
@@ -1572,7 +2199,7 @@ pub(crate) async fn setup_device_async(
     // Apply MTU on all device interfaces if configured.
     if let Some(mtu) = dev.mtu {
         let dev_ns = dev.ns.clone();
-        let ifnames: Vec<String> = dev.interfaces.iter().map(|i| i.ifname.clone()).collect();
+        let ifnames: Vec<Arc<str>> = dev.interfaces.iter().map(|i| i.ifname.clone()).collect();
         nl_run(netns, &dev_ns, move |h: Netlink| async move {
             for ifname in &ifnames {
                 h.set_mtu(ifname, mtu).await?;

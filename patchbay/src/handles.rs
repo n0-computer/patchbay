@@ -31,7 +31,7 @@ use crate::{
         NodeId,
     },
     firewall::Firewall,
-    lab::{net6, LinkCondition, ObservedAddr},
+    lab::{LinkCondition, ObservedAddr},
     nat::{IpSupport, Nat, NatV6Mode},
     netlink::Netlink,
 };
@@ -164,7 +164,7 @@ impl Device {
         let dev = inner.device(self.id)?;
         let iface = dev.iface(name)?;
         Some(DeviceIface {
-            ifname: iface.ifname.clone(),
+            ifname: iface.ifname.to_string(),
             ip: iface.ip,
             ip_v6: iface.ip_v6,
             impair: iface.impair,
@@ -177,7 +177,7 @@ impl Device {
         self.lab.with_device(self.id, |dev| {
             let iface = dev.default_iface();
             DeviceIface {
-                ifname: iface.ifname.clone(),
+                ifname: iface.ifname.to_string(),
                 ip: iface.ip,
                 ip_v6: iface.ip_v6,
                 impair: iface.impair,
@@ -197,7 +197,7 @@ impl Device {
         dev.interfaces
             .iter()
             .map(|iface| DeviceIface {
-                ifname: iface.ifname.clone(),
+                ifname: iface.ifname.to_string(),
                 ip: iface.ip,
                 ip_v6: iface.ip_v6,
                 impair: iface.impair,
@@ -240,7 +240,7 @@ impl Device {
             let iface = dev
                 .iface(ifname)
                 .ok_or_else(|| anyhow!("interface '{}' not found", ifname))?;
-            (dev.ns.clone(), iface.uplink, dev.default_via == ifname)
+            (dev.ns.clone(), iface.uplink, &*dev.default_via == ifname)
         };
         let ifname_owned = ifname.to_string();
         core::nl_run(&self.lab.netns, &ns, {
@@ -491,7 +491,7 @@ impl Device {
         router: NodeId,
         impair: Option<LinkCondition>,
     ) -> Result<()> {
-        use crate::core::{self, IfaceBuild};
+        use crate::core;
 
         let op = self
             .lab
@@ -500,58 +500,19 @@ impl Device {
         let _guard = op.lock().await;
 
         // Phase 1: Lock → register iface + allocate IP → unlock
-        let (iface_build, prefix, root_ns, mtu) = {
-            let mut inner = self.lab.core.lock().unwrap();
-            let dev = inner
-                .device(self.id)
-                .ok_or_else(|| anyhow!("device removed"))?;
-            if dev.interfaces.iter().any(|i| i.ifname == ifname) {
-                bail!("device '{}' already has interface '{}'", dev.name, ifname);
-            }
-            let dev_ns = dev.ns.clone();
-            let mtu = dev.mtu;
-
-            // Register the interface in core (allocates IP, idx, updates records).
-            inner.add_device_iface(self.id, ifname, router, impair)?;
-
-            // Now snapshot what we need for wiring.
-            let dev = inner.device(self.id).unwrap();
-            let iface = dev.interfaces.iter().find(|i| i.ifname == ifname).unwrap();
-            let sw = inner
-                .switch(iface.uplink)
-                .ok_or_else(|| anyhow!("switch missing"))?;
-            let gw_router = sw
-                .owner_router
-                .ok_or_else(|| anyhow!("switch missing owner"))?;
-            let gw_br = sw.bridge.clone().unwrap_or_else(|| "br-lan".to_string());
-            let gw_ns = inner.router(gw_router).unwrap().ns.clone();
-
-            let build = IfaceBuild {
-                dev_ns,
-                gw_ns,
-                gw_ip: sw.gw,
-                gw_br,
-                dev_ip: iface.ip,
-                prefix_len: sw.cidr.map(|c| c.prefix_len()).unwrap_or(24),
-                gw_ip_v6: sw.gw_v6,
-                dev_ip_v6: iface.ip_v6,
-                prefix_len_v6: sw.cidr_v6.map(|c| c.prefix_len()).unwrap_or(64),
-                impair,
-                ifname: ifname.to_string(),
-                is_default: false, // never default — caller opts in via set_default_route
-                idx: iface.idx,
-            };
-            let prefix = inner.cfg.prefix.clone();
-            let root_ns = inner.cfg.root_ns.clone();
-            (build, prefix, root_ns, mtu)
-        };
+        let setup = self
+            .lab
+            .core
+            .lock()
+            .unwrap()
+            .prepare_add_iface(self.id, ifname, router, impair)?;
 
         // Phase 2: Wire the interface (veth pair, IPs, bridge attachment).
         let netns = &self.lab.netns;
-        core::wire_iface_async(netns, &prefix, &root_ns, iface_build).await?;
+        core::wire_iface_async(netns, &setup.prefix, &setup.root_ns, setup.iface_build).await?;
 
         // Phase 3: Apply MTU if the device has one configured.
-        if let Some(mtu) = mtu {
+        if let Some(mtu) = setup.mtu {
             let dev_ns = self.ns.to_string();
             let ifname_owned = ifname.to_string();
             core::nl_run(netns, &dev_ns, move |h: Netlink| async move {
@@ -582,31 +543,12 @@ impl Device {
             .ok_or_else(|| anyhow!("device removed"))?;
         let _guard = op.lock().await;
 
-        // Phase 1: Lock → validate + remove from records → unlock
-        let dev_ns = {
-            let mut inner = self.lab.core.lock().unwrap();
-            let dev = inner
-                .device_mut(self.id)
-                .ok_or_else(|| anyhow!("device removed"))?;
-            if dev.interfaces.len() <= 1 {
-                bail!(
-                    "cannot remove '{}': device '{}' must keep at least one interface",
-                    ifname,
-                    dev.name
-                );
-            }
-            let pos = dev
-                .interfaces
-                .iter()
-                .position(|i| i.ifname == ifname)
-                .ok_or_else(|| anyhow!("device '{}' has no interface '{}'", dev.name, ifname))?;
-            dev.interfaces.remove(pos);
-            // Fix default_via if we just removed it.
-            if dev.default_via == ifname {
-                dev.default_via = dev.interfaces[0].ifname.clone();
-            }
-            dev.ns.clone()
-        };
+        let dev_ns = self
+            .lab
+            .core
+            .lock()
+            .unwrap()
+            .remove_device_iface(self.id, ifname)?;
 
         // Phase 2: Delete the veth pair (peer side auto-removed by kernel).
         let ifname_owned = ifname.to_string();
@@ -632,71 +574,18 @@ impl Device {
     /// on this device, `to_router` is unknown, or the target router has no
     /// downstream switch.
     pub async fn replug_iface(&self, ifname: &str, to_router: NodeId) -> Result<()> {
-        use crate::core::{self, IfaceBuild};
+        use crate::core;
 
         // Phase 1: Lock → extract data + allocate from new router's pool → unlock
-        let (iface_build, prefix, root_ns) = {
-            let mut inner = self.lab.core.lock().unwrap();
-            let dev = inner
-                .device(self.id)
-                .ok_or_else(|| anyhow!("device removed"))?
-                .clone();
-            let iface = dev
-                .interfaces
-                .iter()
-                .find(|i| i.ifname == ifname)
-                .ok_or_else(|| anyhow!("device '{}' has no interface '{}'", dev.name, ifname))?;
-            let old_idx = iface.idx;
-            let target_router = inner
-                .router(to_router)
-                .ok_or_else(|| anyhow!("unknown target router id"))?
-                .clone();
-            let downlink_sw = target_router.downlink.ok_or_else(|| {
-                anyhow!(
-                    "target router '{}' has no downstream switch",
-                    target_router.name
-                )
-            })?;
-            let sw = inner
-                .switch(downlink_sw)
-                .ok_or_else(|| anyhow!("target router's downlink switch missing"))?
-                .clone();
-            let gw_br = sw.bridge.clone().unwrap_or_else(|| "br-lan".to_string());
-            let new_ip = if sw.cidr.is_some() {
-                Some(inner.alloc_from_switch(downlink_sw)?)
-            } else {
-                None
-            };
-            let new_ip_v6 = if sw.cidr_v6.is_some() {
-                Some(inner.alloc_from_switch_v6(downlink_sw)?)
-            } else {
-                None
-            };
-            let prefix_len = sw.cidr.map(|c| c.prefix_len()).unwrap_or(24);
-
-            let prefix = inner.cfg.prefix.clone();
-            let root_ns = inner.cfg.root_ns.clone();
-
-            let build = IfaceBuild {
-                dev_ns: dev.ns.clone(),
-                gw_ns: target_router.ns.clone(),
-                gw_ip: sw.gw,
-                gw_br,
-                dev_ip: new_ip,
-                prefix_len,
-                gw_ip_v6: sw.gw_v6,
-                dev_ip_v6: new_ip_v6,
-                prefix_len_v6: sw.cidr_v6.map(|c| c.prefix_len()).unwrap_or(64),
-                impair: iface.impair,
-                ifname: ifname.to_string(),
-                is_default: ifname == dev.default_via,
-                idx: old_idx,
-            };
-            (build, prefix, root_ns)
-        };
+        let setup = self
+            .lab
+            .core
+            .lock()
+            .unwrap()
+            .prepare_replug_iface(self.id, ifname, to_router)?;
 
         // Phase 2: Delete old veth pair.
-        let dev_ns = iface_build.dev_ns.clone();
+        let dev_ns = setup.iface_build.dev_ns.clone();
         let ifname_owned = ifname.to_string();
         let netns = &self.lab.netns;
         core::nl_run(netns, &dev_ns, move |h: Netlink| async move {
@@ -706,31 +595,16 @@ impl Device {
         .await?;
 
         // Phase 3: Wire new interface (reuses existing wiring logic)
-        let new_ip = iface_build.dev_ip;
-        let new_ip_v6 = iface_build.dev_ip_v6;
-        let new_uplink = {
-            let inner = self.lab.core.lock().unwrap();
-            let router = inner
-                .router(to_router)
-                .ok_or_else(|| anyhow!("target router disappeared"))?;
-            router
-                .downlink
-                .ok_or_else(|| anyhow!("target router has no downlink"))?
-        };
-        core::wire_iface_async(netns, &prefix, &root_ns, iface_build).await?;
+        let new_ip = setup.iface_build.dev_ip;
+        let new_ip_v6 = setup.iface_build.dev_ip_v6;
+        core::wire_iface_async(netns, &setup.prefix, &setup.root_ns, setup.iface_build).await?;
 
         // Phase 4: Lock → update internal records → unlock
-        {
-            let mut inner = self.lab.core.lock().unwrap();
-            let dev = inner
-                .device_mut(self.id)
-                .ok_or_else(|| anyhow!("device disappeared"))?;
-            if let Some(iface) = dev.interfaces.iter_mut().find(|i| i.ifname == ifname) {
-                iface.uplink = new_uplink;
-                iface.ip = new_ip;
-                iface.ip_v6 = new_ip_v6;
-            }
-        }
+        self.lab
+            .core
+            .lock()
+            .unwrap()
+            .finish_replug_iface(self.id, ifname, to_router, new_ip, new_ip_v6)?;
 
         Ok(())
     }
@@ -748,33 +622,12 @@ impl Device {
     pub async fn renew_ip(&self, ifname: &str) -> Result<Ipv4Addr> {
         use crate::core;
 
-        // Phase 1: Lock → allocate new IP, update records → unlock
-        let (ns, old_ip, new_ip, prefix_len) = {
-            let mut inner = self.lab.core.lock().unwrap();
-            let dev = inner
-                .device(self.id)
-                .ok_or_else(|| anyhow!("device removed"))?;
-            let iface = dev
-                .iface(ifname)
-                .ok_or_else(|| anyhow!("device '{}' has no interface '{}'", dev.name, ifname))?;
-            let old_ip = iface
-                .ip
-                .ok_or_else(|| anyhow!("interface '{}' has no IPv4 address", ifname))?;
-            let sw_id = iface.uplink;
-            let sw = inner
-                .switch(sw_id)
-                .ok_or_else(|| anyhow!("switch for interface '{}' missing", ifname))?;
-            let prefix_len = sw.cidr.map(|c| c.prefix_len()).unwrap_or(24);
-            let ns = dev.ns.clone();
-
-            let new_ip = inner.alloc_from_switch(sw_id)?;
-            // Update internal record.
-            let dev = inner.device_mut(self.id).unwrap();
-            let iface = dev.iface_mut(ifname).unwrap();
-            iface.ip = Some(new_ip);
-
-            (ns, old_ip, new_ip, prefix_len)
-        };
+        let (ns, old_ip, new_ip, prefix_len) = self
+            .lab
+            .core
+            .lock()
+            .unwrap()
+            .renew_device_ip(self.id, ifname)?;
 
         // Phase 2: Async netlink — remove old addr, add new addr.
         let ifname = ifname.to_string();
@@ -882,7 +735,7 @@ impl Router {
     /// Returns `None` if the router has been removed or no region is assigned.
     pub fn region(&self) -> Option<String> {
         self.lab
-            .with_router(self.id, |r| r.region.clone())
+            .with_router(self.id, |r| r.region.as_ref().map(|s| s.to_string()))
             .flatten()
     }
 
@@ -977,20 +830,27 @@ impl Router {
             .with_router(self.id, |r| Arc::clone(&r.op))
             .ok_or_else(|| anyhow!("router removed"))?;
         let _guard = op.lock().await;
-        let (ns, wan_if, wan_ip, cfg) = {
+        let (nat_params, cfg) = {
             let mut inner = self.lab.core.lock().unwrap();
             inner.set_router_nat_mode(self.id, mode)?;
             let cfg = inner.router_effective_cfg(self.id)?;
-            let (ns, _lan_if, wan_if, wan_ip) = inner.router_nat_params(self.id)?;
-            (ns, wan_if, wan_ip, cfg)
+            let nat_params = inner.router_nat_params(self.id)?;
+            (nat_params, cfg)
         };
-        run_nft_in(&self.lab.netns, &ns, "flush table ip nat")
+        run_nft_in(&self.lab.netns, &nat_params.ns, "flush table ip nat")
             .await
             .ok();
-        run_nft_in(&self.lab.netns, &ns, "flush table ip filter")
+        run_nft_in(&self.lab.netns, &nat_params.ns, "flush table ip filter")
             .await
             .ok();
-        apply_nat_for_router(&self.lab.netns, &ns, &cfg, &wan_if, wan_ip).await
+        apply_nat_for_router(
+            &self.lab.netns,
+            &nat_params.ns,
+            &cfg,
+            &nat_params.wan_if,
+            nat_params.upstream_ip,
+        )
+        .await
     }
 
     /// Replaces IPv6 NAT rules on this router at runtime.
@@ -1008,42 +868,29 @@ impl Router {
             .with_router(self.id, |r| Arc::clone(&r.op))
             .ok_or_else(|| anyhow!("router removed"))?;
         let _guard = op.lock().await;
-        let (ns, wan_if, lan_prefix, wan_prefix) = {
-            let inner = self.lab.core.lock().unwrap();
-            let router = inner
-                .router(self.id)
-                .ok_or_else(|| anyhow!("router removed"))?;
-            let wan_if = router.wan_ifname(inner.ix_sw()).to_string();
-            let lan_prefix = router
-                .downstream_cidr_v6
-                .unwrap_or(net6(Ipv6Addr::new(0xfd10, 0, 0, 0, 0, 0, 0, 0), 64));
-            let wan_prefix = {
-                let up_ip = router.upstream_ip_v6.unwrap_or(Ipv6Addr::UNSPECIFIED);
-                let up_prefix = if router.uplink == Some(inner.ix_sw()) {
-                    inner.cfg.ix_cidr_v6.prefix_len()
-                } else {
-                    router
-                        .uplink
-                        .and_then(|sw| inner.switch(sw))
-                        .and_then(|sw| sw.cidr_v6)
-                        .map(|c| c.prefix_len())
-                        .unwrap_or(64)
-                };
-                Ipv6Net::new(up_ip, up_prefix).unwrap_or_else(|_| Ipv6Net::new(up_ip, 128).unwrap())
-            };
-            (router.ns.clone(), wan_if, lan_prefix, wan_prefix)
-        };
-        run_nft_in(&self.lab.netns, &ns, "flush table ip6 nat")
+        let p = self
+            .lab
+            .core
+            .lock()
+            .unwrap()
+            .router_nat_v6_params(self.id)?;
+        run_nft_in(&self.lab.netns, &p.ns, "flush table ip6 nat")
             .await
             .ok();
-        apply_nat_v6(&self.lab.netns, &ns, mode, &wan_if, lan_prefix, wan_prefix).await?;
-        {
-            let mut inner = self.lab.core.lock().unwrap();
-            let router = inner
-                .router_mut(self.id)
-                .ok_or_else(|| anyhow!("router removed"))?;
-            router.cfg.nat_v6 = mode;
-        }
+        apply_nat_v6(
+            &self.lab.netns,
+            &p.ns,
+            mode,
+            &p.wan_if,
+            p.lan_prefix,
+            p.wan_prefix,
+        )
+        .await?;
+        self.lab
+            .core
+            .lock()
+            .unwrap()
+            .set_router_nat_v6_mode(self.id, mode)?;
         Ok(())
     }
 
@@ -1184,11 +1031,11 @@ impl Router {
             .with_router(self.id, |r| Arc::clone(&r.op))
             .ok_or_else(|| anyhow!("router removed"))?;
         let _guard = op.lock().await;
-        {
-            let mut inner = self.lab.core.lock().unwrap();
-            let r = inner.router_mut(self.id).context("router removed")?;
-            r.cfg.firewall = fw.clone();
-        }
+        self.lab
+            .core
+            .lock()
+            .unwrap()
+            .set_router_firewall(self.id, fw.clone())?;
         let ns = self.ns.to_string();
         // Always remove existing rules first, then apply new ones.
         core::remove_firewall(&self.lab.netns, &ns).await?;
