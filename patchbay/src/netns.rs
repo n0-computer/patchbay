@@ -26,7 +26,7 @@ use crate::netlink::Netlink;
 
 /// DNS overlay paths for bind-mounting `/etc/hosts` and `/etc/resolv.conf`.
 #[derive(Clone, Debug)]
-pub struct DnsOverlay {
+pub(crate) struct DnsOverlay {
     /// Path to the generated hosts file for this namespace.
     pub hosts_path: std::path::PathBuf,
     /// Path to the generated resolv.conf for this lab.
@@ -332,7 +332,7 @@ impl Drop for Worker {
 /// Each namespace gets an unconditional async worker (tokio `current_thread`
 /// RT) and a lazy sync worker. The async worker thread is the same OS thread
 /// that creates the namespace via `unshare(CLONE_NEWNET)`.
-pub struct NetnsManager {
+pub(crate) struct NetnsManager {
     parent_span: tracing::Span,
     workers: Mutex<HashMap<String, Worker>>,
 }
@@ -344,7 +344,7 @@ impl Default for NetnsManager {
 }
 
 impl NetnsManager {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             parent_span: tracing::Span::none(),
             workers: Mutex::new(HashMap::new()),
@@ -358,7 +358,7 @@ impl NetnsManager {
     /// Spawns a thread that calls `unshare(CLONE_NEWNET)` to create the
     /// namespace, applies the optional DNS overlay, builds a tokio runtime,
     /// and stays alive as the namespace's async worker.
-    pub fn create_netns(&self, name: &str, dns_overlay: Option<DnsOverlay>) -> Result<()> {
+    pub(crate) fn create_netns(&self, name: &str, dns_overlay: Option<DnsOverlay>) -> Result<()> {
         debug!(ns = %name, "create namespace");
         self.remove_worker(name);
         let worker = Worker::spawn(name, self.parent_span.clone(), dns_overlay)?;
@@ -370,13 +370,13 @@ impl NetnsManager {
     }
 
     /// Remove workers/fds for all namespaces matching `prefix`.
-    pub fn cleanup_prefix(&self, prefix: &str) {
+    pub(crate) fn cleanup_prefix(&self, prefix: &str) {
         let mut workers = self.workers.lock().expect("netns worker map poisoned");
         workers.retain(|k, _| !k.starts_with(prefix));
     }
 
     /// Removes a namespace worker. `Drop` cancels its token and joins threads.
-    pub fn remove_worker(&self, name: &str) {
+    pub(crate) fn remove_worker(&self, name: &str) {
         let mut workers = self.workers.lock().expect("netns worker map poisoned");
         workers.remove(name);
     }
@@ -384,7 +384,7 @@ impl NetnsManager {
     // ── Async ────────────────────────────────────────────────────────
 
     /// Returns a cloned tokio `Handle` for the namespace's async worker.
-    pub fn rt_handle_for(&self, ns: &str) -> Result<tokio::runtime::Handle> {
+    pub(crate) fn rt_handle_for(&self, ns: &str) -> Result<tokio::runtime::Handle> {
         let workers = self.workers.lock().expect("netns worker map poisoned");
         let w = workers
             .get(ns)
@@ -406,7 +406,7 @@ impl NetnsManager {
     /// Run a short-lived sync closure inside `ns`. Blocks the caller.
     ///
     /// Only for fast non-I/O work (sysctl, `Command::spawn`).
-    pub fn run_closure_in<F, R>(&self, ns: &str, f: F) -> Result<R>
+    pub(crate) fn run_closure_in<F, R>(&self, ns: &str, f: F) -> Result<R>
     where
         F: FnOnce() -> Result<R> + Send + 'static,
         R: Send + 'static,
@@ -429,7 +429,7 @@ impl NetnsManager {
     }
 
     /// Spawn a dedicated OS thread inside `ns`. Non-blocking.
-    pub fn spawn_thread_in<F, R>(&self, ns: &str, f: F) -> Result<thread::JoinHandle<Result<R>>>
+    pub(crate) fn spawn_thread_in<F, R>(&self, ns: &str, f: F) -> Result<thread::JoinHandle<Result<R>>>
     where
         F: FnOnce() -> Result<R> + Send + 'static,
         R: Send + 'static,
@@ -451,7 +451,7 @@ impl NetnsManager {
     }
 
     /// Clone the namespace fd (for moving veth endpoints etc).
-    pub fn ns_fd(&self, ns: &str) -> Result<File> {
+    pub(crate) fn ns_fd(&self, ns: &str) -> Result<File> {
         let workers = self.workers.lock().expect("netns worker map poisoned");
         let w = workers
             .get(ns)

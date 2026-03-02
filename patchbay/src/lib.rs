@@ -1,3 +1,8 @@
+#![warn(missing_docs)]
+#![warn(unreachable_pub)]
+#![warn(unused_qualifications)]
+#![deny(unsafe_op_in_unsafe_fn)]
+
 //! Linux network-namespace lab for NAT, routing, and link-condition experiments.
 //!
 //! patchbay builds realistic network topologies from Linux network namespaces.

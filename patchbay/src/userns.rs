@@ -11,7 +11,7 @@ use std::sync::OnceLock;
 /// a non-root user.  Uses an internal `OnceLock` so it is safe to call multiple
 /// times; subsequent calls are instant no-ops.
 pub fn init_userns() -> anyhow::Result<()> {
-    static RESULT: OnceLock<std::result::Result<(), String>> = OnceLock::new();
+    static RESULT: OnceLock<Result<(), String>> = OnceLock::new();
     RESULT
         .get_or_init(|| {
             #[cfg(target_os = "linux")]
@@ -34,7 +34,9 @@ pub fn init_userns() -> anyhow::Result<()> {
 /// initialized.  After that point use [`init_userns`] instead.
 pub unsafe fn init_userns_for_ctor() {
     #[cfg(target_os = "linux")]
-    userns_bootstrap_libc();
+    unsafe {
+        userns_bootstrap_libc();
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -64,34 +66,34 @@ fn do_bootstrap() -> anyhow::Result<()> {
 
 #[cfg(target_os = "linux")]
 unsafe fn userns_bootstrap_libc() {
-    let uid = libc::getuid();
+    let uid = unsafe { libc::getuid() };
     if uid == 0 {
         return;
     }
-    let gid = libc::getgid();
-    if libc::unshare(libc::CLONE_NEWUSER) != 0 {
+    let gid = unsafe { libc::getgid() };
+    if unsafe { libc::unshare(libc::CLONE_NEWUSER) } != 0 {
         return;
     }
 
-    proc_write(c"/proc/self/setgroups".as_ptr(), b"deny\n");
+    unsafe { proc_write(c"/proc/self/setgroups".as_ptr(), b"deny\n") };
 
     let mut uid_buf = [0u8; 32];
     let uid_line = format_map_line(&mut uid_buf, uid);
-    proc_write(c"/proc/self/uid_map".as_ptr(), uid_line);
+    unsafe { proc_write(c"/proc/self/uid_map".as_ptr(), uid_line) };
 
     let mut gid_buf = [0u8; 32];
     let gid_line = format_map_line(&mut gid_buf, gid);
-    proc_write(c"/proc/self/gid_map".as_ptr(), gid_line);
+    unsafe { proc_write(c"/proc/self/gid_map".as_ptr(), gid_line) };
 }
 
 #[cfg(target_os = "linux")]
 unsafe fn proc_write(path: *const libc::c_char, data: &[u8]) {
-    let fd = libc::open(path, libc::O_WRONLY);
+    let fd = unsafe { libc::open(path, libc::O_WRONLY) };
     if fd < 0 {
         return;
     }
-    let _ = libc::write(fd, data.as_ptr().cast::<libc::c_void>(), data.len());
-    let _ = libc::close(fd);
+    let _ = unsafe { libc::write(fd, data.as_ptr().cast::<libc::c_void>(), data.len()) };
+    let _ = unsafe { libc::close(fd) };
 }
 
 #[cfg(target_os = "linux")]

@@ -677,7 +677,7 @@ impl Lab {
             // Store region info.
             inner.regions.insert(
                 name.to_string(),
-                crate::core::RegionInfo {
+                core::RegionInfo {
                     idx,
                     router_id: id,
                     next_downstream: 1,
@@ -812,7 +812,7 @@ impl Lab {
             };
             inner.region_links.insert(
                 link_key.clone(),
-                crate::core::RegionLinkData {
+                core::RegionLinkData {
                     ip_a: stored_ip_a,
                     ip_b: stored_ip_b,
                     broken: false,
@@ -1119,19 +1119,14 @@ impl Lab {
         }
     }
 
-    /// No-op stub — the old per-CIDR tc filter approach has been removed.
-    /// Use [`add_region`](Self::add_region) + [`link_regions`](Self::link_regions) instead.
-    #[deprecated(note = "use add_region + link_regions instead")]
-    pub fn set_region_latency(&self, _from: &str, _to: &str, _latency_ms: u32) {}
-
     /// Builds a map of `NETSIM_*` environment variables from the current lab state.
     ///
     /// Keys follow the pattern `NETSIM_IP_{DEVICE}` for the default interface
     /// and `NETSIM_IP_{DEVICE}_{IFACE}` for all interfaces. Names are
     /// uppercased with hyphens replaced by underscores.
-    pub fn env_vars(&self) -> std::collections::HashMap<String, String> {
+    pub fn env_vars(&self) -> HashMap<String, String> {
         let inner = self.inner.core.lock().unwrap();
-        let mut map = std::collections::HashMap::new();
+        let mut map = HashMap::new();
         for dev in inner.all_devices() {
             let norm = crate::handles::normalize_env_name(&dev.name);
             if let Some(ip) = dev.default_iface().ip {

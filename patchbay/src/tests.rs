@@ -16,7 +16,7 @@ use crate::{check_caps, config};
 
 #[ctor::ctor]
 fn init() {
-    let _ = crate::init_userns();
+    let _ = init_userns();
 }
 
 fn ping(addr: &str) -> Result<()> {
@@ -122,7 +122,7 @@ async fn probe_reflexive_addr(
     };
     match proto {
         Proto::Udp => dev.run_sync(move || {
-            crate::test_utils::probe_udp(reflector, Duration::from_millis(500), Some(bind_addr))
+            test_utils::probe_udp(reflector, Duration::from_millis(500), Some(bind_addr))
         }),
         Proto::Tcp => dev
             .spawn(move |_| async move { probe_tcp(reflector).await })?
@@ -196,7 +196,7 @@ fn tcp_measure_throughput(server_addr: SocketAddr, bytes: usize) -> Result<(Dura
 /// current tokio runtime. Call inside `handle.spawn(|_| async { spawn_tcp_reflector(b).await })`.
 async fn spawn_tcp_reflector(bind: SocketAddr) -> Result<()> {
     use tokio::io::AsyncWriteExt;
-    let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<Result<()>>();
+    let (ready_tx, ready_rx) = oneshot::channel::<Result<()>>();
     tokio::spawn(async move {
         match tokio::net::TcpListener::bind(bind).await {
             Ok(listener) => {
@@ -365,7 +365,7 @@ async fn build_single_nat_case(
 /// Returns when the listener is bound. Call inside `handle.spawn(|_| async { spawn_tcp_echo_server(b).await })`.
 async fn spawn_tcp_echo_server(bind: SocketAddr) -> Result<()> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<Result<()>>();
+    let (ready_tx, ready_rx) = oneshot::channel::<Result<()>>();
     tokio::spawn(async move {
         match tokio::net::TcpListener::bind(bind).await {
             Ok(listener) => {
@@ -696,7 +696,7 @@ async fn smoke_udp_dc_roundtrip() -> Result<()> {
 
     tokio::time::sleep(Duration::from_millis(250)).await;
 
-    let _ = dev.run_sync(move || crate::test_utils::udp_roundtrip(r))?;
+    let _ = dev.run_sync(move || test_utils::udp_roundtrip(r))?;
     Ok(())
 }
 
@@ -830,7 +830,7 @@ async fn nat_matrix_public_connectivity_and_reflexive_ip() -> Result<()> {
         let dev = lab.device_by_name("dev").unwrap();
         let r_dc_ip_str = r_dc.ip().to_string();
         dev.run_sync(move || ping(&r_dc_ip_str))?;
-        let _ = dev.run_sync(move || crate::test_utils::udp_roundtrip(r_dc))?;
+        let _ = dev.run_sync(move || test_utils::udp_roundtrip(r_dc))?;
         let observed = dev.probe_udp_mapping(r_dc)?;
         assert_eq!(
             observed.ip(),
@@ -994,162 +994,6 @@ async fn smoke_device_to_device_same_lan() -> Result<()> {
     Ok(())
 }
 
-#[tokio::test(flavor = "current_thread")]
-#[traced_test]
-#[ignore = "TODO: migrate to new region API (add_region + link_regions)"]
-#[allow(deprecated)]
-async fn latency_directional_between_regions() -> Result<()> {
-    check_caps()?;
-    let lab = Lab::new().await?;
-    lab.set_region_latency("eu", "us", 30);
-    lab.set_region_latency("us", "eu", 70);
-    let dc_eu = lab.add_router("dc-eu").build().await?;
-    let dc_us = lab.add_router("dc-us").build().await?;
-    let dev_eu = lab
-        .add_device("dev-eu")
-        .iface("eth0", dc_eu.id(), None)
-        .build()
-        .await?;
-    let dev_us = lab
-        .add_device("dev-us")
-        .iface("eth0", dc_us.id(), None)
-        .build()
-        .await?;
-
-    let dc_us_ip = dc_us.uplink_ip().context("no uplink ip")?;
-    let r_us = SocketAddr::new(IpAddr::V4(dc_us_ip), 9010);
-    dc_us.spawn_reflector(r_us)?;
-
-    let dc_eu_ip = dc_eu.uplink_ip().context("no uplink ip")?;
-    let r_eu = SocketAddr::new(IpAddr::V4(dc_eu_ip), 9011);
-    dc_eu.spawn_reflector(r_eu)?;
-
-    tokio::time::sleep(Duration::from_millis(250)).await;
-
-    let rtt_eu_to_us = dev_eu.run_sync(move || crate::test_utils::udp_rtt(r_us))?;
-    let rtt_us_to_eu = dev_us.run_sync(move || crate::test_utils::udp_rtt(r_eu))?;
-    let expected = Duration::from_millis(100);
-
-    assert!(
-        rtt_eu_to_us >= expected - Duration::from_millis(10),
-        "expected eu->us RTT >= 90ms, got {rtt_eu_to_us:?}"
-    );
-    assert!(
-        rtt_us_to_eu >= expected - Duration::from_millis(10),
-        "expected us->eu RTT >= 90ms, got {rtt_us_to_eu:?}"
-    );
-    let diff = rtt_eu_to_us.abs_diff(rtt_us_to_eu);
-    assert!(
-        diff <= Duration::from_millis(20),
-        "expected RTTs to be close; eu->us={rtt_eu_to_us:?} us->eu={rtt_us_to_eu:?}"
-    );
-    Ok(())
-}
-
-#[tokio::test(flavor = "current_thread")]
-#[traced_test]
-#[ignore = "TODO: migrate to new region API (add_region + link_regions)"]
-#[allow(deprecated)]
-async fn latency_inter_region_dc_to_dc() -> Result<()> {
-    check_caps()?;
-    let lab = Lab::new().await?;
-    lab.set_region_latency("eu", "us", 50);
-    lab.set_region_latency("us", "eu", 50);
-    let dc_eu = lab.add_router("dc-eu").build().await?;
-    let dc_us = lab.add_router("dc-us").build().await?;
-    lab.add_device("dev1")
-        .iface("eth0", dc_eu.id(), None)
-        .build()
-        .await?;
-
-    let dc_us_ip = dc_us.uplink_ip().context("no uplink ip")?;
-    let r = SocketAddr::new(IpAddr::V4(dc_us_ip), 9000);
-    dc_us.spawn_reflector(r)?;
-    tokio::time::sleep(Duration::from_millis(250)).await;
-
-    let dev = lab.device_by_name("dev1").context("missing dev1")?;
-    let rtt = dev.run_sync(move || crate::test_utils::udp_rtt(r))?;
-    assert!(
-        rtt >= Duration::from_millis(90),
-        "expected inter-region RTT >= 90ms, got {rtt:?}"
-    );
-    Ok(())
-}
-
-#[tokio::test(flavor = "current_thread")]
-#[traced_test]
-#[ignore = "TODO: migrate to new region API (add_region + link_regions)"]
-#[allow(deprecated)]
-async fn latency_device_impair_adds_delay() -> Result<()> {
-    check_caps()?;
-
-    #[allow(deprecated)]
-    async fn measure(impair: Option<LinkCondition>) -> Result<Duration> {
-        let lab = Lab::new().await?;
-        lab.set_region_latency("eu", "us", 40);
-        lab.set_region_latency("us", "eu", 40);
-        let dc_eu = lab.add_router("dc-eu").build().await?;
-        let dc_us = lab.add_router("dc-us").build().await?;
-        lab.add_device("dev1")
-            .iface("eth0", dc_eu.id(), impair)
-            .build()
-            .await?;
-
-        let dc_us_ip = dc_us.uplink_ip().context("no uplink ip")?;
-        let r = SocketAddr::new(IpAddr::V4(dc_us_ip), 9001);
-        dc_us.spawn_reflector(r)?;
-        tokio::time::sleep(Duration::from_millis(250)).await;
-
-        let dev = lab.device_by_name("dev1").context("missing dev1")?;
-        dev.run_sync(move || crate::test_utils::udp_rtt(r))
-    }
-
-    let base = measure(None).await?;
-    let impaired = measure(Some(LinkCondition::Mobile4G)).await?;
-    assert!(
-        impaired >= base + Duration::from_millis(30),
-        "expected impaired RTT >= base + 30ms, base={base:?} impaired={impaired:?}"
-    );
-    Ok(())
-}
-
-#[tokio::test(flavor = "current_thread")]
-#[traced_test]
-#[ignore = "TODO: migrate to new region API (add_region + link_regions)"]
-#[allow(deprecated)]
-async fn latency_manual_impair_applies() -> Result<()> {
-    check_caps()?;
-    let lab = Lab::new().await?;
-    let dc_eu = lab.add_router("dc-eu").build().await?;
-    let dc_us = lab.add_router("dc-us").build().await?;
-    lab.set_region_latency("eu", "us", 20);
-    lab.set_region_latency("us", "eu", 20);
-    let dev = lab
-        .add_device("dev1")
-        .iface(
-            "eth0",
-            dc_eu.id(),
-            Some(LinkCondition::Manual(LinkLimits {
-                rate_kbit: 10_000,
-                latency_ms: 60,
-                ..Default::default()
-            })),
-        )
-        .build()
-        .await?;
-
-    let dc_us_ip = dc_us.uplink_ip().context("no uplink ip")?;
-    let r = SocketAddr::new(IpAddr::V4(dc_us_ip), 9020);
-    dc_us.spawn_reflector(r)?;
-    tokio::time::sleep(Duration::from_millis(250)).await;
-
-    let rtt = dev.run_sync(move || crate::test_utils::udp_rtt(r))?;
-    assert!(
-        rtt >= Duration::from_millis(90),
-        "expected manual latency >= 90ms RTT, got {rtt:?}"
-    );
-    Ok(())
-}
 
 #[tokio::test(flavor = "current_thread")]
 #[traced_test]
@@ -1203,21 +1047,21 @@ async fn dynamic_set_impair_changes_rtt() -> Result<()> {
     dc.spawn_reflector(r)?;
     tokio::time::sleep(Duration::from_millis(250)).await;
 
-    let base_rtt = dev.run_sync(move || crate::test_utils::udp_rtt(r))?;
+    let base_rtt = dev.run_sync(move || test_utils::udp_rtt(r))?;
 
     let dev_handle = lab.device_by_name("dev1").unwrap();
     let default_if = dev_handle.default_iface().unwrap().name().to_string();
     dev_handle
         .set_link_condition(&default_if, Some(LinkCondition::Mobile4G))
         .await?;
-    let impaired_rtt = dev.run_sync(move || crate::test_utils::udp_rtt(r))?;
+    let impaired_rtt = dev.run_sync(move || test_utils::udp_rtt(r))?;
     assert!(
         impaired_rtt >= base_rtt + Duration::from_millis(10),
         "expected impaired RTT >= base + 10ms, base={base_rtt:?} impaired={impaired_rtt:?}"
     );
 
     dev_handle.set_link_condition(&default_if, None).await?;
-    let recovered_rtt = dev.run_sync(move || crate::test_utils::udp_rtt(r))?;
+    let recovered_rtt = dev.run_sync(move || test_utils::udp_rtt(r))?;
     assert!(
         recovered_rtt < base_rtt + Duration::from_millis(30),
         "expected recovered RTT close to base, base={base_rtt:?} recovered={recovered_rtt:?}"
@@ -1280,13 +1124,13 @@ async fn dynamic_switch_route_changes_path() -> Result<()> {
     dc.spawn_reflector(r)?;
     tokio::time::sleep(Duration::from_millis(250)).await;
 
-    let fast_rtt = dev.run_sync(move || crate::test_utils::udp_rtt(r))?;
+    let fast_rtt = dev.run_sync(move || test_utils::udp_rtt(r))?;
 
     lab.device_by_name("dev1")
         .unwrap()
         .set_default_route("eth1")
         .await?;
-    let slow_rtt = dev.run_sync(move || crate::test_utils::udp_rtt(r))?;
+    let slow_rtt = dev.run_sync(move || test_utils::udp_rtt(r))?;
 
     assert!(
         slow_rtt >= fast_rtt + Duration::from_millis(30),
@@ -1575,17 +1419,17 @@ async fn switch_route_multiple() -> Result<()> {
     let wan_a = nat_a.uplink_ip().context("no uplink ip")?;
     let wan_b = nat_b.uplink_ip().context("no uplink ip")?;
 
-    let o = dev.run_sync(move || crate::test_utils::udp_roundtrip(reflector))?;
+    let o = dev.run_sync(move || test_utils::udp_roundtrip(reflector))?;
     assert_eq!(o.ip(), IpAddr::V4(wan_a), "expected nat_a WAN on eth0");
 
     dev.set_default_route("eth1").await?;
     tokio::time::sleep(Duration::from_millis(50)).await;
-    let o = dev.run_sync(move || crate::test_utils::udp_roundtrip(reflector))?;
+    let o = dev.run_sync(move || test_utils::udp_roundtrip(reflector))?;
     assert_eq!(o.ip(), IpAddr::V4(wan_b), "expected nat_b WAN on eth1");
 
     dev.set_default_route("eth0").await?;
     tokio::time::sleep(Duration::from_millis(50)).await;
-    let o = dev.run_sync(move || crate::test_utils::udp_roundtrip(reflector))?;
+    let o = dev.run_sync(move || test_utils::udp_roundtrip(reflector))?;
     assert_eq!(
         o.ip(),
         IpAddr::V4(wan_a),
@@ -1642,7 +1486,7 @@ async fn switch_route_udp_reflexive_change() -> Result<()> {
     let wan_a = nat_a.uplink_ip().context("no uplink ip")?;
     let wan_b = nat_b.uplink_ip().context("no uplink ip")?;
 
-    let before = dev.run_sync(move || crate::test_utils::udp_roundtrip(reflector))?;
+    let before = dev.run_sync(move || test_utils::udp_roundtrip(reflector))?;
     assert_eq!(
         before.ip(),
         IpAddr::V4(wan_a),
@@ -1652,7 +1496,7 @@ async fn switch_route_udp_reflexive_change() -> Result<()> {
     dev.set_default_route("eth1").await?;
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    let after = dev.run_sync(move || crate::test_utils::udp_roundtrip(reflector))?;
+    let after = dev.run_sync(move || test_utils::udp_roundtrip(reflector))?;
     assert_eq!(
         after.ip(),
         IpAddr::V4(wan_b),
@@ -1687,7 +1531,7 @@ async fn switch_uplink_udp_smoke() -> Result<()> {
     tokio::time::sleep(Duration::from_millis(200)).await;
 
     // Connectivity through nat_a works.
-    dev.run_sync(move || crate::test_utils::udp_roundtrip(reflector))
+    dev.run_sync(move || test_utils::udp_roundtrip(reflector))
         .context("udp before switch_uplink")?;
 
     // Move eth0 from nat_a → nat_b.
@@ -1695,7 +1539,7 @@ async fn switch_uplink_udp_smoke() -> Result<()> {
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     // Connectivity through nat_b works.
-    dev.run_sync(move || crate::test_utils::udp_roundtrip(reflector))
+    dev.run_sync(move || test_utils::udp_roundtrip(reflector))
         .context("udp after switch_uplink")?;
 
     Ok(())
@@ -1722,7 +1566,7 @@ async fn switch_uplink_reflexive_ip_changes() -> Result<()> {
     let wan_a = nat_a.uplink_ip().context("no nat_a uplink ip")?;
     let wan_b = nat_b.uplink_ip().context("no nat_b uplink ip")?;
 
-    let before = dev.run_sync(move || crate::test_utils::udp_roundtrip(reflector))?;
+    let before = dev.run_sync(move || test_utils::udp_roundtrip(reflector))?;
     assert_eq!(
         before.ip(),
         IpAddr::V4(wan_a),
@@ -1732,7 +1576,7 @@ async fn switch_uplink_reflexive_ip_changes() -> Result<()> {
     dev.replug_iface("eth0", nat_b.id()).await?;
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    let after = dev.run_sync(move || crate::test_utils::udp_roundtrip(reflector))?;
+    let after = dev.run_sync(move || test_utils::udp_roundtrip(reflector))?;
     assert_eq!(
         after.ip(),
         IpAddr::V4(wan_b),
@@ -1781,7 +1625,7 @@ async fn add_and_remove_iface_at_runtime() -> Result<()> {
     // Switch default route to eth1 and verify connectivity through dc.
     dev.set_default_route("eth1").await?;
     tokio::time::sleep(Duration::from_millis(100)).await;
-    let obs = dev.run_sync(move || crate::test_utils::udp_roundtrip(reflector))?;
+    let obs = dev.run_sync(move || test_utils::udp_roundtrip(reflector))?;
     assert_eq!(
         obs.ip(),
         IpAddr::V4(dc_ip),
@@ -1794,7 +1638,7 @@ async fn add_and_remove_iface_at_runtime() -> Result<()> {
     assert!(dev.iface("eth0").is_none(), "eth0 should be gone");
 
     // Connectivity still works through the remaining eth1.
-    let obs2 = dev.run_sync(move || crate::test_utils::udp_roundtrip(reflector))?;
+    let obs2 = dev.run_sync(move || test_utils::udp_roundtrip(reflector))?;
     assert_eq!(obs2.ip(), IpAddr::V4(dc_ip));
 
     // Cannot remove the last interface.
@@ -1848,7 +1692,7 @@ async fn custom_downstream_cidr() -> Result<()> {
     let reflector = SocketAddr::new(IpAddr::V4(dc_ip), 17_300);
     dc.spawn_reflector(reflector)?;
     tokio::time::sleep(Duration::from_millis(200)).await;
-    dev.run_sync(move || crate::test_utils::udp_roundtrip(reflector))
+    dev.run_sync(move || test_utils::udp_roundtrip(reflector))
         .context("udp roundtrip through custom cidr")?;
 
     Ok(())
@@ -1882,13 +1726,13 @@ async fn link_down_up_connectivity() -> Result<()> {
                     dc.spawn_reflector(r)?;
                     tokio::time::sleep(Duration::from_millis(200)).await;
                     dev.run_sync(move || {
-                        crate::test_utils::probe_udp(r, Duration::from_millis(500), Some(bind))
+                        test_utils::probe_udp(r, Duration::from_millis(500), Some(bind))
                     })
                     .context("before link_down")?;
                     dev_handle.link_down("eth0").await?;
                     if dev
                         .run_sync(move || {
-                            crate::test_utils::probe_udp(r, Duration::from_millis(500), Some(bind))
+                            test_utils::probe_udp(r, Duration::from_millis(500), Some(bind))
                         })
                         .is_ok()
                     {
@@ -1897,7 +1741,7 @@ async fn link_down_up_connectivity() -> Result<()> {
                     dev_handle.link_up("eth0").await?;
                     tokio::time::sleep(Duration::from_millis(100)).await;
                     dev.run_sync(move || {
-                        crate::test_utils::probe_udp(r, Duration::from_millis(500), Some(bind))
+                        test_utils::probe_udp(r, Duration::from_millis(500), Some(bind))
                     })
                     .context("after link_up")?;
                 }
@@ -2005,7 +1849,7 @@ async fn nat_rebind_mode_ip() -> Result<()> {
             let bind = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0);
             let r_dc = ctx.r_dc;
             let o = ctx.dev.run_sync(move || {
-                crate::test_utils::probe_udp(r_dc, Duration::from_millis(500), Some(bind))
+                test_utils::probe_udp(r_dc, Duration::from_millis(500), Some(bind))
             })?;
             let expected = match to {
                 Nat::Home => IpAddr::V4(wan_ip),
@@ -2046,12 +1890,12 @@ async fn nat_rebind_conntrack_flush() -> Result<()> {
     let bind = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0);
     let r_dc = ctx.r_dc;
     let o1 = ctx.dev.run_sync(move || {
-        crate::test_utils::probe_udp(r_dc, Duration::from_millis(500), Some(bind))
+        test_utils::probe_udp(r_dc, Duration::from_millis(500), Some(bind))
     })?;
     nat_handle.flush_nat_state().await?;
     tokio::time::sleep(Duration::from_millis(50)).await;
     let o2 = ctx.dev.run_sync(move || {
-        crate::test_utils::probe_udp(r_dc, Duration::from_millis(500), Some(bind))
+        test_utils::probe_udp(r_dc, Duration::from_millis(500), Some(bind))
     })?;
     assert_ne!(
         o1.port(),
@@ -2085,8 +1929,8 @@ async fn devices_same_nat_share_ip() -> Result<()> {
     dc.spawn_reflector(r)?;
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    let oa = dev_a.run_sync(move || crate::test_utils::udp_roundtrip(r))?;
-    let ob = dev_b.run_sync(move || crate::test_utils::udp_roundtrip(r))?;
+    let oa = dev_a.run_sync(move || test_utils::udp_roundtrip(r))?;
+    let ob = dev_b.run_sync(move || test_utils::udp_roundtrip(r))?;
     assert_eq!(
         oa.ip(),
         ob.ip(),
@@ -2130,8 +1974,8 @@ async fn devices_diff_nat_isolate() -> Result<()> {
     dev_a.run_sync(move || ping(&dc_ip_str))?;
     dev_b.run_sync(move || ping(&dc_ip_str2))?;
 
-    let oa = dev_a.run_sync(move || crate::test_utils::udp_roundtrip(r))?;
-    let ob = dev_b.run_sync(move || crate::test_utils::udp_roundtrip(r))?;
+    let oa = dev_a.run_sync(move || test_utils::udp_roundtrip(r))?;
+    let ob = dev_b.run_sync(move || test_utils::udp_roundtrip(r))?;
     assert_ne!(
         oa.ip(),
         ob.ip(),
@@ -2395,7 +2239,7 @@ async fn rate_limit_udp_upload() -> Result<()> {
     // ~300 KB at 2 Mbit/s ≈ 1.2 s.
     let start = Instant::now();
     dev.spawn(move |_| async move {
-        crate::test_utils::udp_send_recv_count(r, 300, 1024, Duration::from_secs(5)).await
+        test_utils::udp_send_recv_count(r, 300, 1024, Duration::from_secs(5)).await
     })?
     .await??;
     let elapsed = start.elapsed();
@@ -2435,7 +2279,7 @@ async fn rate_limit_udp_download() -> Result<()> {
     let start = Instant::now();
     dev_id
         .spawn(move |_| async move {
-            crate::test_utils::udp_send_recv_count(r, 300, 1024, Duration::from_secs(5)).await
+            test_utils::udp_send_recv_count(r, 300, 1024, Duration::from_secs(5)).await
         })?
         .await??;
     let elapsed = start.elapsed();
@@ -2617,7 +2461,7 @@ async fn loss_udp_moderate() -> Result<()> {
     // Expected ~500 received; bounds [200, 800] give wide margin.
     let (_, received) = dev
         .spawn(move |_| async move {
-            crate::test_utils::udp_send_recv_count(r, 1000, 64, Duration::from_secs(8)).await
+            test_utils::udp_send_recv_count(r, 1000, 64, Duration::from_secs(8)).await
         })?
         .await??;
     assert!(
@@ -2658,7 +2502,7 @@ async fn loss_udp_high() -> Result<()> {
 
     let (_, received) = dev
         .spawn(move |_| async move {
-            crate::test_utils::udp_send_recv_count(r, 100, 64, Duration::from_secs(3)).await
+            test_utils::udp_send_recv_count(r, 100, 64, Duration::from_secs(3)).await
         })?
         .await??;
     assert!(
@@ -2753,7 +2597,7 @@ async fn loss_udp_both_directions() -> Result<()> {
     // Round-trip delivery ≈ (1-0.3)×(1-0.3) = 49 %; expect < 80.
     let (_, received) = dev
         .spawn(move |_| async move {
-            crate::test_utils::udp_send_recv_count(r, 100, 64, Duration::from_secs(3)).await
+            test_utils::udp_send_recv_count(r, 100, 64, Duration::from_secs(3)).await
         })?
         .await??;
     assert!(
@@ -2764,41 +2608,6 @@ async fn loss_udp_both_directions() -> Result<()> {
 }
 
 // ── 5k: Latency ──────────────────────────────────────────────────────
-
-#[tokio::test(flavor = "current_thread")]
-#[traced_test]
-#[ignore = "hangs — download-direction impair path needs async worker fix"]
-async fn latency_download_direction() -> Result<()> {
-    let lab = Lab::new().await?;
-    let dc = lab.add_router("dc").build().await?;
-    let dev = lab
-        .add_device("dev")
-        .iface("eth0", dc.id(), None)
-        .build()
-        .await?;
-
-    let dc_ip = dc.uplink_ip().context("no dc uplink ip")?;
-    let r = SocketAddr::new(IpAddr::V4(dc_ip), 18_400);
-    dc.spawn_reflector(r)?;
-    tokio::time::sleep(Duration::from_millis(100)).await;
-
-    let base = dev.run_sync(move || crate::test_utils::udp_rtt(r))?;
-
-    dc.set_downlink_condition(Some(LinkCondition::Manual(LinkLimits {
-        rate_kbit: 0,
-        loss_pct: 0.0,
-        latency_ms: 50,
-        ..Default::default()
-    })))
-    .await?;
-
-    let impaired = dev.run_sync(move || crate::test_utils::udp_rtt(r))?;
-    assert!(
-        impaired >= base + Duration::from_millis(40),
-        "expected RTT +40ms after 50ms download latency, base={base:?} impaired={impaired:?}"
-    );
-    Ok(())
-}
 
 #[tokio::test(flavor = "current_thread")]
 #[traced_test]
@@ -2834,64 +2643,10 @@ async fn latency_upload_and_download() -> Result<()> {
     tokio::time::sleep(Duration::from_millis(200)).await;
 
     // Each packet traverses: upload(20ms) + download(30ms) = 50ms one-way → RTT ≥ 100ms.
-    let rtt = dev.run_sync(move || crate::test_utils::udp_rtt(r))?;
+    let rtt = dev.run_sync(move || test_utils::udp_rtt(r))?;
     assert!(
         rtt >= Duration::from_millis(90),
         "expected RTT ≥ 90ms with 20ms upload + 30ms download, got {rtt:?}"
-    );
-    Ok(())
-}
-
-#[tokio::test(flavor = "current_thread")]
-#[traced_test]
-#[ignore = "TODO: migrate to new region API (add_region + link_regions)"]
-#[allow(deprecated)]
-async fn latency_device_plus_region() -> Result<()> {
-    let lab = Lab::new().await?;
-    lab.set_region_latency("eu", "us", 40);
-    lab.set_region_latency("us", "eu", 40);
-    let dc_eu = lab.add_router("dc-eu").build().await?;
-    let dc_us = lab.add_router("dc-us").build().await?;
-    let dev = lab
-        .add_device("dev")
-        .iface(
-            "eth0",
-            dc_eu.id(),
-            Some(LinkCondition::Manual(LinkLimits {
-                rate_kbit: 0,
-                loss_pct: 0.0,
-                latency_ms: 30,
-                ..Default::default()
-            })),
-        )
-        .build()
-        .await?;
-
-    let r_us = SocketAddr::new(
-        IpAddr::V4(dc_us.uplink_ip().context("no uplink ip")?),
-        18_600,
-    );
-    let r_eu = SocketAddr::new(
-        IpAddr::V4(dc_eu.uplink_ip().context("no uplink ip")?),
-        18_601,
-    );
-    dc_us.spawn_reflector(r_us)?;
-    dc_eu.spawn_reflector(r_eu)?;
-    tokio::time::sleep(Duration::from_millis(250)).await;
-
-    // eu→us: device(30ms) + region(40ms) = 70ms one-way → RTT ≥ 140ms.
-    let rtt_eu_us = dev.run_sync(move || crate::test_utils::udp_rtt(r_us))?;
-    assert!(
-        rtt_eu_us >= Duration::from_millis(130),
-        "expected eu→us RTT ≥ 130ms, got {rtt_eu_us:?}"
-    );
-
-    // eu→eu: only device upload impair (30ms egress on dev eth0) → RTT ≈ 30ms.
-    // Download path has no qdisc, so we expect at least 25ms to allow slack.
-    let rtt_eu_eu = dev.run_sync(move || crate::test_utils::udp_rtt(r_eu))?;
-    assert!(
-        rtt_eu_eu >= Duration::from_millis(25),
-        "expected eu→eu RTT ≥ 25ms (device upload impair only), got {rtt_eu_eu:?}"
     );
     Ok(())
 }
@@ -2941,7 +2696,7 @@ async fn latency_multihop_chain() -> Result<()> {
     tokio::time::sleep(Duration::from_millis(200)).await;
 
     // One-way: device(20ms) + nat WAN(30ms) = 50ms → RTT ≥ 100ms.
-    let rtt = dev.run_sync(move || crate::test_utils::udp_rtt(r))?;
+    let rtt = dev.run_sync(move || test_utils::udp_rtt(r))?;
     assert!(
         rtt >= Duration::from_millis(90),
         "expected RTT ≥ 90ms for multi-hop chain, got {rtt:?}"
@@ -3079,7 +2834,7 @@ async fn latency_dynamic_add_remove() -> Result<()> {
     dc.spawn_reflector(r)?;
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    let baseline = dev.run_sync(move || crate::test_utils::udp_rtt(r))?;
+    let baseline = dev.run_sync(move || test_utils::udp_rtt(r))?;
 
     let dev_handle = lab.device_by_name("dev").unwrap();
     let default_if = dev_handle.default_iface().unwrap().name().to_string();
@@ -3094,14 +2849,14 @@ async fn latency_dynamic_add_remove() -> Result<()> {
             })),
         )
         .await?;
-    let high = dev.run_sync(move || crate::test_utils::udp_rtt(r))?;
+    let high = dev.run_sync(move || test_utils::udp_rtt(r))?;
     assert!(
         high >= baseline + Duration::from_millis(90),
         "expected RTT +90ms after 100ms impair, baseline={baseline:?} high={high:?}"
     );
 
     dev_handle.set_link_condition(&default_if, None).await?;
-    let recovered = dev.run_sync(move || crate::test_utils::udp_rtt(r))?;
+    let recovered = dev.run_sync(move || test_utils::udp_rtt(r))?;
     assert!(
         recovered < baseline + Duration::from_millis(30),
         "expected RTT to recover near baseline, baseline={baseline:?} recovered={recovered:?}"
@@ -3138,7 +2893,7 @@ async fn rate_presets() -> Result<()> {
             dc.spawn_reflector(r)?;
             tokio::time::sleep(Duration::from_millis(200)).await;
 
-            let rtt = dev.run_sync(move || crate::test_utils::udp_rtt(r))?;
+            let rtt = dev.run_sync(move || test_utils::udp_rtt(r))?;
             if rtt < Duration::from_millis(min_latency_ms) {
                 bail!("preset {preset:?}: expected RTT ≥ {min_latency_ms}ms, got {rtt:?}");
             }
@@ -3146,7 +2901,7 @@ async fn rate_presets() -> Result<()> {
                 // 1000 packets: P(zero loss at 1%) ≈ 0.000045 — reliably detects loss.
                 let (_, received) = dev
                     .spawn(move |_| async move {
-                        crate::test_utils::udp_send_recv_count(r, 1000, 64, Duration::from_secs(5))
+                        test_utils::udp_send_recv_count(r, 1000, 64, Duration::from_secs(5))
                             .await
                     })?
                     .await??;
@@ -3237,7 +2992,7 @@ async fn downlink_condition_builder() -> Result<()> {
     dc.spawn_reflector(r)?;
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    let rtt = dev.run_sync(move || crate::test_utils::udp_rtt(r))?;
+    let rtt = dev.run_sync(move || test_utils::udp_rtt(r))?;
     // 50ms one-way on downlink → download direction adds ~50ms to RTT.
     assert!(
         rtt >= Duration::from_millis(30),
@@ -3665,7 +3420,7 @@ async fn smoke_dual_stack_roundtrip() -> Result<()> {
     let r_v4 = SocketAddr::new(IpAddr::V4(dc_ip_v4), 3480);
     dc.spawn_reflector(r_v4)?;
     tokio::time::sleep(Duration::from_millis(100)).await;
-    let o_v4 = dev.run_sync(move || crate::test_utils::udp_roundtrip(r_v4))?;
+    let o_v4 = dev.run_sync(move || test_utils::udp_roundtrip(r_v4))?;
     assert_eq!(
         o_v4.ip(),
         IpAddr::V4(dev.ip().unwrap()),
@@ -3677,7 +3432,7 @@ async fn smoke_dual_stack_roundtrip() -> Result<()> {
     let r_v6 = SocketAddr::new(IpAddr::V6(dc_ip_v6), 3481);
     dc.spawn_reflector(r_v6)?;
     tokio::time::sleep(Duration::from_millis(100)).await;
-    let o_v6 = dev.run_sync(move || crate::test_utils::udp_roundtrip(r_v6))?;
+    let o_v6 = dev.run_sync(move || test_utils::udp_roundtrip(r_v6))?;
     assert!(o_v6.ip().is_ipv6(), "v6 reflexive should be IPv6");
 
     Ok(())
@@ -3714,7 +3469,7 @@ async fn smoke_v6_only_roundtrip() -> Result<()> {
     let r_v6 = SocketAddr::new(IpAddr::V6(dc_ip_v6), 3490);
     dc.spawn_reflector(r_v6)?;
     tokio::time::sleep(Duration::from_millis(100)).await;
-    let o = dev.run_sync(move || crate::test_utils::udp_roundtrip(r_v6))?;
+    let o = dev.run_sync(move || test_utils::udp_roundtrip(r_v6))?;
     assert!(o.ip().is_ipv6(), "reflexive should be v6");
     Ok(())
 }
@@ -3755,7 +3510,7 @@ async fn nat_v6_masquerade() -> Result<()> {
     dc.spawn_reflector(r_v6)?;
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    let o = dev.run_sync(move || crate::test_utils::udp_roundtrip(r_v6))?;
+    let o = dev.run_sync(move || test_utils::udp_roundtrip(r_v6))?;
     // With masquerade, the reflexive address should be the router's WAN IP.
     let home_wan_v6 = home.uplink_ip_v6().expect("home v6 uplink");
     assert_eq!(
@@ -3859,7 +3614,7 @@ async fn v6_only_no_v4() -> Result<()> {
     let r_v6 = SocketAddr::new(IpAddr::V6(dc_ip_v6), 3491);
     dc.spawn_reflector(r_v6)?;
     tokio::time::sleep(Duration::from_millis(100)).await;
-    let o = dev.run_sync(move || crate::test_utils::udp_roundtrip(r_v6))?;
+    let o = dev.run_sync(move || test_utils::udp_roundtrip(r_v6))?;
     assert!(o.ip().is_ipv6(), "reflexive should be v6");
 
     // v4 ping to the IX gateway should fail (no v4 routes).
@@ -3898,10 +3653,10 @@ async fn dual_stack_public_addrs() -> Result<()> {
 
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    let o_v4 = dev.run_sync(move || crate::test_utils::udp_roundtrip(r_v4))?;
+    let o_v4 = dev.run_sync(move || test_utils::udp_roundtrip(r_v4))?;
     assert!(o_v4.ip().is_ipv4(), "v4 reflexive should be v4");
 
-    let o_v6 = dev.run_sync(move || crate::test_utils::udp_roundtrip(r_v6))?;
+    let o_v6 = dev.run_sync(move || test_utils::udp_roundtrip(r_v6))?;
     assert!(o_v6.ip().is_ipv6(), "v6 reflexive should be v6");
 
     Ok(())
@@ -3943,104 +3698,13 @@ async fn nat_v6_none_global() -> Result<()> {
     dc.spawn_reflector(r_v6)?;
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    let o_v6 = dev.run_sync(move || crate::test_utils::udp_roundtrip(r_v6))?;
+    let o_v6 = dev.run_sync(move || test_utils::udp_roundtrip(r_v6))?;
     // No v6 NAT → reflexive ip should be the device's own ULA address.
     let dev_ip6 = dev.ip6().expect("device v6 addr");
     assert_eq!(
         o_v6.ip(),
         IpAddr::V6(dev_ip6),
         "v6 reflexive should be device's own v6 address (no NAT)"
-    );
-
-    Ok(())
-}
-
-/// V6-only region latency: v6 inter-region RTT includes latency.
-#[tokio::test(flavor = "current_thread")]
-#[traced_test]
-#[ignore = "TODO: migrate to new region API (add_region + link_regions)"]
-#[allow(deprecated)]
-async fn latency_v6_region() -> Result<()> {
-    check_caps()?;
-    let lab = Lab::new().await?;
-    lab.set_region_latency("eu", "us", 65);
-    lab.set_region_latency("us", "eu", 65);
-
-    let dc_eu = lab
-        .add_router("dc-eu")
-        .ip_support(IpSupport::V6Only)
-        .build()
-        .await?;
-    let dc_us = lab
-        .add_router("dc-us")
-        .ip_support(IpSupport::V6Only)
-        .build()
-        .await?;
-
-    // v6 reflector
-    let eu_ip_v6 = dc_eu.uplink_ip_v6().expect("eu v6 uplink");
-    let r_v6 = SocketAddr::new(IpAddr::V6(eu_ip_v6), 3495);
-    dc_eu.spawn_reflector(r_v6)?;
-    tokio::time::sleep(Duration::from_millis(200)).await;
-
-    let rtt_v6 = dc_us.run_sync(move || crate::test_utils::udp_rtt(r_v6))?;
-    assert!(
-        rtt_v6.as_millis() >= 120,
-        "v6 RTT {}ms should be >= 120ms (2x65ms)",
-        rtt_v6.as_millis()
-    );
-
-    Ok(())
-}
-
-/// Dual-stack inter-region latency applies to both v4 and v6.
-#[tokio::test(flavor = "current_thread")]
-#[traced_test]
-#[ignore = "TODO: migrate to new region API (add_region + link_regions)"]
-#[allow(deprecated)]
-async fn latency_dual_stack_region() -> Result<()> {
-    check_caps()?;
-    let lab = Lab::new().await?;
-    lab.set_region_latency("eu", "us", 65);
-    lab.set_region_latency("us", "eu", 65);
-
-    let dc_eu = lab
-        .add_router("dc-eu")
-        .ip_support(IpSupport::DualStack)
-        .build()
-        .await?;
-    let dc_us = lab
-        .add_router("dc-us")
-        .ip_support(IpSupport::DualStack)
-        .build()
-        .await?;
-
-    // v4 reflector
-    let eu_ip_v4 = dc_eu.uplink_ip().expect("eu v4 uplink");
-    let r_v4 = SocketAddr::new(IpAddr::V4(eu_ip_v4), 3510);
-    dc_eu.spawn_reflector(r_v4)?;
-
-    // v6 reflector
-    let eu_ip_v6 = dc_eu.uplink_ip_v6().expect("eu v6 uplink");
-    let r_v6 = SocketAddr::new(IpAddr::V6(eu_ip_v6), 3511);
-    dc_eu.spawn_reflector(r_v6)?;
-
-    tokio::time::sleep(Duration::from_millis(200)).await;
-
-    // v4 RTT
-    let rtt_v4 = dc_us.run_sync(move || crate::test_utils::udp_rtt(r_v4))?;
-    assert!(
-        rtt_v4.as_millis() >= 120,
-        "v4 RTT {}ms should be >= 120ms (2×65ms)",
-        rtt_v4.as_millis()
-    );
-
-    // v6 RTT
-    let rtt_v6 = dc_us.run_sync(move || crate::test_utils::udp_rtt(r_v6))?;
-    assert!(
-        rtt_v6.as_millis() >= 120,
-        "v6 RTT {}ms should be >= 120ms (2×65ms)",
-        rtt_v6.as_millis()
     );
 
     Ok(())
@@ -4448,14 +4112,14 @@ async fn pmtu_blackhole_drops_large_packets() -> Result<()> {
                 libc::IPPROTO_IP,
                 libc::IP_MTU_DISCOVER,
                 &val as *const _ as *const libc::c_void,
-                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+                size_of::<libc::c_int>() as libc::socklen_t,
             );
         }
         let payload = vec![0xABu8; 1200];
         // Send multiple times in case of transient loss.
         for _ in 0..3 {
             let _ = sock.send_to(&payload, bind_addr);
-            std::thread::sleep(Duration::from_millis(100));
+            thread::sleep(Duration::from_millis(100));
         }
         Ok(())
     })?;
@@ -4596,7 +4260,7 @@ async fn region_basic_latency() -> Result<()> {
     dc_eu.spawn_reflector(r_eu)?;
     tokio::time::sleep(Duration::from_millis(250)).await;
 
-    let rtt = dev_us.run_sync(move || crate::test_utils::udp_rtt(r_eu))?;
+    let rtt = dev_us.run_sync(move || test_utils::udp_rtt(r_eu))?;
     assert!(
         rtt >= Duration::from_millis(90),
         "expected inter-region RTT >= 90ms (2×50ms), got {rtt:?}"
@@ -4626,7 +4290,7 @@ async fn region_default_regions() -> Result<()> {
     dc_eu.spawn_reflector(r_eu)?;
     tokio::time::sleep(Duration::from_millis(250)).await;
 
-    let rtt = dev_us.run_sync(move || crate::test_utils::udp_rtt(r_eu))?;
+    let rtt = dev_us.run_sync(move || test_utils::udp_rtt(r_eu))?;
     assert!(
         rtt >= Duration::from_millis(70),
         "expected us↔eu RTT >= 70ms (2×40ms), got {rtt:?}"
@@ -4655,7 +4319,7 @@ async fn region_break_restore() -> Result<()> {
     tokio::time::sleep(Duration::from_millis(250)).await;
 
     // Direct eu↔asia RTT: ≥ 2×120ms = 240ms minus tolerance.
-    let rtt_direct = dc_eu.run_sync(move || crate::test_utils::udp_rtt(r_asia))?;
+    let rtt_direct = dc_eu.run_sync(move || test_utils::udp_rtt(r_asia))?;
     assert!(
         rtt_direct >= Duration::from_millis(220),
         "expected direct eu↔asia RTT >= 220ms, got {rtt_direct:?}"
@@ -4665,7 +4329,7 @@ async fn region_break_restore() -> Result<()> {
     lab.break_region_link(&regions.eu, &regions.asia)?;
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    let rtt_broken = dc_eu.run_sync(move || crate::test_utils::udp_rtt(r_asia))?;
+    let rtt_broken = dc_eu.run_sync(move || test_utils::udp_rtt(r_asia))?;
     // Rerouted path: eu→us (40ms) + us→asia (95ms) = 135ms each way = 270ms RTT.
     assert!(
         rtt_broken >= Duration::from_millis(240),
@@ -4676,10 +4340,150 @@ async fn region_break_restore() -> Result<()> {
     lab.restore_region_link(&regions.eu, &regions.asia)?;
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    let rtt_restored = dc_eu.run_sync(move || crate::test_utils::udp_rtt(r_asia))?;
+    let rtt_restored = dc_eu.run_sync(move || test_utils::udp_rtt(r_asia))?;
     assert!(
         rtt_restored >= Duration::from_millis(220),
         "expected restored eu↔asia RTT >= 220ms, got {rtt_restored:?}"
+    );
+    Ok(())
+}
+
+/// Device-level impairment stacks with region latency.
+///
+/// Region adds 40ms one-way (80ms RTT). Device upload adds 30ms one-way (30ms RTT).
+/// Total expected RTT >= 100ms.
+#[tokio::test(flavor = "current_thread")]
+#[traced_test]
+async fn region_device_impair_stacks_with_region_latency() -> Result<()> {
+    check_caps()?;
+    let lab = Lab::new().await?;
+    let eu = lab.add_region("eu").await?;
+    let us = lab.add_region("us").await?;
+    lab.link_regions(&eu, &us, RegionLink::good(40)).await?;
+
+    let dc_eu = lab.add_router("dc-eu").region(&eu).build().await?;
+    let dc_us = lab.add_router("dc-us").region(&us).build().await?;
+
+    let dev = lab
+        .add_device("dev")
+        .iface(
+            "eth0",
+            dc_eu.id(),
+            Some(LinkCondition::Manual(LinkLimits {
+                latency_ms: 30,
+                ..Default::default()
+            })),
+        )
+        .build()
+        .await?;
+
+    let us_ip = dc_us.uplink_ip().context("no uplink ip")?;
+    let r_us = SocketAddr::new(IpAddr::V4(us_ip), 18_700);
+    dc_us.spawn_reflector(r_us)?;
+
+    let eu_ip = dc_eu.uplink_ip().context("no uplink ip")?;
+    let r_eu = SocketAddr::new(IpAddr::V4(eu_ip), 18_701);
+    dc_eu.spawn_reflector(r_eu)?;
+    tokio::time::sleep(Duration::from_millis(250)).await;
+
+    // eu→us: device(30ms) + region(40ms) one-way → RTT ≥ 100ms.
+    let rtt_cross = dev.run_sync(move || test_utils::udp_rtt(r_us))?;
+    assert!(
+        rtt_cross >= Duration::from_millis(90),
+        "expected eu→us RTT ≥ 90ms (device + region), got {rtt_cross:?}"
+    );
+
+    // eu→eu: only device upload impair → RTT ≥ 25ms.
+    let rtt_local = dev.run_sync(move || test_utils::udp_rtt(r_eu))?;
+    assert!(
+        rtt_local >= Duration::from_millis(25),
+        "expected eu→eu RTT ≥ 25ms (device impair only), got {rtt_local:?}"
+    );
+    assert!(
+        rtt_local < rtt_cross - Duration::from_millis(30),
+        "expected local RTT much less than cross-region, local={rtt_local:?} cross={rtt_cross:?}"
+    );
+    Ok(())
+}
+
+/// V6-only region latency: v6 inter-region traffic is impaired.
+#[tokio::test(flavor = "current_thread")]
+#[traced_test]
+async fn region_v6_latency() -> Result<()> {
+    check_caps()?;
+    let lab = Lab::new().await?;
+    let eu = lab.add_region("eu").await?;
+    let us = lab.add_region("us").await?;
+    lab.link_regions(&eu, &us, RegionLink::good(65)).await?;
+
+    let dc_eu = lab
+        .add_router("dc-eu")
+        .region(&eu)
+        .ip_support(IpSupport::V6Only)
+        .build()
+        .await?;
+    let dc_us = lab
+        .add_router("dc-us")
+        .region(&us)
+        .ip_support(IpSupport::V6Only)
+        .build()
+        .await?;
+
+    let eu_v6 = dc_eu.uplink_ip_v6().expect("eu v6 uplink");
+    let r_v6 = SocketAddr::new(IpAddr::V6(eu_v6), 3495);
+    dc_eu.spawn_reflector(r_v6)?;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let rtt = dc_us.run_sync(move || test_utils::udp_rtt(r_v6))?;
+    assert!(
+        rtt >= Duration::from_millis(120),
+        "expected v6 RTT >= 120ms (2×65ms), got {rtt:?}"
+    );
+    Ok(())
+}
+
+/// Dual-stack region latency: both v4 and v6 inter-region traffic are impaired.
+#[tokio::test(flavor = "current_thread")]
+#[traced_test]
+async fn region_dual_stack_latency() -> Result<()> {
+    check_caps()?;
+    let lab = Lab::new().await?;
+    let eu = lab.add_region("eu").await?;
+    let us = lab.add_region("us").await?;
+    lab.link_regions(&eu, &us, RegionLink::good(65)).await?;
+
+    let dc_eu = lab
+        .add_router("dc-eu")
+        .region(&eu)
+        .ip_support(IpSupport::DualStack)
+        .build()
+        .await?;
+    let dc_us = lab
+        .add_router("dc-us")
+        .region(&us)
+        .ip_support(IpSupport::DualStack)
+        .build()
+        .await?;
+
+    let eu_v4 = dc_eu.uplink_ip().expect("eu v4 uplink");
+    let r_v4 = SocketAddr::new(IpAddr::V4(eu_v4), 3510);
+    dc_eu.spawn_reflector(r_v4)?;
+
+    let eu_v6 = dc_eu.uplink_ip_v6().expect("eu v6 uplink");
+    let r_v6 = SocketAddr::new(IpAddr::V6(eu_v6), 3511);
+    dc_eu.spawn_reflector(r_v6)?;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let rtt_v4 = dc_us.run_sync(move || test_utils::udp_rtt(r_v4))?;
+    assert!(
+        rtt_v4 >= Duration::from_millis(120),
+        "expected v4 RTT >= 120ms (2×65ms), got {rtt_v4:?}"
+    );
+
+    let rtt_v6 = dc_us.run_sync(move || test_utils::udp_rtt(r_v6))?;
+    assert!(
+        rtt_v6 >= Duration::from_millis(120),
+        "expected v6 RTT >= 120ms (2×65ms), got {rtt_v6:?}"
     );
     Ok(())
 }
@@ -4704,7 +4508,7 @@ async fn region_no_cost_without_regions() -> Result<()> {
     dc2.spawn_reflector(r)?;
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    let rtt = dev.run_sync(move || crate::test_utils::udp_rtt(r))?;
+    let rtt = dev.run_sync(move || test_utils::udp_rtt(r))?;
     // Without regions, no netem — RTT should be < 10ms (kernel loopback).
     assert!(
         rtt < Duration::from_millis(10),
@@ -4731,7 +4535,7 @@ async fn region_regionless_to_region_connectivity() -> Result<()> {
 
     // Regionless DC → region router: goes via IX → region router → sub-router.
     // The /20 route in root NS directs traffic to the region router.
-    let rtt = dc.run_sync(move || crate::test_utils::udp_rtt(r_us))?;
+    let rtt = dc.run_sync(move || test_utils::udp_rtt(r_us))?;
     assert!(
         rtt < Duration::from_millis(20),
         "expected regionless→region RTT < 20ms (no netem), got {rtt:?}"
@@ -4769,7 +4573,7 @@ async fn region_mixed_nat() -> Result<()> {
     tokio::time::sleep(Duration::from_millis(250)).await;
 
     // NATted device → DC in another region: NAT + region latency.
-    let rtt = dev.run_sync(move || crate::test_utils::udp_rtt(r_us))?;
+    let rtt = dev.run_sync(move || test_utils::udp_rtt(r_us))?;
     assert!(
         rtt >= Duration::from_millis(90),
         "expected NAT+region RTT >= 90ms, got {rtt:?}"
@@ -4841,7 +4645,7 @@ async fn firewall_corporate_blocks_udp() -> Result<()> {
     tokio::time::sleep(Duration::from_millis(200)).await;
 
     // UDP on non-whitelisted port should be blocked.
-    let udp_result = dev.run_sync(move || crate::test_utils::udp_rtt(reflector));
+    let udp_result = dev.run_sync(move || test_utils::udp_rtt(reflector));
     assert!(
         udp_result.is_err(),
         "expected UDP to be blocked by corporate firewall, got: {:?}",
@@ -4886,7 +4690,7 @@ async fn firewall_captive_portal_blocks_udp() -> Result<()> {
     dc.spawn_reflector(reflector)?;
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    let udp_result = dev.run_sync(move || crate::test_utils::udp_rtt(reflector));
+    let udp_result = dev.run_sync(move || test_utils::udp_rtt(reflector));
     assert!(
         udp_result.is_err(),
         "expected UDP to be blocked by captive portal, got: {:?}",
@@ -4925,7 +4729,7 @@ async fn firewall_none_allows_all() -> Result<()> {
     dc.spawn_reflector(reflector)?;
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    let rtt = dev.run_sync(move || crate::test_utils::udp_rtt(reflector))?;
+    let rtt = dev.run_sync(move || test_utils::udp_rtt(reflector))?;
     assert!(
         rtt < Duration::from_millis(100),
         "expected low RTT, got {rtt:?}"
@@ -4963,7 +4767,7 @@ async fn firewall_custom_selective() -> Result<()> {
     dc.spawn_reflector(reflector_blocked)?;
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    let blocked = dev.run_sync(move || crate::test_utils::udp_rtt(reflector_blocked));
+    let blocked = dev.run_sync(move || test_utils::udp_rtt(reflector_blocked));
     assert!(
         blocked.is_err(),
         "expected UDP on port 9203 to be blocked, got: {:?}",
@@ -4975,7 +4779,7 @@ async fn firewall_custom_selective() -> Result<()> {
     dc.spawn_reflector(reflector_allowed)?;
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    let rtt = dev.run_sync(move || crate::test_utils::udp_rtt(reflector_allowed))?;
+    let rtt = dev.run_sync(move || test_utils::udp_rtt(reflector_allowed))?;
     assert!(
         rtt < Duration::from_millis(100),
         "expected low RTT on allowed port, got {rtt:?}"
@@ -5007,7 +4811,7 @@ async fn firewall_runtime_change() -> Result<()> {
     tokio::time::sleep(Duration::from_millis(200)).await;
 
     // Initially no firewall — UDP works.
-    let rtt = dev.run_sync(move || crate::test_utils::udp_rtt(reflector))?;
+    let rtt = dev.run_sync(move || test_utils::udp_rtt(reflector))?;
     assert!(rtt < Duration::from_millis(100));
 
     // Apply corporate firewall at runtime.
@@ -5015,7 +4819,7 @@ async fn firewall_runtime_change() -> Result<()> {
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     // UDP should now be blocked.
-    let blocked = dev.run_sync(move || crate::test_utils::udp_rtt(reflector));
+    let blocked = dev.run_sync(move || test_utils::udp_rtt(reflector));
     assert!(
         blocked.is_err(),
         "expected UDP to be blocked after applying firewall, got: {:?}",
@@ -5027,7 +4831,7 @@ async fn firewall_runtime_change() -> Result<()> {
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     // UDP should work again.
-    let rtt = dev.run_sync(move || crate::test_utils::udp_rtt(reflector))?;
+    let rtt = dev.run_sync(move || test_utils::udp_rtt(reflector))?;
     assert!(rtt < Duration::from_millis(100));
 
     Ok(())

@@ -275,7 +275,7 @@ fn is_eexist(err: &rtnetlink::Error) -> bool {
     match err {
         rtnetlink::Error::NetlinkError(msg) => msg
             .code
-            .map(|code| -code.get() == nix::libc::EEXIST)
+            .map(|code| -code.get() == libc::EEXIST)
             .unwrap_or(false),
         _ => false,
     }

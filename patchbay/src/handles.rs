@@ -454,7 +454,7 @@ impl Device {
     ///
     /// Written to this device's hosts file overlay. glibc picks up changes
     /// on the next `getaddrinfo()` via mtime check.
-    pub fn dns_entry(&self, name: &str, ip: std::net::IpAddr) -> Result<()> {
+    pub fn dns_entry(&self, name: &str, ip: IpAddr) -> Result<()> {
         let mut inner = self.lab.core.lock().unwrap();
         inner
             .dns
@@ -469,7 +469,7 @@ impl Device {
     ///
     /// For in-process Rust code that cannot see the bind-mounted `/etc/hosts`.
     /// Spawned child processes resolve names through glibc automatically.
-    pub fn resolve(&self, name: &str) -> Option<std::net::IpAddr> {
+    pub fn resolve(&self, name: &str) -> Option<IpAddr> {
         let inner = self.lab.core.lock().unwrap();
         inner.dns.resolve(Some(self.id), name)
     }
