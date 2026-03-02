@@ -129,7 +129,7 @@ let corp = lab.add_router("corp").preset(RouterPreset::Corporate).build().await?
 
 Available presets: `Home`, `Datacenter`, `IspV4`, `Mobile`, `MobileV6`,
 `Corporate`, `Hotel`, `Cloud`. Individual methods called after `preset()`
-override preset values. See [docs/ipv6.md](docs/ipv6.md) for the full
+override preset values. See [docs/reference/ipv6.md](docs/reference/ipv6.md) for the full
 reference table.
 
 ### NAT
@@ -143,7 +143,7 @@ build custom NAT configs from mapping + filtering + timeout parameters.
 prefix `64:ff9b::/96`. A userspace SIIT translator on the router converts
 between IPv6 and IPv4 headers; nftables masquerade handles port mapping.
 Use `RouterPreset::MobileV6` or `.nat_v6(NatV6Mode::Nat64)` directly.
-See [docs/ipv6.md](docs/ipv6.md) for details.
+See [docs/reference/ipv6.md](docs/reference/ipv6.md) for details.
 
 ### Firewalls
 
@@ -310,7 +310,7 @@ patchbay run ./sims/iperf-baseline.toml
 patchbay run
 ```
 
-See [docs/reference.md](docs/reference.md) for the full simulation file syntax.
+See [docs/reference/toml-reference.md](docs/reference/toml-reference.md) for the full simulation file syntax.
 
 ## VM mode (macOS)
 
@@ -327,10 +327,10 @@ patchbay-vm down
 
 | Document | Description |
 |----------|-------------|
-| [docs/ipv6.md](docs/ipv6.md) | Real-world IPv6 deployments, NAT64, router presets reference table |
-| [docs/patterns.md](docs/patterns.md) | Simulating VPNs, WiFi handoff, captive portals, and other network events |
-| [docs/holepunching.md](docs/holepunching.md) | NAT implementation details, hole-punching mechanics, nftables fullcone map |
-| [docs/reference.md](docs/reference.md) | TOML simulation file syntax |
+| [docs/reference/ipv6.md](docs/reference/ipv6.md) | Real-world IPv6 deployments, NAT64, router presets reference table |
+| [docs/reference/patterns.md](docs/reference/patterns.md) | Simulating VPNs, WiFi handoff, captive portals, and other network events |
+| [docs/reference/holepunching.md](docs/reference/holepunching.md) | NAT implementation details, hole-punching mechanics, nftables fullcone map |
+| [docs/reference/toml-reference.md](docs/reference/toml-reference.md) | TOML simulation file syntax |
 
 ## License
 

@@ -1,0 +1,11 @@
+[book]
+title = "patchbay"
+description = "Network namespace lab for NAT, routing, and link-condition experiments"
+authors = ["n0"]
+src = "."
+
+[build]
+build-dir = "book"
+
+[output.html]
+git-repository-url = "https://github.com/n0-computer/patchbay"

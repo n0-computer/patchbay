@@ -234,7 +234,7 @@ were found and fixed during implementation:
 4. **Return routes needed for private v6 downstreams.** Added v6 return
    routes for all IX-level routers regardless of downstream pool.
 
-See [docs/ipv6.md](ipv6.md) for the full IPv6 deployment reference.
+See [IPv6 Deployments](ipv6.md) for the full IPv6 deployment reference.
 
 ---
 

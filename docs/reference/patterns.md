@@ -110,7 +110,7 @@ let vpn = lab.add_router("vpn")
 
 ## NAT Traversal
 
-See [docs/holepunching.md](holepunching.md) for the full NAT implementation
+See [NAT Hole-Punching](holepunching.md) for the full NAT implementation
 reference (nftables fullcone map, conntrack behavior, and debugging notes).
 
 ### Hole punching (STUN + simultaneous open)
@@ -244,7 +244,7 @@ device.set_link_condition("eth0", Some(LinkCondition::Manual(LinkLimits {
 
 ## IPv6 Transition
 
-See [docs/ipv6.md](ipv6.md) for the full IPv6 deployment reference and
+See [IPv6 Deployments](ipv6.md) for the full IPv6 deployment reference and
 router preset table.
 
 ### Dual-stack
