@@ -146,3 +146,33 @@ async fn dual_stack_public_addrs() -> Result<()> {
 
     Ok(())
 }
+
+/// TCP echo roundtrip works over a v6-only network.
+#[tokio::test(flavor = "current_thread")]
+#[traced_test]
+async fn v6_only_tcp_roundtrip() -> Result<()> {
+    check_caps()?;
+    let lab = Lab::new().await?;
+    let dc = lab
+        .add_router("dc")
+        .ip_support(IpSupport::V6Only)
+        .build()
+        .await?;
+    let dev = lab
+        .add_device("dev")
+        .iface("eth0", dc.id(), None)
+        .build()
+        .await?;
+
+    let dc_v6 = dc.uplink_ip_v6().expect("dc v6 uplink");
+    let bind = SocketAddr::new(IpAddr::V6(dc_v6), 20_200);
+    dc.spawn(move |_| async move { spawn_tcp_echo_server(bind).await })?
+        .await
+        .context("tcp echo server task panicked")??;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    dev.spawn(move |_| async move { tcp_roundtrip(bind).await })?
+        .await
+        .context("tcp roundtrip task panicked")??;
+
+    Ok(())
+}

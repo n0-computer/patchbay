@@ -191,3 +191,38 @@ async fn remove_router() -> Result<()> {
 
     Ok(())
 }
+
+/// Devices can be added to an existing lab after the initial build,
+/// and the new device has full connectivity.
+#[tokio::test(flavor = "current_thread")]
+#[traced_test]
+async fn add_device_after_build() -> Result<()> {
+    check_caps()?;
+    let lab = Lab::new().await?;
+    let dc = lab.add_router("dc").build().await?;
+    let dev1 = lab.add_device("dev1").uplink(dc.id()).build().await?;
+
+    let dc_ip = dc.uplink_ip().context("no dc uplink ip")?;
+    let reflector = SocketAddr::new(IpAddr::V4(dc_ip), 20_600);
+    dc.spawn_reflector(reflector)?;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // dev1 works.
+    dev1.run_sync(move || test_utils::udp_roundtrip(reflector))
+        .context("dev1 roundtrip")?;
+
+    // Add a second device after initial build.
+    let dev2 = lab.add_device("dev2").uplink(dc.id()).build().await?;
+    assert!(dev2.ip().is_some(), "dev2 should have an IP");
+    assert_ne!(dev1.ip(), dev2.ip(), "devices should get different IPs");
+
+    // dev2 has connectivity too.
+    dev2.run_sync(move || test_utils::udp_roundtrip(reflector))
+        .context("dev2 roundtrip")?;
+
+    // Cross-device ping works (both on same dc subnet).
+    let dev1_ip_str = dev1.ip().unwrap().to_string();
+    dev2.run_sync(move || ping(&dev1_ip_str))?;
+
+    Ok(())
+}

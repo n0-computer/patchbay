@@ -323,3 +323,52 @@ async fn reserved_name_rejected() -> Result<()> {
     );
     Ok(())
 }
+
+/// Three regions all linked: A↔C direct at 100ms is slower than A↔B (30ms)
+/// + B↔C (40ms) transit. Both A↔B and A↔C are independently impaired.
+#[tokio::test(flavor = "current_thread")]
+#[traced_test]
+async fn three_region_triangle() -> Result<()> {
+    check_caps()?;
+    let lab = Lab::new().await?;
+    let a = lab.add_region("a").await?;
+    let b = lab.add_region("b").await?;
+    let c = lab.add_region("c").await?;
+    lab.link_regions(&a, &b, RegionLink::good(30)).await?;
+    lab.link_regions(&b, &c, RegionLink::good(40)).await?;
+    lab.link_regions(&a, &c, RegionLink::good(100)).await?;
+
+    let dc_a = lab.add_router("dc-a").region(&a).build().await?;
+    let dc_b = lab.add_router("dc-b").region(&b).build().await?;
+    let dc_c = lab.add_router("dc-c").region(&c).build().await?;
+
+    let b_ip = dc_b.uplink_ip().context("no b uplink ip")?;
+    let r_b = SocketAddr::new(IpAddr::V4(b_ip), 20_400);
+    dc_b.spawn_reflector(r_b)?;
+
+    let c_ip = dc_c.uplink_ip().context("no c uplink ip")?;
+    let r_c = SocketAddr::new(IpAddr::V4(c_ip), 20_401);
+    dc_c.spawn_reflector(r_c)?;
+    tokio::time::sleep(Duration::from_millis(250)).await;
+
+    // A↔B: 30ms one-way → RTT ≥ 50ms.
+    let rtt_ab = dc_a.run_sync(move || test_utils::udp_rtt(r_b))?;
+    assert!(
+        rtt_ab >= Duration::from_millis(50),
+        "expected A↔B RTT >= 50ms (2×30ms), got {rtt_ab:?}"
+    );
+
+    // A↔C: 100ms one-way → RTT ≥ 180ms.
+    let rtt_ac = dc_a.run_sync(move || test_utils::udp_rtt(r_c))?;
+    assert!(
+        rtt_ac >= Duration::from_millis(180),
+        "expected A↔C RTT >= 180ms (2×100ms), got {rtt_ac:?}"
+    );
+
+    // A↔C should be notably slower than A↔B.
+    assert!(
+        rtt_ac > rtt_ab + Duration::from_millis(80),
+        "expected A↔C much slower than A↔B: ac={rtt_ac:?} ab={rtt_ab:?}"
+    );
+    Ok(())
+}

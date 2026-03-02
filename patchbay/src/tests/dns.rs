@@ -370,3 +370,42 @@ async fn set_nameserver() -> Result<()> {
     );
     Ok(())
 }
+
+/// IPv6 DNS entries are visible via getent and in-process resolve.
+#[tokio::test(flavor = "current_thread")]
+#[traced_test]
+async fn v6_entry() -> Result<()> {
+    let lab = Lab::new().await?;
+    let dc = lab.add_router("dc").build().await?;
+    let dev = lab
+        .add_device("dev")
+        .iface("eth0", dc.id(), None)
+        .build()
+        .await?;
+
+    let v6_addr = IpAddr::V6(std::net::Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 0x42));
+    lab.dns_entry("v6host.test", v6_addr)?;
+
+    // In-process resolve returns the v6 address.
+    assert_eq!(lab.resolve("v6host.test"), Some(v6_addr));
+    assert_eq!(dev.resolve("v6host.test"), Some(v6_addr));
+
+    // getent sees the v6 address.
+    let mut cmd = std::process::Command::new("getent");
+    cmd.args(["hosts", "v6host.test"]);
+    cmd.stdout(std::process::Stdio::piped());
+    cmd.stderr(std::process::Stdio::piped());
+    let child = dev.spawn_command(cmd)?;
+    let output = child.wait_with_output()?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "getent should resolve v6 entry: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        stdout.contains("2001:db8::42"),
+        "expected v6 address in output: {stdout}"
+    );
+    Ok(())
+}

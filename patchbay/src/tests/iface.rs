@@ -118,3 +118,51 @@ async fn add_secondary_ip() -> Result<()> {
 
     Ok(())
 }
+
+/// Replugging an interface to a different router assigns a new IP from
+/// the new router's subnet and establishes connectivity through it.
+#[tokio::test(flavor = "current_thread")]
+#[traced_test]
+async fn replug_to_different_subnet() -> Result<()> {
+    check_caps()?;
+    let lab = Lab::new().await?;
+    let dc_a = lab.add_router("dc-a").build().await?;
+    let dc_b = lab
+        .add_router("dc-b")
+        .downstream_cidr("172.20.0.0/24".parse()?)
+        .nat(Nat::Home)
+        .build()
+        .await?;
+
+    let dev = lab
+        .add_device("dev")
+        .iface("eth0", dc_a.id(), None)
+        .build()
+        .await?;
+
+    let old_ip = dev.ip().unwrap();
+    // Old IP should be in dc_a's public range.
+    assert_eq!(old_ip.octets()[0], 198, "initially in dc_a range");
+
+    // Replug to dc_b.
+    dev.replug_iface("eth0", dc_b.id()).await?;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let new_ip = dev.ip().unwrap();
+    assert_eq!(
+        new_ip.octets()[0..3],
+        [172, 20, 0],
+        "after replug should be in dc_b's 172.20.0.0/24 subnet, got {new_ip}"
+    );
+    assert_ne!(old_ip, new_ip);
+
+    // Connectivity through dc_b works.
+    let dc_a_ip = dc_a.uplink_ip().context("dc_a uplink")?;
+    let reflector = SocketAddr::new(IpAddr::V4(dc_a_ip), 20_300);
+    dc_a.spawn_reflector(reflector)?;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    dev.run_sync(move || test_utils::udp_roundtrip(reflector))
+        .context("udp roundtrip after replug")?;
+
+    Ok(())
+}

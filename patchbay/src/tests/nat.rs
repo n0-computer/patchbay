@@ -561,3 +561,88 @@ async fn v6_no_translation() -> Result<()> {
 
     Ok(())
 }
+
+/// FullCone NAT allows unsolicited inbound: external host sends to mapped
+/// address and device receives it without prior outbound to that sender.
+#[tokio::test(flavor = "current_thread")]
+#[traced_test]
+async fn fullcone_external_reachable() -> Result<()> {
+    check_caps()?;
+    let lab = Lab::new().await?;
+    let dc = lab.add_router("dc").build().await?;
+    let fc = lab.add_router("fc").nat(Nat::FullCone).build().await?;
+    let dev = lab
+        .add_device("dev")
+        .iface("eth0", fc.id(), None)
+        .build()
+        .await?;
+
+    let dc_ip = dc.uplink_ip().context("no dc uplink ip")?;
+    let reflector = SocketAddr::new(IpAddr::V4(dc_ip), 20_000);
+    dc.spawn_reflector(reflector)?;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // Create a mapping via the reflector.
+    let mapped = dev.probe_udp_mapping(reflector)?;
+
+    // Now have a *different* host (dc itself, but from a different port) send to
+    // the mapped address. Under FullCone, this should reach the device.
+    let mapped_addr = mapped;
+    let dev_listen_port = mapped.port();
+    let dev_ip = dev.ip().unwrap();
+    let listen = SocketAddr::new(IpAddr::V4(dev_ip), dev_listen_port);
+    dev.spawn_reflector(listen)?;
+
+    let reply = dc.run_sync(move || {
+        let sock = std::net::UdpSocket::bind("0.0.0.0:0")?;
+        sock.set_read_timeout(Some(Duration::from_secs(2)))?;
+        sock.send_to(b"HELLO", mapped_addr)?;
+        let mut buf = [0u8; 512];
+        let (n, _) = sock.recv_from(&mut buf)?;
+        Ok(String::from_utf8_lossy(&buf[..n]).to_string())
+    })?;
+    assert!(
+        reply.starts_with("OBSERVED "),
+        "expected reflector reply from FullCone NAT, got: {reply:?}"
+    );
+    Ok(())
+}
+
+/// V6 masquerade NAT: external v6 address differs from device's private v6.
+#[tokio::test(flavor = "current_thread")]
+#[traced_test]
+async fn v6_masquerade_port_mapping() -> Result<()> {
+    check_caps()?;
+    let lab = Lab::new().await?;
+    let dc = lab
+        .add_router("dc")
+        .ip_support(IpSupport::DualStack)
+        .build()
+        .await?;
+    let nat = lab
+        .add_router("nat")
+        .ip_support(IpSupport::DualStack)
+        .nat(Nat::Home)
+        .nat_v6(NatV6Mode::Masquerade)
+        .build()
+        .await?;
+    let dev = lab
+        .add_device("dev")
+        .iface("eth0", nat.id(), None)
+        .build()
+        .await?;
+
+    let dc_v6 = dc.uplink_ip_v6().context("dc v6 uplink")?;
+    let r_v6 = SocketAddr::new(IpAddr::V6(dc_v6), 20_100);
+    dc.spawn_reflector(r_v6)?;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let o = dev.run_sync(move || test_utils::udp_roundtrip(r_v6))?;
+    let nat_v6 = nat.uplink_ip_v6().context("nat v6 uplink")?;
+    assert_eq!(
+        o.ip(),
+        IpAddr::V6(nat_v6),
+        "v6 masquerade should show NAT's v6 uplink IP"
+    );
+    Ok(())
+}

@@ -1025,3 +1025,72 @@ impair = { rate_kbit = 5000, loss_pct = 1.5, latency_ms = 40 }
     }
     Ok(())
 }
+
+/// Dynamically change loss rate at runtime: start with 0% loss (all packets
+/// arrive), add 90% loss (most dropped), then remove (all arrive again).
+#[tokio::test(flavor = "current_thread")]
+#[traced_test]
+async fn loss_dynamic_change() -> Result<()> {
+    let lab = Lab::new().await?;
+    let dc = lab.add_router("dc").build().await?;
+    let dev = lab
+        .add_device("dev")
+        .iface("eth0", dc.id(), None)
+        .build()
+        .await?;
+
+    let dc_ip = dc.uplink_ip().context("no dc uplink ip")?;
+    let r = SocketAddr::new(IpAddr::V4(dc_ip), 20_500);
+    dc.spawn_reflector(r)?;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // Baseline: no loss, all 50 packets should arrive.
+    let (_, recv_baseline) = dev
+        .spawn(move |_| async move {
+            test_utils::udp_send_recv_count(r, 50, 64, Duration::from_secs(3)).await
+        })?
+        .await??;
+    assert!(
+        recv_baseline >= 45,
+        "expected ≥ 45/50 with no loss, got {recv_baseline}"
+    );
+
+    // Apply 90% loss.
+    let dev_handle = lab.device_by_name("dev").unwrap();
+    let iface_name = dev_handle.default_iface().unwrap().name().to_string();
+    dev_handle
+        .set_link_condition(
+            &iface_name,
+            Some(LinkCondition::Manual(LinkLimits {
+                rate_kbit: 0,
+                loss_pct: 90.0,
+                latency_ms: 0,
+                ..Default::default()
+            })),
+        )
+        .await?;
+
+    let (_, recv_lossy) = dev
+        .spawn(move |_| async move {
+            test_utils::udp_send_recv_count(r, 50, 64, Duration::from_secs(3)).await
+        })?
+        .await??;
+    assert!(
+        recv_lossy <= 15,
+        "expected ≤ 15/50 with 90% loss, got {recv_lossy}"
+    );
+
+    // Remove loss.
+    dev_handle.set_link_condition(&iface_name, None).await?;
+
+    let (_, recv_recovered) = dev
+        .spawn(move |_| async move {
+            test_utils::udp_send_recv_count(r, 50, 64, Duration::from_secs(3)).await
+        })?
+        .await??;
+    assert!(
+        recv_recovered >= 45,
+        "expected ≥ 45/50 after removing loss, got {recv_recovered}"
+    );
+    Ok(())
+}
