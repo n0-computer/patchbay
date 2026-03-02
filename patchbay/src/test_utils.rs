@@ -82,8 +82,8 @@ pub fn udp_roundtrip(reflector: SocketAddr) -> Result<ObservedAddr> {
     probe_udp(reflector, Duration::from_millis(500), None)
 }
 
-/// Returns UDP round-trip time to `reflector`.
-pub fn udp_rtt(reflector: SocketAddr) -> Result<Duration> {
+/// Returns UDP round-trip time to `reflector` (blocking).
+pub fn udp_rtt_sync(reflector: SocketAddr) -> Result<Duration> {
     let bind = if reflector.is_ipv4() {
         "0.0.0.0:0"
     } else {
@@ -100,8 +100,8 @@ pub fn udp_rtt(reflector: SocketAddr) -> Result<Duration> {
 
 /// Async UDP round-trip time measurement.
 ///
-/// Use inside `handle.spawn(|_| async move { udp_rtt_async(r).await })`.
-pub async fn udp_rtt_async(reflector: SocketAddr) -> Result<Duration> {
+/// Use inside `handle.spawn(|_| async move { udp_rtt(r).await })`.
+pub async fn udp_rtt(reflector: SocketAddr) -> Result<Duration> {
     let bind = SocketAddr::new(
         if reflector.is_ipv4() {
             IpAddr::V4(Ipv4Addr::UNSPECIFIED)

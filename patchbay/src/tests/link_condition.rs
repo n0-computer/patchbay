@@ -23,13 +23,13 @@ async fn route_switch_changes_impairment() -> Result<()> {
     dc.spawn_reflector(r)?;
     tokio::time::sleep(Duration::from_millis(250)).await;
 
-    let fast_rtt = dev.run_sync(move || test_utils::udp_rtt(r))?;
+    let fast_rtt = dev.run_sync(move || test_utils::udp_rtt_sync(r))?;
 
     lab.device_by_name("dev1")
         .unwrap()
         .set_default_route("eth1")
         .await?;
-    let slow_rtt = dev.run_sync(move || test_utils::udp_rtt(r))?;
+    let slow_rtt = dev.run_sync(move || test_utils::udp_rtt_sync(r))?;
 
     assert!(
         slow_rtt >= fast_rtt + Duration::from_millis(30),
@@ -635,7 +635,7 @@ async fn latency_upload_download() -> Result<()> {
     dc.spawn_reflector(r)?;
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    let rtt = dev.run_sync(move || test_utils::udp_rtt(r))?;
+    let rtt = dev.run_sync(move || test_utils::udp_rtt_sync(r))?;
     assert!(
         rtt >= Duration::from_millis(90),
         "expected RTT ≥ 90ms with 20ms upload + 30ms download, got {rtt:?}"
@@ -688,7 +688,7 @@ async fn latency_multihop_chain() -> Result<()> {
     dc.spawn_reflector(r)?;
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    let rtt = dev.run_sync(move || test_utils::udp_rtt(r))?;
+    let rtt = dev.run_sync(move || test_utils::udp_rtt_sync(r))?;
     assert!(
         rtt >= Duration::from_millis(90),
         "expected RTT ≥ 90ms for multi-hop chain, got {rtt:?}"
@@ -829,7 +829,7 @@ async fn latency_dynamic_add_remove() -> Result<()> {
     dc.spawn_reflector(r)?;
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    let baseline = dev.run_sync(move || test_utils::udp_rtt(r))?;
+    let baseline = dev.run_sync(move || test_utils::udp_rtt_sync(r))?;
 
     let dev_handle = lab.device_by_name("dev").unwrap();
     let default_if = dev_handle.default_iface().unwrap().name().to_string();
@@ -844,14 +844,14 @@ async fn latency_dynamic_add_remove() -> Result<()> {
             })),
         )
         .await?;
-    let high = dev.run_sync(move || test_utils::udp_rtt(r))?;
+    let high = dev.run_sync(move || test_utils::udp_rtt_sync(r))?;
     assert!(
         high >= baseline + Duration::from_millis(90),
         "expected RTT +90ms after 100ms impair, baseline={baseline:?} high={high:?}"
     );
 
     dev_handle.set_link_condition(&default_if, None).await?;
-    let recovered = dev.run_sync(move || test_utils::udp_rtt(r))?;
+    let recovered = dev.run_sync(move || test_utils::udp_rtt_sync(r))?;
     assert!(
         recovered < baseline + Duration::from_millis(30),
         "expected RTT to recover near baseline, baseline={baseline:?} recovered={recovered:?}"
@@ -891,7 +891,7 @@ async fn presets_rtt_and_loss() -> Result<()> {
             dc.spawn_reflector(r)?;
             tokio::time::sleep(Duration::from_millis(200)).await;
 
-            let rtt = dev.run_sync(move || test_utils::udp_rtt(r))?;
+            let rtt = dev.run_sync(move || test_utils::udp_rtt_sync(r))?;
             if rtt < Duration::from_millis(min_latency_ms) {
                 bail!("preset {preset:?}: expected RTT ≥ {min_latency_ms}ms, got {rtt:?}");
             }
@@ -988,7 +988,7 @@ async fn downlink_builder_latency() -> Result<()> {
     dc.spawn_reflector(r)?;
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    let rtt = dev.run_sync(move || test_utils::udp_rtt(r))?;
+    let rtt = dev.run_sync(move || test_utils::udp_rtt_sync(r))?;
     assert!(
         rtt >= Duration::from_millis(30),
         "expected RTT >= 30ms from builder downlink impairment, got {rtt:?}"

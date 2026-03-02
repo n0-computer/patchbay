@@ -46,7 +46,7 @@ async fn nat64_udp_v6_to_v4() -> Result<()> {
     let nat64_target = SocketAddr::new(IpAddr::V6(nat64_addr), 9300);
 
     // Phone sends UDP via the NAT64 prefix — should reach the v4 server.
-    let rtt = phone.run_sync(move || test_utils::udp_rtt(nat64_target))?;
+    let rtt = phone.run_sync(move || test_utils::udp_rtt_sync(nat64_target))?;
     assert!(
         rtt < Duration::from_millis(500),
         "NAT64 UDP roundtrip should work, got {rtt:?}"
@@ -129,7 +129,7 @@ async fn nat64_preserves_native_v6() -> Result<()> {
     dc.spawn_reflector(reflector)?;
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    let rtt = phone.run_sync(move || test_utils::udp_rtt(reflector))?;
+    let rtt = phone.run_sync(move || test_utils::udp_rtt_sync(reflector))?;
     assert!(
         rtt < Duration::from_millis(100),
         "regular v4 via NAT should still work"

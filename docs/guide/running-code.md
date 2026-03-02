@@ -60,12 +60,28 @@ other blocking network I/O belong in `spawn`, not in `run_sync`.
 
 ## OS commands
 
-`spawn_command` runs an OS process inside the namespace. It configures
-the process to execute in the correct namespace and returns a standard
-`std::process::Child` that you manage yourself:
+`spawn_command` runs an OS process inside the namespace and registers
+the child with the namespace's tokio reactor, so `.wait()` and
+`.wait_with_output()` work as non-blocking futures. It takes a
+`tokio::process::Command` and returns a `tokio::process::Child`:
 
 ```rust
 let mut child = dev.spawn_command({
+    let mut cmd = tokio::process::Command::new("curl");
+    cmd.arg("http://203.0.113.10");
+    cmd
+})?;
+
+let status = child.wait().await?;
+assert!(status.success());
+```
+
+When you need a synchronous `std::process::Child` instead (for example
+to pass to `spawn_blocking` or manage outside of an async context), use
+`spawn_command_sync`:
+
+```rust
+let mut child = dev.spawn_command_sync({
     let mut cmd = std::process::Command::new("curl");
     cmd.arg("http://203.0.113.10");
     cmd
@@ -75,21 +91,6 @@ let output = tokio::task::spawn_blocking(move || {
     child.wait_with_output()
 }).await??;
 assert!(output.status.success());
-```
-
-For async command management, `spawn_command_async` takes a
-`tokio::process::Command` and returns a `tokio::process::Child`. This
-integrates more naturally with async test flows where you want to await
-process completion without blocking a thread:
-
-```rust
-let mut child = dev.spawn_command_async({
-    let mut cmd = tokio::process::Command::new("iperf3");
-    cmd.args(["-c", "203.0.113.10"]);
-    cmd
-})?;
-
-let status = child.wait().await?;
 ```
 
 ## Dedicated threads
@@ -202,7 +203,7 @@ router.flush_nat_state().await?;
 
 `Device`, `Router`, and `Ix` are lightweight, cloneable handles. All three
 types support the same set of execution methods described above: `spawn`,
-`run_sync`, `spawn_thread`, `spawn_command`, `spawn_command_async`, and
+`run_sync`, `spawn_thread`, `spawn_command`, `spawn_command_sync`, and
 `spawn_reflector`. Cloning a handle is cheap; it does not duplicate the
 underlying namespace or its workers.
 

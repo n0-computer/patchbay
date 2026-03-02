@@ -44,7 +44,7 @@ let server = lab
     .await?;
 
 // Run a command inside a device's network namespace.
-let mut child = dev.spawn_command({
+let mut child = dev.spawn_command_sync({
     let mut cmd = std::process::Command::new("ping");
     cmd.args(["-c1", &server.ip().unwrap().to_string()]);
     cmd
@@ -212,14 +212,14 @@ let local_addr = dev.run_sync(|| {
 
 // Spawn an OS command (sync, returns std::process::Child)
 let child = dev.spawn_command({
-    let mut cmd = std::process::Command::new("curl");
+    let mut cmd = tokio::process::Command::new("curl");
     cmd.arg("http://203.0.113.10");
     cmd
 })?;
 
-// Spawn an OS command (async, returns tokio::process::Child)
-let child = dev.spawn_command_async({
-    let mut cmd = tokio::process::Command::new("curl");
+// Spawn an OS command (sync, returns std::process::Child)
+let child = dev.spawn_command_sync({
+    let mut cmd = std::process::Command::new("curl");
     cmd.arg("http://203.0.113.10");
     cmd
 })?;
@@ -261,7 +261,7 @@ router.flush_nat_state().await?;
 
 `Device`, `Router`, and `Ix` are lightweight, cloneable handles. All three
 provide `spawn`, `run_sync`, `spawn_thread`, `spawn_command`,
-`spawn_command_async`, and `spawn_reflector` for running code in their
+`spawn_command_sync`, and `spawn_reflector` for running code in their
 namespace. Handle methods return `Result` or `Option` when the underlying
 node has been removed from the lab.
 

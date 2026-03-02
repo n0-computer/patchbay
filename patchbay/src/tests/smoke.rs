@@ -291,7 +291,7 @@ async fn no_region_overhead() -> Result<()> {
     dc2.spawn_reflector(r)?;
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    let rtt = dev.run_sync(move || test_utils::udp_rtt(r))?;
+    let rtt = dev.run_sync(move || test_utils::udp_rtt_sync(r))?;
     assert!(
         rtt < Duration::from_millis(10),
         "expected no-region RTT < 10ms, got {rtt:?}"

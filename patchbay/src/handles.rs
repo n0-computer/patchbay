@@ -392,32 +392,29 @@ impl Device {
         self.lab.netns.spawn_thread_in(&self.ns, f)
     }
 
-    /// Spawns a raw command in this device's network namespace.
-    ///
-    /// The sync worker thread has `/etc/hosts` and `/etc/resolv.conf` bind-mounted.
-    /// `fork()` inherits the mount namespace, so child processes automatically see
-    /// the DNS overlay without a separate `pre_exec` hook.
-    pub fn spawn_command(&self, mut cmd: Command) -> Result<std::process::Child> {
-        let ns = self.ns.to_string();
-        self.lab.netns.run_closure_in(&ns, move || {
-            cmd.spawn().context("spawn command in namespace")
-        })
-    }
-
     /// Spawns a [`tokio::process::Command`] in this device's network namespace.
     ///
     /// The child is registered with the namespace's tokio reactor so that
     /// `.wait()` and `.wait_with_output()` work as non-blocking futures.
     /// The sync worker's DNS bind-mounts are inherited by the child process.
-    pub fn spawn_command_async(
-        &self,
-        mut cmd: tokio::process::Command,
-    ) -> Result<tokio::process::Child> {
+    pub fn spawn_command(&self, mut cmd: tokio::process::Command) -> Result<tokio::process::Child> {
         let ns = self.ns.to_string();
         let rt = self.lab.rt_handle_for(&ns)?;
         self.lab.netns.run_closure_in(&ns, move || {
             let _guard = rt.enter();
             cmd.spawn().context("spawn async command in namespace")
+        })
+    }
+
+    /// Spawns a [`std::process::Command`] in this device's network namespace.
+    ///
+    /// The sync worker thread has `/etc/hosts` and `/etc/resolv.conf` bind-mounted.
+    /// `fork()` inherits the mount namespace, so child processes automatically see
+    /// the DNS overlay without a separate `pre_exec` hook.
+    pub fn spawn_command_sync(&self, mut cmd: Command) -> Result<std::process::Child> {
+        let ns = self.ns.to_string();
+        self.lab.netns.run_closure_in(&ns, move || {
+            cmd.spawn().context("spawn command in namespace")
         })
     }
 
@@ -968,28 +965,25 @@ impl Router {
         self.lab.netns.spawn_thread_in(&self.ns, f)
     }
 
-    /// Spawns a [`Command`] in this router's network namespace.
-    ///
-    /// The child inherits the namespace's DNS bind-mounts.
-    pub fn spawn_command(&self, mut cmd: Command) -> Result<std::process::Child> {
-        let ns = self.ns.to_string();
-        self.lab.netns.run_closure_in(&ns, move || {
-            cmd.spawn().context("spawn command in namespace")
-        })
-    }
-
     /// Spawns a [`tokio::process::Command`] in this router's network namespace.
     ///
     /// The child is registered with the namespace's tokio reactor.
-    pub fn spawn_command_async(
-        &self,
-        mut cmd: tokio::process::Command,
-    ) -> Result<tokio::process::Child> {
+    pub fn spawn_command(&self, mut cmd: tokio::process::Command) -> Result<tokio::process::Child> {
         let ns = self.ns.to_string();
         let rt = self.lab.rt_handle_for(&ns)?;
         self.lab.netns.run_closure_in(&ns, move || {
             let _guard = rt.enter();
             cmd.spawn().context("spawn async command in namespace")
+        })
+    }
+
+    /// Spawns a [`std::process::Command`] in this router's network namespace.
+    ///
+    /// The child inherits the namespace's DNS bind-mounts.
+    pub fn spawn_command_sync(&self, mut cmd: Command) -> Result<std::process::Child> {
+        let ns = self.ns.to_string();
+        self.lab.netns.run_closure_in(&ns, move || {
+            cmd.spawn().context("spawn command in namespace")
         })
     }
 
@@ -1141,24 +1135,21 @@ impl Ix {
         self.lab.netns.spawn_thread_in(&ns, f)
     }
 
-    /// Spawns a [`Command`] in the IX root namespace.
-    pub fn spawn_command(&self, mut cmd: Command) -> Result<std::process::Child> {
-        let ns = self.lab.core.lock().unwrap().root_ns().to_string();
-        self.lab.netns.run_closure_in(&ns, move || {
-            cmd.spawn().context("spawn command in namespace")
-        })
-    }
-
     /// Spawns a [`tokio::process::Command`] in the IX root namespace.
-    pub fn spawn_command_async(
-        &self,
-        mut cmd: tokio::process::Command,
-    ) -> Result<tokio::process::Child> {
+    pub fn spawn_command(&self, mut cmd: tokio::process::Command) -> Result<tokio::process::Child> {
         let ns = self.lab.core.lock().unwrap().root_ns().to_string();
         let rt = self.lab.rt_handle_for(&ns)?;
         self.lab.netns.run_closure_in(&ns, move || {
             let _guard = rt.enter();
             cmd.spawn().context("spawn async command in namespace")
+        })
+    }
+
+    /// Spawns a [`std::process::Command`] in the IX root namespace.
+    pub fn spawn_command_sync(&self, mut cmd: Command) -> Result<std::process::Child> {
+        let ns = self.lab.core.lock().unwrap().root_ns().to_string();
+        self.lab.netns.run_closure_in(&ns, move || {
+            cmd.spawn().context("spawn command in namespace")
         })
     }
 

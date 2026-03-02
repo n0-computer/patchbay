@@ -45,7 +45,7 @@ async fn preset_home() -> Result<()> {
     dc.spawn_reflector(reflector)?;
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    let rtt = dev.run_sync(move || test_utils::udp_rtt(reflector))?;
+    let rtt = dev.run_sync(move || test_utils::udp_rtt_sync(reflector))?;
     assert!(rtt < Duration::from_millis(100), "outbound should work");
 
     Ok(())
@@ -117,7 +117,7 @@ async fn preset_mobile() -> Result<()> {
     dc.spawn_reflector(reflector)?;
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    let rtt = phone.run_sync(move || test_utils::udp_rtt(reflector))?;
+    let rtt = phone.run_sync(move || test_utils::udp_rtt_sync(reflector))?;
     assert!(rtt < Duration::from_millis(100));
 
     Ok(())
@@ -150,7 +150,7 @@ async fn preset_corporate_blocks_udp() -> Result<()> {
     dc.spawn_reflector(reflector)?;
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    let blocked = dev.run_sync(move || test_utils::udp_rtt(reflector));
+    let blocked = dev.run_sync(move || test_utils::udp_rtt_sync(reflector));
     assert!(
         blocked.is_err(),
         "corporate preset should block UDP, got: {:?}",
@@ -199,7 +199,7 @@ async fn preset_override() -> Result<()> {
     dc.spawn_reflector(reflector)?;
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    let rtt = dev.run_sync(move || test_utils::udp_rtt(reflector))?;
+    let rtt = dev.run_sync(move || test_utils::udp_rtt_sync(reflector))?;
     assert!(rtt < Duration::from_millis(100));
 
     Ok(())
@@ -366,7 +366,7 @@ async fn preset_mobile_v6() -> Result<()> {
     let nat64_addr = crate::nat64::embed_v4_in_nat64(dc_ip);
     let nat64_target = SocketAddr::new(IpAddr::V6(nat64_addr), 9350);
 
-    let rtt = phone.run_sync(move || test_utils::udp_rtt(nat64_target))?;
+    let rtt = phone.run_sync(move || test_utils::udp_rtt_sync(nat64_target))?;
     assert!(
         rtt < Duration::from_millis(500),
         "NAT64 should work via preset"

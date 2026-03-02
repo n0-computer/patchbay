@@ -29,7 +29,7 @@ async fn corporate_blocks_udp() -> Result<()> {
     dc.spawn_reflector(reflector)?;
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    let udp_result = dev.run_sync(move || test_utils::udp_rtt(reflector));
+    let udp_result = dev.run_sync(move || test_utils::udp_rtt_sync(reflector));
     assert!(
         udp_result.is_err(),
         "expected UDP to be blocked by corporate firewall, got: {:?}",
@@ -72,7 +72,7 @@ async fn captive_portal_blocks_udp() -> Result<()> {
     dc.spawn_reflector(reflector)?;
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    let udp_result = dev.run_sync(move || test_utils::udp_rtt(reflector));
+    let udp_result = dev.run_sync(move || test_utils::udp_rtt_sync(reflector));
     assert!(
         udp_result.is_err(),
         "expected UDP to be blocked by captive portal, got: {:?}",
@@ -110,7 +110,7 @@ async fn none_allows_all() -> Result<()> {
     dc.spawn_reflector(reflector)?;
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    let rtt = dev.run_sync(move || test_utils::udp_rtt(reflector))?;
+    let rtt = dev.run_sync(move || test_utils::udp_rtt_sync(reflector))?;
     assert!(
         rtt < Duration::from_millis(100),
         "expected low RTT, got {rtt:?}"
@@ -146,7 +146,7 @@ async fn custom_selective() -> Result<()> {
     dc.spawn_reflector(reflector_blocked)?;
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    let blocked = dev.run_sync(move || test_utils::udp_rtt(reflector_blocked));
+    let blocked = dev.run_sync(move || test_utils::udp_rtt_sync(reflector_blocked));
     assert!(
         blocked.is_err(),
         "expected UDP on port 9203 to be blocked, got: {:?}",
@@ -157,7 +157,7 @@ async fn custom_selective() -> Result<()> {
     dc.spawn_reflector(reflector_allowed)?;
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    let rtt = dev.run_sync(move || test_utils::udp_rtt(reflector_allowed))?;
+    let rtt = dev.run_sync(move || test_utils::udp_rtt_sync(reflector_allowed))?;
     assert!(
         rtt < Duration::from_millis(100),
         "expected low RTT on allowed port, got {rtt:?}"
@@ -199,7 +199,7 @@ async fn block_inbound_drops_unsolicited() -> Result<()> {
     dc.spawn_reflector(reflector)?;
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    let rtt = dev.run_sync(move || test_utils::udp_rtt(reflector))?;
+    let rtt = dev.run_sync(move || test_utils::udp_rtt_sync(reflector))?;
     assert!(rtt < Duration::from_millis(100), "outbound should work");
 
     // Unsolicited inbound from DC → device should be blocked.
@@ -268,7 +268,7 @@ async fn custom_block_inbound() -> Result<()> {
     dc.spawn_reflector(reflector_53)?;
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    let rtt = dev.run_sync(move || test_utils::udp_rtt(reflector_53))?;
+    let rtt = dev.run_sync(move || test_utils::udp_rtt_sync(reflector_53))?;
     assert!(rtt < Duration::from_millis(100), "UDP 53 should work");
 
     // UDP to other port should be blocked.
@@ -276,7 +276,7 @@ async fn custom_block_inbound() -> Result<()> {
     dc.spawn_reflector(reflector_other)?;
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    let blocked = dev.run_sync(move || test_utils::udp_rtt(reflector_other));
+    let blocked = dev.run_sync(move || test_utils::udp_rtt_sync(reflector_other));
     assert!(
         blocked.is_err(),
         "UDP to non-53 should be blocked, got: {:?}",
@@ -308,13 +308,13 @@ async fn runtime_change() -> Result<()> {
     dc.spawn_reflector(reflector)?;
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    let rtt = dev.run_sync(move || test_utils::udp_rtt(reflector))?;
+    let rtt = dev.run_sync(move || test_utils::udp_rtt_sync(reflector))?;
     assert!(rtt < Duration::from_millis(100));
 
     home.set_firewall(Firewall::Corporate).await?;
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    let blocked = dev.run_sync(move || test_utils::udp_rtt(reflector));
+    let blocked = dev.run_sync(move || test_utils::udp_rtt_sync(reflector));
     assert!(
         blocked.is_err(),
         "expected UDP to be blocked after applying firewall, got: {:?}",
@@ -324,7 +324,7 @@ async fn runtime_change() -> Result<()> {
     home.set_firewall(Firewall::None).await?;
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    let rtt = dev.run_sync(move || test_utils::udp_rtt(reflector))?;
+    let rtt = dev.run_sync(move || test_utils::udp_rtt_sync(reflector))?;
     assert!(rtt < Duration::from_millis(100));
 
     Ok(())

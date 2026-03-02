@@ -109,7 +109,7 @@ pub(crate) async fn execute_step(state: &mut SimState, step: &Step) -> Result<()
                 .lab
                 .device_by_name(device)
                 .ok_or_else(|| anyhow::anyhow!("unknown device '{}'", device))?
-                .spawn_command(cmd)
+                .spawn_command_sync(cmd)
                 .with_context(|| format!("spawn run on '{}'", device))?;
             let stdout = child.stdout.take().context("take run stdout")?;
             let stderr = child.stderr.take().context("take run stderr")?;
@@ -218,7 +218,7 @@ pub(crate) async fn execute_step(state: &mut SimState, step: &Step) -> Result<()
                 .lab
                 .device_by_name(device)
                 .ok_or_else(|| anyhow::anyhow!("unknown device '{}'", device))?
-                .spawn_command(cmd)
+                .spawn_command_sync(cmd)
                 .with_context(|| format!("spawn '{}'", id))?;
 
             let (out_pump, err_pump, cap_reader) = if needs_pipes {

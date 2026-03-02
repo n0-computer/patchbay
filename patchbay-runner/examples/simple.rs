@@ -35,7 +35,7 @@ async fn async_main() -> Result<()> {
         .await?;
 
     // Run a command inside a device's network namespace.
-    let mut child = dev.spawn_command({
+    let mut child = dev.spawn_command_sync({
         let mut cmd = std::process::Command::new("ping");
         cmd.args(["-c1", &server.ip().unwrap().to_string()]);
         cmd

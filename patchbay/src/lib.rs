@@ -39,7 +39,7 @@
 //! let dev = lab.device_by_name("home-eu1").unwrap();
 //! let mut cmd = Command::new("ping");
 //! cmd.args(["-c1", "8.8.8.8"]);
-//! dev.spawn_command(cmd)?;
+//! dev.spawn_command_sync(cmd)?;
 //! # Ok(())
 //! # }
 //! ```

@@ -21,7 +21,7 @@ async fn entry_visible_in_command() -> Result<()> {
     cmd.args(["hosts", "myserver.test"]);
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::piped());
-    let child = dev.spawn_command(cmd)?;
+    let child = dev.spawn_command_sync(cmd)?;
     let output = child.wait_with_output().context("wait getent")?;
     let stdout = String::from_utf8_lossy(&output.stdout);
     info!(%stdout, "getent output");
@@ -61,7 +61,7 @@ async fn entry_lab_wide() -> Result<()> {
         cmd.args(["hosts", "shared.test"]);
         cmd.stdout(std::process::Stdio::piped());
         cmd.stderr(std::process::Stdio::piped());
-        let child = dev.spawn_command(cmd)?;
+        let child = dev.spawn_command_sync(cmd)?;
         let output = child.wait_with_output()?;
         let stdout = String::from_utf8_lossy(&output.stdout);
         assert!(
@@ -95,7 +95,7 @@ async fn entry_device_specific() -> Result<()> {
     cmd.args(["hosts", "secret.test"]);
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::piped());
-    let child = dev1.spawn_command(cmd)?;
+    let child = dev1.spawn_command_sync(cmd)?;
     let output = child.wait_with_output()?;
     assert!(output.status.success(), "dev1 should resolve secret.test");
     assert!(String::from_utf8_lossy(&output.stdout).contains("10.99.0.1"));
@@ -104,7 +104,7 @@ async fn entry_device_specific() -> Result<()> {
     cmd2.args(["hosts", "secret.test"]);
     cmd2.stdout(std::process::Stdio::piped());
     cmd2.stderr(std::process::Stdio::piped());
-    let child2 = dev2.spawn_command(cmd2)?;
+    let child2 = dev2.spawn_command_sync(cmd2)?;
     let output2 = child2.wait_with_output()?;
     assert!(
         !output2.status.success(),
@@ -162,7 +162,7 @@ async fn entry_after_build() -> Result<()> {
     cmd.args(["hosts", "late.test"]);
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::piped());
-    let child = dev.spawn_command(cmd)?;
+    let child = dev.spawn_command_sync(cmd)?;
     let output = child.wait_with_output()?;
     assert!(
         !output.status.success(),
@@ -175,7 +175,7 @@ async fn entry_after_build() -> Result<()> {
     cmd2.args(["hosts", "late.test"]);
     cmd2.stdout(std::process::Stdio::piped());
     cmd2.stderr(std::process::Stdio::piped());
-    let child2 = dev.spawn_command(cmd2)?;
+    let child2 = dev.spawn_command_sync(cmd2)?;
     let output2 = child2.wait_with_output()?;
     let stdout = String::from_utf8_lossy(&output2.stdout);
     assert!(
@@ -206,7 +206,7 @@ async fn hosts_file_content() -> Result<()> {
     cmd.arg("/etc/hosts");
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::piped());
-    let child = dev.spawn_command(cmd)?;
+    let child = dev.spawn_command_sync(cmd)?;
     let output = child.wait_with_output()?;
     let stdout = String::from_utf8_lossy(&output.stdout);
     info!(%stdout, "hosts file content");
@@ -268,7 +268,7 @@ async fn std_to_socket_addrs() -> Result<()> {
     cmd.args(["hosts", "stdtest.patchbay"]);
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::piped());
-    let child = dev.spawn_command(cmd)?;
+    let child = dev.spawn_command_sync(cmd)?;
     let output = child.wait_with_output()?;
     assert!(
         output.status.success(),
@@ -360,7 +360,7 @@ async fn set_nameserver() -> Result<()> {
     cmd.arg("/etc/resolv.conf");
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::piped());
-    let child = dev.spawn_command(cmd)?;
+    let child = dev.spawn_command_sync(cmd)?;
     let output = child.wait_with_output()?;
     let stdout = String::from_utf8_lossy(&output.stdout);
     info!(%stdout, "resolv.conf content");
@@ -395,7 +395,7 @@ async fn v6_entry() -> Result<()> {
     cmd.args(["hosts", "v6host.test"]);
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::piped());
-    let child = dev.spawn_command(cmd)?;
+    let child = dev.spawn_command_sync(cmd)?;
     let output = child.wait_with_output()?;
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(

@@ -26,7 +26,7 @@ async fn basic_latency() -> Result<()> {
     dc_eu.spawn_reflector(r_eu)?;
     tokio::time::sleep(Duration::from_millis(250)).await;
 
-    let rtt = dev_us.run_sync(move || test_utils::udp_rtt(r_eu))?;
+    let rtt = dev_us.run_sync(move || test_utils::udp_rtt_sync(r_eu))?;
     assert!(
         rtt >= Duration::from_millis(90),
         "expected inter-region RTT >= 90ms (2×50ms), got {rtt:?}"
@@ -56,7 +56,7 @@ async fn default_regions() -> Result<()> {
     dc_eu.spawn_reflector(r_eu)?;
     tokio::time::sleep(Duration::from_millis(250)).await;
 
-    let rtt = dev_us.run_sync(move || test_utils::udp_rtt(r_eu))?;
+    let rtt = dev_us.run_sync(move || test_utils::udp_rtt_sync(r_eu))?;
     assert!(
         rtt >= Duration::from_millis(70),
         "expected us↔eu RTT >= 70ms (2×40ms), got {rtt:?}"
@@ -84,7 +84,7 @@ async fn break_restore_link() -> Result<()> {
     dc_asia.spawn_reflector(r_asia)?;
     tokio::time::sleep(Duration::from_millis(250)).await;
 
-    let rtt_direct = dc_eu.run_sync(move || test_utils::udp_rtt(r_asia))?;
+    let rtt_direct = dc_eu.run_sync(move || test_utils::udp_rtt_sync(r_asia))?;
     assert!(
         rtt_direct >= Duration::from_millis(220),
         "expected direct eu↔asia RTT >= 220ms, got {rtt_direct:?}"
@@ -93,7 +93,7 @@ async fn break_restore_link() -> Result<()> {
     lab.break_region_link(&regions.eu, &regions.asia)?;
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    let rtt_broken = dc_eu.run_sync(move || test_utils::udp_rtt(r_asia))?;
+    let rtt_broken = dc_eu.run_sync(move || test_utils::udp_rtt_sync(r_asia))?;
     assert!(
         rtt_broken >= Duration::from_millis(240),
         "expected broken eu↔asia RTT >= 240ms (via us), got {rtt_broken:?}"
@@ -102,7 +102,7 @@ async fn break_restore_link() -> Result<()> {
     lab.restore_region_link(&regions.eu, &regions.asia)?;
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    let rtt_restored = dc_eu.run_sync(move || test_utils::udp_rtt(r_asia))?;
+    let rtt_restored = dc_eu.run_sync(move || test_utils::udp_rtt_sync(r_asia))?;
     assert!(
         rtt_restored >= Duration::from_millis(220),
         "expected restored eu↔asia RTT >= 220ms, got {rtt_restored:?}"
@@ -146,13 +146,13 @@ async fn impair_stacks_with_latency() -> Result<()> {
     dc_eu.spawn_reflector(r_eu)?;
     tokio::time::sleep(Duration::from_millis(250)).await;
 
-    let rtt_cross = dev.run_sync(move || test_utils::udp_rtt(r_us))?;
+    let rtt_cross = dev.run_sync(move || test_utils::udp_rtt_sync(r_us))?;
     assert!(
         rtt_cross >= Duration::from_millis(90),
         "expected eu→us RTT ≥ 90ms (device + region), got {rtt_cross:?}"
     );
 
-    let rtt_local = dev.run_sync(move || test_utils::udp_rtt(r_eu))?;
+    let rtt_local = dev.run_sync(move || test_utils::udp_rtt_sync(r_eu))?;
     assert!(
         rtt_local >= Duration::from_millis(25),
         "expected eu→eu RTT ≥ 25ms (device impair only), got {rtt_local:?}"
@@ -192,7 +192,7 @@ async fn v6_latency() -> Result<()> {
     dc_eu.spawn_reflector(r_v6)?;
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    let rtt = dc_us.run_sync(move || test_utils::udp_rtt(r_v6))?;
+    let rtt = dc_us.run_sync(move || test_utils::udp_rtt_sync(r_v6))?;
     assert!(
         rtt >= Duration::from_millis(120),
         "expected v6 RTT >= 120ms (2×65ms), got {rtt:?}"
@@ -232,13 +232,13 @@ async fn dual_stack_latency() -> Result<()> {
     dc_eu.spawn_reflector(r_v6)?;
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    let rtt_v4 = dc_us.run_sync(move || test_utils::udp_rtt(r_v4))?;
+    let rtt_v4 = dc_us.run_sync(move || test_utils::udp_rtt_sync(r_v4))?;
     assert!(
         rtt_v4 >= Duration::from_millis(120),
         "expected v4 RTT >= 120ms (2×65ms), got {rtt_v4:?}"
     );
 
-    let rtt_v6 = dc_us.run_sync(move || test_utils::udp_rtt(r_v6))?;
+    let rtt_v6 = dc_us.run_sync(move || test_utils::udp_rtt_sync(r_v6))?;
     assert!(
         rtt_v6 >= Duration::from_millis(120),
         "expected v6 RTT >= 120ms (2×65ms), got {rtt_v6:?}"
@@ -262,7 +262,7 @@ async fn regionless_to_region() -> Result<()> {
     dc_us.spawn_reflector(r_us)?;
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    let rtt = dc.run_sync(move || test_utils::udp_rtt(r_us))?;
+    let rtt = dc.run_sync(move || test_utils::udp_rtt_sync(r_us))?;
     assert!(
         rtt < Duration::from_millis(20),
         "expected regionless→region RTT < 20ms (no netem), got {rtt:?}"
@@ -299,7 +299,7 @@ async fn mixed_nat_region() -> Result<()> {
     dc_us.spawn_reflector(r_us)?;
     tokio::time::sleep(Duration::from_millis(250)).await;
 
-    let rtt = dev.run_sync(move || test_utils::udp_rtt(r_us))?;
+    let rtt = dev.run_sync(move || test_utils::udp_rtt_sync(r_us))?;
     assert!(
         rtt >= Duration::from_millis(90),
         "expected NAT+region RTT >= 90ms, got {rtt:?}"
@@ -352,14 +352,14 @@ async fn three_region_triangle() -> Result<()> {
     tokio::time::sleep(Duration::from_millis(250)).await;
 
     // A↔B: 30ms one-way → RTT ≥ 50ms.
-    let rtt_ab = dc_a.run_sync(move || test_utils::udp_rtt(r_b))?;
+    let rtt_ab = dc_a.run_sync(move || test_utils::udp_rtt_sync(r_b))?;
     assert!(
         rtt_ab >= Duration::from_millis(50),
         "expected A↔B RTT >= 50ms (2×30ms), got {rtt_ab:?}"
     );
 
     // A↔C: 100ms one-way → RTT ≥ 180ms.
-    let rtt_ac = dc_a.run_sync(move || test_utils::udp_rtt(r_c))?;
+    let rtt_ac = dc_a.run_sync(move || test_utils::udp_rtt_sync(r_c))?;
     assert!(
         rtt_ac >= Duration::from_millis(180),
         "expected A↔C RTT >= 180ms (2×100ms), got {rtt_ac:?}"

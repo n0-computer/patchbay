@@ -131,7 +131,7 @@ Every device handle can spawn OS commands inside its network namespace. To
 verify connectivity, ping the server from the laptop:
 
 ```rust
-let mut child = laptop.spawn_command({
+let mut child = laptop.spawn_command_sync({
     let mut cmd = std::process::Command::new("ping");
     cmd.args(["-c1", &server.ip().unwrap().to_string()]);
     cmd
