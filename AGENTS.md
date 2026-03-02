@@ -87,7 +87,7 @@ Run these in order. All must pass with zero warnings and zero errors:
 Always add a timeout to test runs (e.g. 90s).
 
 ```bash
-cargo fmt
+cargo make format                         # NOT cargo fmt; uses project-specific unstable rustfmt options
 cargo clippy -p patchbay --tests --fix --allow-dirty
 cargo check -p patchbay --tests
 cargo nextest run -p patchbay             # use nextest, not cargo test; parallelism in .config/nextest.toml
