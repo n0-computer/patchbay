@@ -1748,6 +1748,68 @@ async fn switch_uplink_reflexive_ip_changes() -> Result<()> {
 
 #[tokio::test(flavor = "current_thread")]
 #[traced_test]
+async fn add_and_remove_iface_at_runtime() -> Result<()> {
+    let lab = Lab::new().await?;
+    let dc = lab.add_router("dc").build().await?;
+    let home = lab.add_router("home").nat(Nat::Home).build().await?;
+    let dev = lab
+        .add_device("dev")
+        .iface("eth0", home.id(), None)
+        .build()
+        .await?;
+
+    let dc_ip = dc.uplink_ip().context("no dc uplink ip")?;
+    let reflector = SocketAddr::new(IpAddr::V4(dc_ip), 17_300);
+    dc.spawn_reflector(reflector)?;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // Device initially has one interface.
+    assert_eq!(dev.interfaces().len(), 1);
+
+    // Add a second interface on the dc router.
+    dev.add_iface("eth1", dc.id(), None).await?;
+    assert_eq!(dev.interfaces().len(), 2);
+    assert!(dev.iface("eth1").is_some(), "eth1 should exist after add");
+
+    // eth1 got a public IP from dc's pool.
+    let eth1_ip = dev.iface("eth1").unwrap().ip().expect("eth1 should have an IP");
+    assert!(
+        eth1_ip.octets()[0] == 198,
+        "eth1 IP should be in the public range, got {eth1_ip}"
+    );
+
+    // Switch default route to eth1 and verify connectivity through dc.
+    dev.set_default_route("eth1").await?;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let obs = dev.run_sync(move || crate::test_utils::udp_roundtrip(reflector))?;
+    assert_eq!(
+        obs.ip(),
+        IpAddr::V4(dc_ip),
+        "traffic should go directly through dc (no NAT)"
+    );
+
+    // Remove the original interface.
+    dev.remove_iface("eth0").await?;
+    assert_eq!(dev.interfaces().len(), 1);
+    assert!(dev.iface("eth0").is_none(), "eth0 should be gone");
+
+    // Connectivity still works through the remaining eth1.
+    let obs2 = dev.run_sync(move || crate::test_utils::udp_roundtrip(reflector))?;
+    assert_eq!(obs2.ip(), IpAddr::V4(dc_ip));
+
+    // Cannot remove the last interface.
+    let err = dev.remove_iface("eth1").await;
+    assert!(err.is_err(), "removing last interface should fail");
+
+    // Duplicate name rejected.
+    let err = dev.add_iface("eth1", dc.id(), None).await;
+    assert!(err.is_err(), "duplicate interface name should fail");
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[traced_test]
 async fn custom_downstream_cidr() -> Result<()> {
     let lab = Lab::new().await?;
     let dc = lab.add_router("dc").build().await?;

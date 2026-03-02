@@ -474,6 +474,156 @@ impl Device {
         inner.dns.resolve(Some(self.id), name)
     }
 
+    /// Adds a new interface to this device at runtime, connected to the given
+    /// router's downstream network.
+    ///
+    /// The new interface gets an IP allocated from the router's pool.  It does
+    /// **not** become the default route unless you call
+    /// [`set_default_route`](Self::set_default_route) afterwards.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the device has been removed, the router is unknown,
+    /// the router has no downstream switch, or the name collides with an
+    /// existing interface.
+    pub async fn add_iface(
+        &self,
+        ifname: &str,
+        router: NodeId,
+        impair: Option<LinkCondition>,
+    ) -> Result<()> {
+        use crate::core::{self, IfaceBuild};
+
+        let op = self
+            .lab
+            .with_device(self.id, |d| Arc::clone(&d.op))
+            .ok_or_else(|| anyhow!("device removed"))?;
+        let _guard = op.lock().await;
+
+        // Phase 1: Lock → register iface + allocate IP → unlock
+        let (iface_build, prefix, root_ns, mtu) = {
+            let mut inner = self.lab.core.lock().unwrap();
+            let dev = inner
+                .device(self.id)
+                .ok_or_else(|| anyhow!("device removed"))?;
+            if dev.interfaces.iter().any(|i| i.ifname == ifname) {
+                bail!("device '{}' already has interface '{}'", dev.name, ifname);
+            }
+            let dev_ns = dev.ns.clone();
+            let mtu = dev.mtu;
+
+            // Register the interface in core (allocates IP, idx, updates records).
+            inner.add_device_iface(self.id, ifname, router, impair)?;
+
+            // Now snapshot what we need for wiring.
+            let dev = inner.device(self.id).unwrap();
+            let iface = dev
+                .interfaces
+                .iter()
+                .find(|i| i.ifname == ifname)
+                .unwrap();
+            let sw = inner
+                .switch(iface.uplink)
+                .ok_or_else(|| anyhow!("switch missing"))?;
+            let gw_router = sw
+                .owner_router
+                .ok_or_else(|| anyhow!("switch missing owner"))?;
+            let gw_br = sw.bridge.clone().unwrap_or_else(|| "br-lan".to_string());
+            let gw_ns = inner.router(gw_router).unwrap().ns.clone();
+
+            let build = IfaceBuild {
+                dev_ns,
+                gw_ns,
+                gw_ip: sw.gw,
+                gw_br,
+                dev_ip: iface.ip,
+                prefix_len: sw.cidr.map(|c| c.prefix_len()).unwrap_or(24),
+                gw_ip_v6: sw.gw_v6,
+                dev_ip_v6: iface.ip_v6,
+                prefix_len_v6: sw.cidr_v6.map(|c| c.prefix_len()).unwrap_or(64),
+                impair,
+                ifname: ifname.to_string(),
+                is_default: false, // never default — caller opts in via set_default_route
+                idx: iface.idx,
+            };
+            let prefix = inner.cfg.prefix.clone();
+            let root_ns = inner.cfg.root_ns.clone();
+            (build, prefix, root_ns, mtu)
+        };
+
+        // Phase 2: Wire the interface (veth pair, IPs, bridge attachment).
+        let netns = &self.lab.netns;
+        core::wire_iface_async(netns, &prefix, &root_ns, iface_build).await?;
+
+        // Phase 3: Apply MTU if the device has one configured.
+        if let Some(mtu) = mtu {
+            let dev_ns = self.ns.to_string();
+            let ifname_owned = ifname.to_string();
+            core::nl_run(netns, &dev_ns, move |h: Netlink| async move {
+                h.set_mtu(&ifname_owned, mtu).await?;
+                Ok(())
+            })
+            .await?;
+        }
+
+        Ok(())
+    }
+
+    /// Removes an interface from this device, tearing down its veth pair.
+    ///
+    /// If the removed interface was the default route, the default switches to
+    /// the first remaining interface (if any).  Cannot remove the last interface.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the device has been removed, `ifname` does not exist,
+    /// or it is the only interface on the device.
+    pub async fn remove_iface(&self, ifname: &str) -> Result<()> {
+        use crate::core;
+
+        let op = self
+            .lab
+            .with_device(self.id, |d| Arc::clone(&d.op))
+            .ok_or_else(|| anyhow!("device removed"))?;
+        let _guard = op.lock().await;
+
+        // Phase 1: Lock → validate + remove from records → unlock
+        let dev_ns = {
+            let mut inner = self.lab.core.lock().unwrap();
+            let dev = inner
+                .device_mut(self.id)
+                .ok_or_else(|| anyhow!("device removed"))?;
+            if dev.interfaces.len() <= 1 {
+                bail!(
+                    "cannot remove '{}': device '{}' must keep at least one interface",
+                    ifname,
+                    dev.name
+                );
+            }
+            let pos = dev
+                .interfaces
+                .iter()
+                .position(|i| i.ifname == ifname)
+                .ok_or_else(|| anyhow!("device '{}' has no interface '{}'", dev.name, ifname))?;
+            dev.interfaces.remove(pos);
+            // Fix default_via if we just removed it.
+            if dev.default_via == ifname {
+                dev.default_via = dev.interfaces[0].ifname.clone();
+            }
+            dev.ns.clone()
+        };
+
+        // Phase 2: Delete the veth pair (peer side auto-removed by kernel).
+        let ifname_owned = ifname.to_string();
+        core::nl_run(&self.lab.netns, &dev_ns, move |h: Netlink| async move {
+            h.ensure_link_deleted(&ifname_owned).await.ok();
+            Ok(())
+        })
+        .await?;
+
+        Ok(())
+    }
+
     /// Moves one of this device's interfaces to a different router's downstream
     /// network, simulating unplugging a cable and plugging it into a new router.
     ///
