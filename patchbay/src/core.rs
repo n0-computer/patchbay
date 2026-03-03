@@ -86,6 +86,8 @@ pub(crate) struct RouterConfig {
     pub ra_enabled: bool,
     /// Router Advertisement interval in seconds.
     pub ra_interval_secs: u64,
+    /// Router Advertisement lifetime in seconds.
+    pub ra_lifetime_secs: u64,
 }
 
 impl RouterConfig {
@@ -752,6 +754,7 @@ impl NetworkCore {
                     firewall: Firewall::None,
                     ra_enabled: true,
                     ra_interval_secs: 30,
+                    ra_lifetime_secs: 1800,
                 },
                 downlink_bridge,
                 uplink: None,
@@ -1865,6 +1868,8 @@ pub(crate) struct RouterSetupData {
     pub ra_enabled: bool,
     /// RA worker interval in seconds.
     pub ra_interval_secs: u64,
+    /// RA lifetime in seconds.
+    pub ra_lifetime_secs: u64,
 }
 
 /// Sets up a single router's namespaces, links, and NAT. No lock held.
@@ -2208,7 +2213,13 @@ pub(crate) async fn setup_router_async(
             netns,
             &router.ns,
             data.cancel.clone(),
-            data.ra_interval_secs.max(1),
+            RaWorkerCfg {
+                router_name: router.name.to_string(),
+                iface: router.downlink_bridge.to_string(),
+                src_ll: router.downstream_ll_v6,
+                interval_secs: data.ra_interval_secs.max(1),
+                lifetime_secs: data.ra_lifetime_secs.max(1),
+            },
         )?;
     }
 
@@ -2219,23 +2230,49 @@ fn spawn_ra_worker(
     netns: &Arc<netns::NetnsManager>,
     ns: &str,
     cancel: CancellationToken,
-    interval_secs: u64,
+    cfg: RaWorkerCfg,
 ) -> Result<()> {
     let rt = netns.rt_handle_for(ns)?;
     let ns = ns.to_string();
     rt.spawn(async move {
-        let interval = tokio::time::Duration::from_secs(interval_secs.max(1));
+        let interval = tokio::time::Duration::from_secs(cfg.interval_secs.max(1));
+        let emit_ra = || {
+            if let Some(src) = cfg.src_ll {
+                tracing::info!(
+                    target: "patchbay::_events::RouterAdvertisement",
+                    ns = %ns,
+                    router = %cfg.router_name,
+                    iface = %cfg.iface,
+                    src = %src,
+                    lifetime_secs = cfg.lifetime_secs,
+                    interval_secs = cfg.interval_secs,
+                    "router advertisement"
+                );
+            } else {
+                tracing::warn!(ns = %ns, router = %cfg.router_name, "ra-worker: missing link-local source address");
+            }
+        };
+        emit_ra();
         loop {
             tokio::select! {
                 _ = cancel.cancelled() => break,
                 _ = tokio::time::sleep(interval) => {
-                    tracing::trace!(ns = %ns, interval_secs, "ra-worker: tick");
+                    tracing::trace!(ns = %ns, interval_secs = cfg.interval_secs, "ra-worker: tick");
+                    emit_ra();
                 }
             }
         }
         tracing::trace!(ns = %ns, "ra-worker: stopped");
     });
     Ok(())
+}
+
+struct RaWorkerCfg {
+    router_name: String,
+    iface: String,
+    src_ll: Option<Ipv6Addr>,
+    interval_secs: u64,
+    lifetime_secs: u64,
 }
 
 /// Sets up NAT64 in the router namespace:

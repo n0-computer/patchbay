@@ -334,8 +334,50 @@ async fn radriven_ra_worker_respects_router_enable_flag() -> Result<()> {
 
 #[tokio::test(flavor = "current_thread")]
 #[traced_test]
-#[ignore = "RA/RS provisioning engine follow-up"]
 async fn ra_source_is_link_local() -> Result<()> {
+    check_caps()?;
+
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let outdir = std::env::temp_dir().join(format!("patchbay-ra-events-{unique}"));
+    fs::create_dir_all(&outdir)?;
+    std::env::set_var("PATCHBAY_LOG", "trace");
+
+    let lab = Lab::with_opts(
+        LabOpts::default()
+            .outdir(&outdir)
+            .label("ra-src-ll")
+            .ipv6_dad_mode(Ipv6DadMode::Disabled)
+            .ipv6_provisioning_mode(Ipv6ProvisioningMode::RaDriven),
+    )
+    .await?;
+    let r = lab
+        .add_router("r")
+        .ip_support(IpSupport::DualStack)
+        .ra_enabled(true)
+        .ra_interval_secs(1)
+        .build()
+        .await?;
+    let _dev = lab.add_device("d").uplink(r.id()).build().await?;
+
+    let events = r
+        .filepath("events.jsonl")
+        .context("missing router events path")?;
+    let has_ra_kind = wait_for_file_contains(
+        &events,
+        "\"kind\":\"RouterAdvertisement\"",
+        Duration::from_secs(3),
+    )
+    .await?;
+    assert!(
+        has_ra_kind,
+        "expected RouterAdvertisement event in events log"
+    );
+    let has_ll_src =
+        wait_for_file_contains(&events, "\"src\":\"fe80:", Duration::from_secs(3)).await?;
+    assert!(has_ll_src, "expected link-local RA source in events log");
     Ok(())
 }
 

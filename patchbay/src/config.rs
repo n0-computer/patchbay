@@ -49,4 +49,6 @@ pub struct RouterConfig {
     pub ra_enabled: Option<bool>,
     /// Optional RA interval in seconds.
     pub ra_interval_secs: Option<u64>,
+    /// Optional RA lifetime in seconds.
+    pub ra_lifetime_secs: Option<u64>,
 }
