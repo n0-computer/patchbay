@@ -2126,6 +2126,12 @@ impl DeviceBuilder {
                 })?;
                 let gw_br = sw.bridge.clone().unwrap_or_else(|| "br-lan".into());
                 let gw_ns = inner.router(gw_router).unwrap().ns.clone();
+                let gw_ip_v6 =
+                    if self.inner.ipv6_provisioning_mode == Ipv6ProvisioningMode::RaDriven {
+                        None
+                    } else {
+                        sw.gw_v6
+                    };
                 iface_data.push(IfaceBuild {
                     dev_ns: dev.ns.clone(),
                     gw_ns,
@@ -2133,7 +2139,7 @@ impl DeviceBuilder {
                     gw_br,
                     dev_ip: iface.ip,
                     prefix_len: sw.cidr.map(|c| c.prefix_len()).unwrap_or(24),
-                    gw_ip_v6: sw.gw_v6,
+                    gw_ip_v6,
                     dev_ip_v6: iface.ip_v6,
                     gw_ll_v6: inner.router(gw_router).and_then(|r| r.downstream_ll_v6),
                     dev_ll_v6: iface.ll_v6,

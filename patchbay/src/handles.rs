@@ -33,7 +33,7 @@ use crate::{
     },
     event::{IfaceSnapshot, LabEventKind},
     firewall::Firewall,
-    lab::{Lab, LinkCondition, ObservedAddr},
+    lab::{Ipv6ProvisioningMode, Lab, LinkCondition, ObservedAddr},
     nat::{IpSupport, Nat, NatV6Mode},
     netlink::Netlink,
 };
@@ -314,14 +314,28 @@ impl Device {
         })
         .await?;
         if is_default_via {
-            let gw_ip = self
-                .lab
-                .core
-                .lock()
-                .unwrap()
-                .router_downlink_gw_for_switch(uplink)?;
+            let (gw_ip, gw_v6, gw_ll_v6, provisioning) = {
+                let inner = self.lab.core.lock().unwrap();
+                let gw_ip = inner.router_downlink_gw_for_switch(uplink)?;
+                let (gw_v6, gw_ll_v6) = inner.router_downlink_gw6_for_switch(uplink)?;
+                (gw_ip, gw_v6, gw_ll_v6, self.lab.ipv6_provisioning_mode)
+            };
             core::nl_run(&self.lab.netns, &ns, move |nl: Netlink| async move {
-                nl.replace_default_route_v4(&ifname_owned, gw_ip).await
+                nl.replace_default_route_v4(&ifname_owned, gw_ip).await?;
+                let primary_v6 = if provisioning == Ipv6ProvisioningMode::RaDriven {
+                    gw_ll_v6.or(gw_v6)
+                } else {
+                    gw_v6.or(gw_ll_v6)
+                };
+                if let Some(gw6) = primary_v6 {
+                    if gw6.is_unicast_link_local() {
+                        nl.replace_default_route_v6_scoped(&ifname_owned, gw6)
+                            .await?;
+                    } else {
+                        nl.replace_default_route_v6(&ifname_owned, gw6).await?;
+                    }
+                }
+                Ok(())
             })
             .await?;
         }
@@ -347,7 +361,7 @@ impl Device {
             .with_device(self.id, |d| Arc::clone(&d.op))
             .ok_or_else(|| anyhow!("device removed"))?;
         let _guard = op.lock().await;
-        let (ns, impair, gw_ip) = {
+        let (ns, impair, gw_ip, gw_v6, gw_ll_v6, provisioning) = {
             let inner = self.lab.core.lock().unwrap();
             let dev = inner
                 .device(self.id)
@@ -356,11 +370,32 @@ impl Device {
                 .iface(to)
                 .ok_or_else(|| anyhow!("interface '{}' not found", to))?;
             let gw_ip = inner.router_downlink_gw_for_switch(iface.uplink)?;
-            (dev.ns.clone(), iface.impair, gw_ip)
+            let (gw_v6, gw_ll_v6) = inner.router_downlink_gw6_for_switch(iface.uplink)?;
+            (
+                dev.ns.clone(),
+                iface.impair,
+                gw_ip,
+                gw_v6,
+                gw_ll_v6,
+                self.lab.ipv6_provisioning_mode,
+            )
         };
         let to_owned = to.to_string();
         core::nl_run(&self.lab.netns, &ns, move |nl: Netlink| async move {
-            nl.replace_default_route_v4(&to_owned, gw_ip).await
+            nl.replace_default_route_v4(&to_owned, gw_ip).await?;
+            let primary_v6 = if provisioning == Ipv6ProvisioningMode::RaDriven {
+                gw_ll_v6.or(gw_v6)
+            } else {
+                gw_v6.or(gw_ll_v6)
+            };
+            if let Some(gw6) = primary_v6 {
+                if gw6.is_unicast_link_local() {
+                    nl.replace_default_route_v6_scoped(&to_owned, gw6).await?;
+                } else {
+                    nl.replace_default_route_v6(&to_owned, gw6).await?;
+                }
+            }
+            Ok(())
         })
         .await?;
         apply_or_remove_impair(&self.lab.netns, &ns, to, impair).await;
@@ -571,12 +606,15 @@ impl Device {
         let _guard = op.lock().await;
 
         // Phase 1: Lock → register iface + allocate IP → unlock
-        let setup = self
+        let mut setup = self
             .lab
             .core
             .lock()
             .unwrap()
             .prepare_add_iface(self.id, ifname, router, impair)?;
+        if self.lab.ipv6_provisioning_mode == Ipv6ProvisioningMode::RaDriven {
+            setup.iface_build.gw_ip_v6 = None;
+        }
 
         // Phase 2: Wire the interface (veth pair, IPs, bridge attachment).
         let netns = &self.lab.netns;
@@ -677,12 +715,15 @@ impl Device {
         use crate::core;
 
         // Phase 1: Lock → extract data + allocate from new router's pool → unlock
-        let setup = self
+        let mut setup = self
             .lab
             .core
             .lock()
             .unwrap()
             .prepare_replug_iface(self.id, ifname, to_router)?;
+        if self.lab.ipv6_provisioning_mode == Ipv6ProvisioningMode::RaDriven {
+            setup.iface_build.gw_ip_v6 = None;
+        }
 
         // Phase 2: Delete old veth pair.
         let dev_ns = setup.iface_build.dev_ns.clone();

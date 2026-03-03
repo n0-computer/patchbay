@@ -100,6 +100,148 @@ async fn dad_disabled_deterministic_mode() -> Result<()> {
 
 #[tokio::test(flavor = "current_thread")]
 #[traced_test]
+async fn radriven_default_route_uses_scoped_ll_and_switches_iface() -> Result<()> {
+    check_caps()?;
+
+    let lab = Lab::with_opts(
+        LabOpts::default()
+            .ipv6_dad_mode(Ipv6DadMode::Disabled)
+            .ipv6_provisioning_mode(Ipv6ProvisioningMode::RaDriven),
+    )
+    .await?;
+    let r1 = lab
+        .add_router("r1")
+        .ip_support(IpSupport::DualStack)
+        .build()
+        .await?;
+    let r2 = lab
+        .add_router("r2")
+        .ip_support(IpSupport::DualStack)
+        .build()
+        .await?;
+    let dev = lab
+        .add_device("dev")
+        .iface("eth0", r1.id(), None)
+        .iface("eth1", r2.id(), None)
+        .default_via("eth0")
+        .build()
+        .await?;
+
+    let route0 = dev.run_sync(|| {
+        let out = std::process::Command::new("ip")
+            .args(["-6", "route", "show", "default"])
+            .output()?;
+        if !out.status.success() {
+            anyhow::bail!("ip -6 route failed with status {}", out.status);
+        }
+        Ok::<_, anyhow::Error>(String::from_utf8_lossy(&out.stdout).to_string())
+    })?;
+    assert!(
+        route0.contains("via fe80:"),
+        "expected link-local default route, got: {route0:?}"
+    );
+    assert!(
+        route0.contains("dev eth0"),
+        "expected default route via eth0, got: {route0:?}"
+    );
+
+    dev.set_default_route("eth1").await?;
+
+    let route1 = dev.run_sync(|| {
+        let out = std::process::Command::new("ip")
+            .args(["-6", "route", "show", "default"])
+            .output()?;
+        if !out.status.success() {
+            anyhow::bail!("ip -6 route failed with status {}", out.status);
+        }
+        Ok::<_, anyhow::Error>(String::from_utf8_lossy(&out.stdout).to_string())
+    })?;
+    assert!(
+        route1.contains("via fe80:"),
+        "expected link-local default route after switch, got: {route1:?}"
+    );
+    assert!(
+        route1.contains("dev eth1"),
+        "expected default route via eth1 after switch, got: {route1:?}"
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[traced_test]
+async fn radriven_link_up_restores_scoped_ll_default_route() -> Result<()> {
+    check_caps()?;
+
+    let lab = Lab::with_opts(
+        LabOpts::default()
+            .ipv6_dad_mode(Ipv6DadMode::Disabled)
+            .ipv6_provisioning_mode(Ipv6ProvisioningMode::RaDriven),
+    )
+    .await?;
+    let r1 = lab
+        .add_router("r1")
+        .ip_support(IpSupport::DualStack)
+        .build()
+        .await?;
+    let dev = lab
+        .add_device("dev")
+        .iface("eth0", r1.id(), None)
+        .default_via("eth0")
+        .build()
+        .await?;
+
+    let before = dev.run_sync(|| {
+        let out = std::process::Command::new("ip")
+            .args(["-6", "route", "show", "default"])
+            .output()?;
+        if !out.status.success() {
+            anyhow::bail!("ip -6 route failed with status {}", out.status);
+        }
+        Ok::<_, anyhow::Error>(String::from_utf8_lossy(&out.stdout).to_string())
+    })?;
+    assert!(before.contains("via fe80:"), "expected LL default route");
+    assert!(
+        before.contains("dev eth0"),
+        "expected default route via eth0"
+    );
+
+    dev.link_down("eth0").await?;
+    let during = dev.run_sync(|| {
+        let out = std::process::Command::new("ip")
+            .args(["-6", "route", "show", "default"])
+            .output()?;
+        if !out.status.success() {
+            anyhow::bail!("ip -6 route failed with status {}", out.status);
+        }
+        Ok::<_, anyhow::Error>(String::from_utf8_lossy(&out.stdout).to_string())
+    })?;
+    assert!(
+        during.trim().is_empty(),
+        "expected no default v6 route while link is down, got: {during:?}"
+    );
+
+    dev.link_up("eth0").await?;
+    let after = dev.run_sync(|| {
+        let out = std::process::Command::new("ip")
+            .args(["-6", "route", "show", "default"])
+            .output()?;
+        if !out.status.success() {
+            anyhow::bail!("ip -6 route failed with status {}", out.status);
+        }
+        Ok::<_, anyhow::Error>(String::from_utf8_lossy(&out.stdout).to_string())
+    })?;
+    assert!(after.contains("via fe80:"), "expected LL default route");
+    assert!(
+        after.contains("dev eth0"),
+        "expected default route via eth0"
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[traced_test]
 #[ignore = "RA/RS provisioning engine follow-up"]
 async fn ra_source_is_link_local() -> Result<()> {
     Ok(())

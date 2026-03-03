@@ -880,7 +880,6 @@ impl NetworkCore {
             .ok_or_else(|| anyhow!("switch missing owner"))?;
         let gw_br = sw.bridge.clone().unwrap_or_else(|| "br-lan".into());
         let gw_ns = self.router(gw_router).unwrap().ns.clone();
-
         let iface_build = IfaceBuild {
             dev_ns,
             gw_ns,
@@ -1027,6 +1026,24 @@ impl NetworkCore {
             .get(&sw)
             .and_then(|s| s.gw)
             .ok_or_else(|| anyhow!("switch missing gateway ip"))
+    }
+
+    /// Returns IPv6 default-router candidates for a router downstream switch.
+    ///
+    /// The tuple is `(global_gateway, link_local_gateway)`.
+    pub(crate) fn router_downlink_gw6_for_switch(
+        &self,
+        sw: NodeId,
+    ) -> Result<(Option<Ipv6Addr>, Option<Ipv6Addr>)> {
+        let switch = self
+            .switches
+            .get(&sw)
+            .ok_or_else(|| anyhow!("switch missing"))?;
+        let ll = switch
+            .owner_router
+            .and_then(|rid| self.routers.get(&rid))
+            .and_then(|r| r.downstream_ll_v6);
+        Ok((switch.gw_v6, ll))
     }
 
     /// Adds a switch node and returns its identifier.

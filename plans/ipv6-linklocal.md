@@ -364,6 +364,7 @@ Core tests:
    - Verifies RA worker tasks are created, restarted, and terminated correctly with namespace/router lifecycle transitions.
 16. `router_iface_api_exposes_ll6_consistently`
    - Verifies new `RouterIface` snapshots and getters stay consistent with netlink-observed interface state.
+    - Status: implemented.
 
 Additional exhaustiveness tests:
 
@@ -387,6 +388,14 @@ Additional exhaustiveness tests:
    - Verifies downstream-facing helper APIs surface a clear error for link-local socket usage without scope.
 26. `devtools_payload_backward_compatible_when_ll6_missing`
    - Verifies additive schema behavior when older runs or v4-only interfaces lack LLA fields.
+
+Implemented in `patchbay/src/tests/ipv6_ll.rs` so far:
+
+- `link_local_presence_on_all_ipv6_ifaces`
+- `router_iface_api_exposes_ll6_consistently`
+- `dad_disabled_deterministic_mode`
+- `radriven_default_route_uses_scoped_ll_and_switches_iface`
+- `radriven_link_up_restores_scoped_ll_default_route`
 
 Validation commands before completion:
 
