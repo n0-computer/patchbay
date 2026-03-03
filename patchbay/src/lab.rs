@@ -51,7 +51,7 @@ fn region_base(idx: u8) -> Ipv4Addr {
 
 pub use crate::{
     firewall::{Firewall, FirewallConfig, FirewallConfigBuilder},
-    handles::{Device, DeviceIface, Ix, Router},
+    handles::{Device, DeviceIface, Ix, Router, RouterIface},
     nat::{
         ConntrackTimeouts, IpSupport, Nat, NatConfig, NatConfigBuilder, NatFiltering, NatMapping,
         NatV6Mode,
@@ -290,6 +290,30 @@ pub struct Lab {
 pub struct LabOpts {
     outdir: Option<PathBuf>,
     label: Option<String>,
+    ipv6_dad_mode: Ipv6DadMode,
+    ipv6_provisioning_mode: Ipv6ProvisioningMode,
+}
+
+/// Controls IPv6 duplicate address detection behavior in created namespaces.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Ipv6DadMode {
+    /// Keep kernel default behavior, DAD enabled.
+    Enabled,
+    /// Disable DAD for deterministic fast tests.
+    #[default]
+    Disabled,
+}
+
+/// Controls how IPv6 routes are provisioned for hosts and routers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Ipv6ProvisioningMode {
+    /// Install routes directly from patchbay wiring logic.
+    #[default]
+    Static,
+    /// RA/RS-driven provisioning path.
+    RaDriven,
 }
 
 impl LabOpts {
@@ -311,6 +335,18 @@ impl LabOpts {
         if let Ok(v) = std::env::var("PATCHBAY_OUTDIR") {
             self.outdir = Some(v.into());
         }
+        self
+    }
+
+    /// Sets IPv6 duplicate address detection behavior.
+    pub fn ipv6_dad_mode(mut self, mode: Ipv6DadMode) -> Self {
+        self.ipv6_dad_mode = mode;
+        self
+    }
+
+    /// Sets IPv6 provisioning behavior.
+    pub fn ipv6_provisioning_mode(mut self, mode: Ipv6ProvisioningMode) -> Self {
+        self.ipv6_provisioning_mode = mode;
         self
     }
 }
@@ -389,6 +425,8 @@ impl Lab {
                 label: label.clone(),
                 ns_to_name: std::sync::Mutex::new(HashMap::new()),
                 run_dir: run_dir.clone(),
+                ipv6_dad_mode: opts.ipv6_dad_mode,
+                ipv6_provisioning_mode: opts.ipv6_provisioning_mode,
             }),
         };
         // Initialize root namespace and IX bridge eagerly — no lazy-init race.
@@ -841,6 +879,8 @@ impl Lab {
                 parent_route_v6: None,
                 parent_route_v4: None,
                 cancel: self.inner.cancel.clone(),
+                dad_mode: self.inner.ipv6_dad_mode,
+                provisioning_mode: self.inner.ipv6_provisioning_mode,
             };
 
             (id, setup_data, idx)
@@ -1924,6 +1964,8 @@ impl RouterBuilder {
                 parent_route_v6,
                 parent_route_v4,
                 cancel: self.inner.cancel.clone(),
+                dad_mode: self.inner.ipv6_dad_mode,
+                provisioning_mode: self.inner.ipv6_provisioning_mode,
             };
 
             (id, setup_data)
@@ -2093,6 +2135,8 @@ impl DeviceBuilder {
                     prefix_len: sw.cidr.map(|c| c.prefix_len()).unwrap_or(24),
                     gw_ip_v6: sw.gw_v6,
                     dev_ip_v6: iface.ip_v6,
+                    gw_ll_v6: inner.router(gw_router).and_then(|r| r.downstream_ll_v6),
+                    dev_ll_v6: iface.ll_v6,
                     prefix_len_v6: sw.cidr_v6.map(|c| c.prefix_len()).unwrap_or(64),
                     impair: iface.impair,
                     ifname: iface.ifname.clone(),
@@ -2118,7 +2162,17 @@ impl DeviceBuilder {
         // get /etc/hosts and /etc/resolv.conf bind-mounted at startup.
         let netns = &self.inner.netns;
         async {
-            setup_device_async(netns, &prefix, &root_ns, &dev, ifaces, Some(dns_overlay)).await
+            setup_device_async(
+                netns,
+                &prefix,
+                &root_ns,
+                &dev,
+                ifaces,
+                Some(dns_overlay),
+                self.inner.ipv6_dad_mode,
+                self.inner.ipv6_provisioning_mode,
+            )
+            .await
         }
         .instrument(self.lab_span.clone())
         .await?;

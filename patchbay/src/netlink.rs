@@ -272,6 +272,26 @@ impl Netlink {
         Ok(())
     }
 
+    pub(crate) async fn add_default_route_v6_scoped(
+        &self,
+        ifname: &str,
+        via: Ipv6Addr,
+    ) -> Result<()> {
+        trace!(ifname = %ifname, via = %via, "add default route v6 scoped");
+        let ifindex = self.link_index(ifname).await?;
+        let msg = RouteMessageBuilder::<Ipv6Addr>::new()
+            .output_interface(ifindex)
+            .gateway(via)
+            .build();
+        if let Err(err) = self.handle.route().add(msg).execute().await {
+            if is_eexist(&err) {
+                return Ok(());
+            }
+            return Err(err.into());
+        }
+        Ok(())
+    }
+
     pub(crate) async fn add_route_v6(
         &self,
         dst: Ipv6Addr,

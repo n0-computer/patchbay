@@ -4,9 +4,9 @@
 
 - [x] Write plan
 - [ ] Phase 0: Define target behavior and compatibility boundaries
-- [ ] Phase 1: Kernel behavior parity for link-local addresses and routes
+- [x] Phase 1: Kernel behavior parity for link-local addresses and routes
 - [ ] Phase 2: Router Advertisement and Router Solicitation behavior
-- [ ] Phase 3: Public API support for link-local and scope handling
+- [x] Phase 3: Public API support for link-local and scope handling
 - [ ] Phase 4: Real-world presets for consumer and production-like IPv6
 - [ ] Phase 5: Tests and validation matrix
 - [ ] Final review

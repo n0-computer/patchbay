@@ -266,6 +266,8 @@ pub struct IfaceSnapshot {
     pub ip: Option<Ipv4Addr>,
     /// IPv6 address.
     pub ip_v6: Option<Ipv6Addr>,
+    /// IPv6 link-local address.
+    pub ll_v6: Option<Ipv6Addr>,
     /// Link condition.
     pub link_condition: Option<LinkCondition>,
 }
@@ -352,6 +354,8 @@ pub struct RouterState {
     pub uplink_ip: Option<Ipv4Addr>,
     /// WAN IPv6 address.
     pub uplink_ip_v6: Option<Ipv6Addr>,
+    /// WAN IPv6 link-local address.
+    pub uplink_ll_v6: Option<Ipv6Addr>,
     /// LAN IPv4 CIDR.
     pub downstream_cidr: Option<Ipv4Net>,
     /// LAN IPv4 gateway.
@@ -360,6 +364,8 @@ pub struct RouterState {
     pub downstream_cidr_v6: Option<Ipv6Net>,
     /// LAN IPv6 gateway.
     pub downstream_gw_v6: Option<Ipv6Addr>,
+    /// LAN IPv6 link-local address.
+    pub downstream_ll_v6: Option<Ipv6Addr>,
     /// Downstream bridge name.
     pub downstream_bridge: String,
     /// Downlink condition (applies to all downstream traffic).
@@ -423,10 +429,12 @@ impl RouterState {
             upstream: upstream_name,
             uplink_ip: r.upstream_ip,
             uplink_ip_v6: r.upstream_ip_v6,
+            uplink_ll_v6: r.upstream_ll_v6,
             downstream_cidr: r.downstream_cidr,
             downstream_gw: r.downstream_gw,
             downstream_cidr_v6: r.downstream_cidr_v6,
             downstream_gw_v6: r.downstream_gw_v6,
+            downstream_ll_v6: r.downstream_ll_v6,
             downstream_bridge,
             downlink_condition: None,
             devices: Vec::new(),
@@ -456,6 +464,7 @@ impl DeviceState {
                     router: router_name,
                     ip: iface.ip,
                     ip_v6: iface.ip_v6,
+                    ll_v6: iface.ll_v6,
                     link_condition: iface.impair,
                 }
             })
@@ -782,10 +791,12 @@ mod tests {
                     upstream: None,
                     uplink_ip: Some(Ipv4Addr::new(198, 18, 0, 2)),
                     uplink_ip_v6: None,
+                    uplink_ll_v6: None,
                     downstream_cidr: Some("10.0.1.0/24".parse().unwrap()),
                     downstream_gw: Some(Ipv4Addr::new(10, 0, 1, 1)),
                     downstream_cidr_v6: None,
                     downstream_gw_v6: None,
+                    downstream_ll_v6: None,
                     downstream_bridge: "br-1".into(),
                     downlink_condition: None,
                     devices: Vec::new(),
@@ -803,6 +814,7 @@ mod tests {
                         router: "r1".into(),
                         ip: Some(Ipv4Addr::new(10, 0, 1, 2)),
                         ip_v6: None,
+                        ll_v6: None,
                         link_condition: None,
                     }],
                     counters: BTreeMap::new(),
@@ -868,10 +880,12 @@ mod tests {
                         upstream: None,
                         uplink_ip: Some(Ipv4Addr::new(198, 18, 0, 2)),
                         uplink_ip_v6: None,
+                        uplink_ll_v6: None,
                         downstream_cidr: Some("10.0.1.0/24".parse().unwrap()),
                         downstream_gw: Some(Ipv4Addr::new(10, 0, 1, 1)),
                         downstream_cidr_v6: None,
                         downstream_gw_v6: None,
+                        downstream_ll_v6: None,
                         downstream_bridge: "br-2".into(),
                         downlink_condition: None,
                         devices: Vec::new(),
@@ -893,6 +907,7 @@ mod tests {
                             router: "r1".into(),
                             ip: Some(Ipv4Addr::new(10, 0, 1, 2)),
                             ip_v6: None,
+                            ll_v6: None,
                             link_condition: None,
                         }],
                         counters: BTreeMap::new(),

@@ -102,9 +102,9 @@ pub use firewall::PortPolicy;
 pub use ipnet::Ipv4Net;
 pub use lab::{
     ConntrackTimeouts, DefaultRegions, Device, DeviceBuilder, DeviceIface, Firewall,
-    FirewallConfig, FirewallConfigBuilder, IpSupport, Ix, Lab, LabOpts, LinkCondition, LinkLimits,
-    Nat, NatConfig, NatConfigBuilder, NatFiltering, NatMapping, NatV6Mode, ObservedAddr, Region,
-    RegionLink, Router, RouterBuilder, RouterPreset,
+    FirewallConfig, FirewallConfigBuilder, IpSupport, Ipv6DadMode, Ipv6ProvisioningMode, Ix, Lab,
+    LabOpts, LinkCondition, LinkLimits, Nat, NatConfig, NatConfigBuilder, NatFiltering, NatMapping,
+    NatV6Mode, ObservedAddr, Region, RegionLink, Router, RouterBuilder, RouterIface, RouterPreset,
 };
 
 pub use crate::{

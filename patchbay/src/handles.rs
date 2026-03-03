@@ -51,6 +51,7 @@ pub struct DeviceIface {
     ifname: String,
     ip: Option<Ipv4Addr>,
     ip_v6: Option<Ipv6Addr>,
+    ll_v6: Option<Ipv6Addr>,
     impair: Option<LinkCondition>,
 }
 
@@ -68,6 +69,11 @@ impl DeviceIface {
     /// Returns the assigned IPv6 address, if any.
     pub fn ip6(&self) -> Option<Ipv6Addr> {
         self.ip_v6
+    }
+
+    /// Returns the assigned IPv6 link-local address, if any.
+    pub fn ll6(&self) -> Option<Ipv6Addr> {
+        self.ll_v6
     }
 
     /// Returns the impairment profile, if any.
@@ -90,6 +96,37 @@ pub struct Device {
     name: Arc<str>,
     ns: Arc<str>,
     lab: Arc<LabInner>,
+}
+
+/// Owned snapshot of a single router network interface.
+#[derive(Clone, Debug)]
+pub struct RouterIface {
+    ifname: String,
+    ip: Option<Ipv4Addr>,
+    ip_v6: Option<Ipv6Addr>,
+    ll_v6: Option<Ipv6Addr>,
+}
+
+impl RouterIface {
+    /// Returns the interface name.
+    pub fn name(&self) -> &str {
+        &self.ifname
+    }
+
+    /// Returns the assigned IPv4 address, if any.
+    pub fn ip(&self) -> Option<Ipv4Addr> {
+        self.ip
+    }
+
+    /// Returns the assigned IPv6 address, if any.
+    pub fn ip6(&self) -> Option<Ipv6Addr> {
+        self.ip_v6
+    }
+
+    /// Returns the assigned IPv6 link-local address, if any.
+    pub fn ll6(&self) -> Option<Ipv6Addr> {
+        self.ll_v6
+    }
 }
 
 impl Clone for Device {
@@ -187,6 +224,7 @@ impl Device {
             ifname: iface.ifname.to_string(),
             ip: iface.ip,
             ip_v6: iface.ip_v6,
+            ll_v6: iface.ll_v6,
             impair: iface.impair,
         })
     }
@@ -200,6 +238,7 @@ impl Device {
                 ifname: iface.ifname.to_string(),
                 ip: iface.ip,
                 ip_v6: iface.ip_v6,
+                ll_v6: iface.ll_v6,
                 impair: iface.impair,
             }
         })
@@ -220,6 +259,7 @@ impl Device {
                 ifname: iface.ifname.to_string(),
                 ip: iface.ip,
                 ip_v6: iface.ip_v6,
+                ll_v6: iface.ll_v6,
                 impair: iface.impair,
             })
             .collect()
@@ -563,6 +603,7 @@ impl Device {
             let dev = inner.device(self.id);
             let iface_ip = dev.and_then(|d| d.iface(ifname)).and_then(|i| i.ip);
             let iface_ip_v6 = dev.and_then(|d| d.iface(ifname)).and_then(|i| i.ip_v6);
+            let iface_ll_v6 = dev.and_then(|d| d.iface(ifname)).and_then(|i| i.ll_v6);
             drop(inner);
             self.lab.emit(LabEventKind::InterfaceAdded {
                 device: self.name.to_string(),
@@ -571,6 +612,7 @@ impl Device {
                     router: router_name,
                     ip: iface_ip,
                     ip_v6: iface_ip_v6,
+                    ll_v6: iface_ll_v6,
                     link_condition: impair,
                 },
             });
@@ -845,6 +887,38 @@ impl Router {
         let suffix = suffix.trim_start_matches('.');
         let filename = crate::consts::node_file(crate::consts::KIND_ROUTER, &self.name, suffix);
         Some(run_dir.join(filename))
+    }
+
+    /// Returns a snapshot of the named router interface, if it exists.
+    pub fn iface(&self, name: &str) -> Option<RouterIface> {
+        self.interfaces()
+            .into_iter()
+            .find(|iface| iface.name() == name)
+    }
+
+    /// Returns snapshots of all router-facing interfaces.
+    ///
+    /// Currently includes WAN (`ix` or `wan`) and downstream bridge interface.
+    pub fn interfaces(&self) -> Vec<RouterIface> {
+        let core = self.lab.core.lock().unwrap();
+        let Some(router) = core.router(self.id) else {
+            return vec![];
+        };
+        let mut out = Vec::new();
+        let wan_if = router.wan_ifname(core.ix_sw());
+        out.push(RouterIface {
+            ifname: wan_if.to_string(),
+            ip: router.upstream_ip,
+            ip_v6: router.upstream_ip_v6,
+            ll_v6: router.upstream_ll_v6,
+        });
+        out.push(RouterIface {
+            ifname: router.downlink_bridge.to_string(),
+            ip: router.downstream_gw,
+            ip_v6: router.downstream_gw_v6,
+            ll_v6: router.downstream_ll_v6,
+        });
+        out
     }
 
     /// Returns the region label, if set.

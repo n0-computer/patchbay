@@ -11,8 +11,8 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, instrument, Instrument as _};
 
 use crate::{
-    netlink::Netlink, netns, qdisc, ConntrackTimeouts, Firewall, IpSupport, LinkCondition, Nat,
-    NatConfig, NatFiltering, NatMapping, NatV6Mode,
+    netlink::Netlink, netns, qdisc, ConntrackTimeouts, Firewall, IpSupport, Ipv6DadMode,
+    Ipv6ProvisioningMode, LinkCondition, Nat, NatConfig, NatFiltering, NatMapping, NatV6Mode,
 };
 
 /// Defines static addressing and naming for one lab instance.
@@ -135,6 +135,8 @@ pub(crate) struct DeviceIfaceData {
     pub ip: Option<Ipv4Addr>,
     /// Assigned IPv6 address.
     pub ip_v6: Option<Ipv6Addr>,
+    /// Assigned IPv6 link-local address.
+    pub ll_v6: Option<Ipv6Addr>,
     /// Optional link impairment applied via `tc netem`.
     pub impair: Option<LinkCondition>,
     /// Unique index used to name the root-namespace veth ends.
@@ -203,6 +205,8 @@ pub(crate) struct RouterData {
     pub upstream_ip: Option<Ipv4Addr>,
     /// Router uplink IPv6 address.
     pub upstream_ip_v6: Option<Ipv6Addr>,
+    /// Router uplink IPv6 link-local address.
+    pub upstream_ll_v6: Option<Ipv6Addr>,
     /// Downstream switch identifier.
     pub downlink: Option<NodeId>,
     /// Downstream subnet CIDR.
@@ -213,6 +217,8 @@ pub(crate) struct RouterData {
     pub downstream_cidr_v6: Option<Ipv6Net>,
     /// Downstream IPv6 gateway address.
     pub downstream_gw_v6: Option<Ipv6Addr>,
+    /// Downstream bridge IPv6 link-local address.
+    pub downstream_ll_v6: Option<Ipv6Addr>,
     /// Per-router operation lock — serializes multi-step mutations.
     pub op: Arc<tokio::sync::Mutex<()>>,
 }
@@ -260,6 +266,8 @@ pub(crate) struct IfaceBuild {
     pub(crate) prefix_len: u8,
     pub(crate) gw_ip_v6: Option<Ipv6Addr>,
     pub(crate) dev_ip_v6: Option<Ipv6Addr>,
+    pub(crate) gw_ll_v6: Option<Ipv6Addr>,
+    pub(crate) dev_ll_v6: Option<Ipv6Addr>,
     pub(crate) prefix_len_v6: u8,
     pub(crate) impair: Option<LinkCondition>,
     pub(crate) ifname: Arc<str>,
@@ -460,6 +468,10 @@ pub(crate) struct LabInner {
     pub ns_to_name: std::sync::Mutex<HashMap<String, String>>,
     /// Resolved run output directory (e.g. `{base}/{ts}-{label}/`), if outdir was configured.
     pub run_dir: Option<PathBuf>,
+    /// IPv6 duplicate address detection behavior.
+    pub ipv6_dad_mode: Ipv6DadMode,
+    /// IPv6 provisioning behavior.
+    pub ipv6_provisioning_mode: Ipv6ProvisioningMode,
 }
 
 impl Drop for LabInner {
@@ -739,11 +751,13 @@ impl NetworkCore {
                 uplink: None,
                 upstream_ip: None,
                 upstream_ip_v6: None,
+                upstream_ll_v6: None,
                 downlink: None,
                 downstream_cidr: None,
                 downstream_gw: None,
                 downstream_cidr_v6: None,
                 downstream_gw_v6: None,
+                downstream_ll_v6: None,
                 op: Arc::new(tokio::sync::Mutex::new(())),
             },
         );
@@ -824,6 +838,7 @@ impl NetworkCore {
             uplink: downlink,
             ip: assigned,
             ip_v6: assigned_v6,
+            ll_v6: assigned_v6.map(|_| link_local_from_seed(idx)),
             impair,
             idx,
         });
@@ -875,6 +890,8 @@ impl NetworkCore {
             prefix_len: sw.cidr.map(|c| c.prefix_len()).unwrap_or(24),
             gw_ip_v6: sw.gw_v6,
             dev_ip_v6: iface.ip_v6,
+            gw_ll_v6: self.router(gw_router).and_then(|r| r.downstream_ll_v6),
+            dev_ll_v6: iface.ll_v6,
             prefix_len_v6: sw.cidr_v6.map(|c| c.prefix_len()).unwrap_or(64),
             impair,
             ifname: ifname.into(),
@@ -948,6 +965,8 @@ impl NetworkCore {
             prefix_len,
             gw_ip_v6: sw.gw_v6,
             dev_ip_v6: new_ip_v6,
+            gw_ll_v6: target_router.downstream_ll_v6,
+            dev_ll_v6: new_ip_v6.map(|_| link_local_from_seed(old_idx)),
             prefix_len_v6: sw.cidr_v6.map(|c| c.prefix_len()).unwrap_or(64),
             impair,
             ifname: ifname.into(),
@@ -982,6 +1001,7 @@ impl NetworkCore {
             iface.uplink = new_uplink;
             iface.ip = new_ip;
             iface.ip_v6 = new_ip_v6;
+            iface.ll_v6 = new_ip_v6.map(|_| link_local_from_seed(iface.idx));
         }
         Ok(())
     }
@@ -1052,6 +1072,7 @@ impl NetworkCore {
         router_entry.uplink = Some(sw);
         router_entry.upstream_ip = ip;
         router_entry.upstream_ip_v6 = ip_v6;
+        router_entry.upstream_ll_v6 = ip_v6.map(|_| link_local_from_seed(router.0 ^ sw.0));
         Ok(())
     }
 
@@ -1151,6 +1172,8 @@ impl NetworkCore {
         router_entry.downstream_gw = gw;
         router_entry.downstream_cidr_v6 = cidr_v6;
         router_entry.downstream_gw_v6 = gw_v6;
+        router_entry.downstream_ll_v6 =
+            cidr_v6.map(|_| link_local_from_seed(router.0 ^ sw.0 ^ 0xA5A5));
         Ok((cidr, gw))
     }
 
@@ -1752,7 +1775,7 @@ pub(crate) async fn setup_root_ns_async(
     netns: &Arc<netns::NetnsManager>,
 ) -> Result<()> {
     let root_ns = cfg.root_ns.clone();
-    create_named_netns(netns, &root_ns, None, None)?;
+    create_named_netns(netns, &root_ns, None, None, Ipv6DadMode::Disabled)?;
 
     netns.run_closure_in(&root_ns, || {
         set_sysctl_root("net/ipv4/ip_forward", "1")?;
@@ -1811,6 +1834,10 @@ pub(crate) struct RouterSetupData {
     pub parent_route_v4: Option<(Arc<str>, Ipv4Addr, u8, Ipv4Addr)>, // (parent_ns, net, prefix, via)
     /// Cancellation token for long-running background tasks (NAT64 translator).
     pub cancel: CancellationToken,
+    /// IPv6 DAD behavior for created namespaces.
+    pub dad_mode: Ipv6DadMode,
+    /// IPv6 provisioning behavior.
+    pub provisioning_mode: Ipv6ProvisioningMode,
 }
 
 /// Sets up a single router's namespaces, links, and NAT. No lock held.
@@ -1819,12 +1846,15 @@ pub(crate) async fn setup_router_async(
     netns: &Arc<netns::NetnsManager>,
     data: &RouterSetupData,
 ) -> Result<()> {
+    match data.provisioning_mode {
+        Ipv6ProvisioningMode::Static | Ipv6ProvisioningMode::RaDriven => {}
+    }
     let router = &data.router;
     let id = router.id;
     debug!(name = %router.name, ns = %router.ns, "router: setup");
 
     let log_prefix = format!("{}.{}", crate::consts::KIND_ROUTER, router.name);
-    create_named_netns(netns, &router.ns, None, Some(log_prefix))?;
+    create_named_netns(netns, &router.ns, None, Some(log_prefix), data.dad_mode)?;
 
     let uplink = router
         .uplink
@@ -1878,6 +1908,9 @@ pub(crate) async fn setup_router_async(
                     (d.router.upstream_ip_v6, d.ix_cidr_v6_prefix, d.ix_gw_v6)
                 {
                     h.add_addr6(&ns_if, ip6, prefix6).await?;
+                    if let Some(ll6) = d.router.upstream_ll_v6 {
+                        h.add_addr6(&ns_if, ll6, 64).await?;
+                    }
                     h.add_default_route_v6(gw6).await?;
                 }
                 Ok(())
@@ -1998,7 +2031,14 @@ pub(crate) async fn setup_router_async(
                     d.upstream_gw_v6,
                 ) {
                     h.add_addr6(&wan_if, ip6, prefix6).await?;
-                    h.add_default_route_v6(g6).await?;
+                    if let Some(ll6) = d.router.upstream_ll_v6 {
+                        h.add_addr6(&wan_if, ll6, 64).await?;
+                    }
+                    if g6.is_unicast_link_local() {
+                        h.add_default_route_v6_scoped(&wan_if, g6).await?;
+                    } else {
+                        h.add_default_route_v6(g6).await?;
+                    }
                 }
                 Ok(())
             }
@@ -2035,6 +2075,7 @@ pub(crate) async fn setup_router_async(
     // Create downlink bridge.
     if let Some((br, v4_addr)) = &data.downlink_bridge {
         let downlink_v6 = data.downlink_bridge_v6;
+        let downlink_ll_v6 = data.router.downstream_ll_v6;
         let v4_addr = *v4_addr;
         nl_run(netns, &router.ns, {
             let br = br.clone();
@@ -2048,6 +2089,9 @@ pub(crate) async fn setup_router_async(
                 }
                 if let Some((gw_v6, prefix_v6)) = downlink_v6 {
                     h.add_addr6(&br, gw_v6, prefix_v6).await?;
+                }
+                if let Some(ll6) = downlink_ll_v6 {
+                    h.add_addr6(&br, ll6, 64).await?;
                 }
                 Ok(())
             }
@@ -2128,6 +2172,33 @@ pub(crate) async fn setup_router_async(
         setup_nat64(netns, &router.ns, fw_wan, &data.cancel).await?;
     }
 
+    // RA worker scaffold for RA-driven mode.
+    if data.provisioning_mode == Ipv6ProvisioningMode::RaDriven && router.cfg.ip_support.has_v6() {
+        spawn_ra_worker(netns, &router.ns, data.cancel.clone())?;
+    }
+
+    Ok(())
+}
+
+fn spawn_ra_worker(
+    netns: &Arc<netns::NetnsManager>,
+    ns: &str,
+    cancel: CancellationToken,
+) -> Result<()> {
+    let rt = netns.rt_handle_for(ns)?;
+    let ns = ns.to_string();
+    rt.spawn(async move {
+        let interval = tokio::time::Duration::from_secs(30);
+        loop {
+            tokio::select! {
+                _ = cancel.cancelled() => break,
+                _ = tokio::time::sleep(interval) => {
+                    tracing::trace!(ns = %ns, "ra-worker: tick");
+                }
+            }
+        }
+        tracing::trace!(ns = %ns, "ra-worker: stopped");
+    });
     Ok(())
 }
 
@@ -2316,10 +2387,15 @@ pub(crate) async fn setup_device_async(
     dev: &DeviceData,
     ifaces: Vec<IfaceBuild>,
     dns_overlay: Option<netns::DnsOverlay>,
+    dad_mode: Ipv6DadMode,
+    provisioning_mode: Ipv6ProvisioningMode,
 ) -> Result<()> {
+    match provisioning_mode {
+        Ipv6ProvisioningMode::Static | Ipv6ProvisioningMode::RaDriven => {}
+    }
     debug!(name = %dev.name, ns = %dev.ns, "device: setup");
     let log_prefix = format!("{}.{}", crate::consts::KIND_DEVICE, dev.name);
-    create_named_netns(netns, &dev.ns, dns_overlay, Some(log_prefix))?;
+    create_named_netns(netns, &dev.ns, dns_overlay, Some(log_prefix), dad_mode)?;
 
     for iface in ifaces {
         wire_iface_async(netns, prefix, root_ns, iface).await?;
@@ -2387,9 +2463,14 @@ pub(crate) async fn wire_iface_async(
             }
             if let Some(ip6) = d.dev_ip_v6 {
                 h.add_addr6(&d.ifname, ip6, d.prefix_len_v6).await?;
+                if let Some(ll6) = d.dev_ll_v6 {
+                    h.add_addr6(&d.ifname, ll6, 64).await?;
+                }
                 if d.is_default {
                     if let Some(gw6) = d.gw_ip_v6 {
                         h.add_default_route_v6(gw6).await?;
+                    } else if let Some(gw_ll6) = d.gw_ll_v6 {
+                        h.add_default_route_v6_scoped(&d.ifname, gw_ll6).await?;
                     }
                 }
             }
@@ -2425,6 +2506,14 @@ fn add_host(cidr: Ipv4Net, host: u8) -> Result<Ipv4Addr> {
     Ok(Ipv4Addr::new(octets[0], octets[1], octets[2], host))
 }
 
+fn link_local_from_seed(seed: u64) -> Ipv6Addr {
+    let a = ((seed >> 48) & 0xffff) as u16;
+    let b = ((seed >> 32) & 0xffff) as u16;
+    let c = ((seed >> 16) & 0xffff) as u16;
+    let d = (seed & 0xffff) as u16;
+    Ipv6Addr::new(0xfe80, 0, 0, 0, a, b, c, d)
+}
+
 // ─────────────────────────────────────────────
 // Netns + process helpers
 // ─────────────────────────────────────────────
@@ -2438,16 +2527,19 @@ pub(crate) fn create_named_netns(
     name: &str,
     dns_overlay: Option<netns::DnsOverlay>,
     log_prefix: Option<String>,
+    dad_mode: Ipv6DadMode,
 ) -> Result<()> {
     netns.create_netns(name, dns_overlay, log_prefix)?;
-    // Disable DAD before any interfaces are created or moved in.
-    netns.run_closure_in(name, || {
-        set_sysctl_root("net/ipv6/conf/all/accept_dad", "0").ok();
-        set_sysctl_root("net/ipv6/conf/default/accept_dad", "0").ok();
-        set_sysctl_root("net/ipv6/conf/all/dad_transmits", "0").ok();
-        set_sysctl_root("net/ipv6/conf/default/dad_transmits", "0").ok();
-        Ok(())
-    })?;
+    if dad_mode == Ipv6DadMode::Disabled {
+        // Disable DAD before any interfaces are created or moved in.
+        netns.run_closure_in(name, || {
+            set_sysctl_root("net/ipv6/conf/all/accept_dad", "0").ok();
+            set_sysctl_root("net/ipv6/conf/default/accept_dad", "0").ok();
+            set_sysctl_root("net/ipv6/conf/all/dad_transmits", "0").ok();
+            set_sysctl_root("net/ipv6/conf/default/dad_transmits", "0").ok();
+            Ok(())
+        })?;
+    }
     Ok(())
 }
 
