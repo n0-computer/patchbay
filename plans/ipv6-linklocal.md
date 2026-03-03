@@ -396,6 +396,13 @@ Implemented in `patchbay/src/tests/ipv6_ll.rs` so far:
 - `dad_disabled_deterministic_mode`
 - `radriven_default_route_uses_scoped_ll_and_switches_iface`
 - `radriven_link_up_restores_scoped_ll_default_route`
+- `radriven_ra_worker_respects_router_enable_flag`
+
+Implemented control-plane scaffolding so far:
+
+- Router-level RA controls: `ra_enabled(bool)` and `ra_interval_secs(u64)`.
+- TOML support for router RA controls: `ra_enabled`, `ra_interval_secs`.
+- RA worker now honors per-router enable flag and configured interval.
 
 Validation commands before completion:
 

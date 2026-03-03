@@ -536,6 +536,12 @@ impl Lab {
                     .nat(rcfg.nat)
                     .ip_support(rcfg.ip_support)
                     .nat_v6(rcfg.nat_v6);
+                if let Some(enabled) = rcfg.ra_enabled {
+                    rb = rb.ra_enabled(enabled);
+                }
+                if let Some(interval) = rcfg.ra_interval_secs {
+                    rb = rb.ra_interval_secs(interval);
+                }
                 // TODO: support region assignment from TOML config via add_region.
                 if let Some(u) = upstream {
                     rb = rb.upstream(u);
@@ -707,6 +713,8 @@ impl Lab {
             mtu: None,
             block_icmp_frag_needed: false,
             firewall: Firewall::None,
+            ra_enabled: true,
+            ra_interval_secs: 30,
             result: Ok(()),
         }
     }
@@ -855,6 +863,8 @@ impl Lab {
                 let sw = inner.switch(sw_id)?;
                 Some((sw.gw_v6?, sw.cidr_v6?.prefix_len()))
             });
+            let ra_enabled = router.cfg.ra_enabled;
+            let ra_interval_secs = router.cfg.ra_interval_secs.max(1);
 
             let setup_data = RouterSetupData {
                 router,
@@ -881,6 +891,8 @@ impl Lab {
                 cancel: self.inner.cancel.clone(),
                 dad_mode: self.inner.ipv6_dad_mode,
                 provisioning_mode: self.inner.ipv6_provisioning_mode,
+                ra_enabled,
+                ra_interval_secs,
             };
 
             (id, setup_data, idx)
@@ -1549,6 +1561,8 @@ pub struct RouterBuilder {
     mtu: Option<u32>,
     block_icmp_frag_needed: bool,
     firewall: Firewall,
+    ra_enabled: bool,
+    ra_interval_secs: u64,
     result: Result<()>,
 }
 
@@ -1575,6 +1589,8 @@ impl RouterBuilder {
             mtu: None,
             block_icmp_frag_needed: false,
             firewall: Firewall::None,
+            ra_enabled: true,
+            ra_interval_secs: 30,
             result: Err(err),
         }
     }
@@ -1711,6 +1727,22 @@ impl RouterBuilder {
         self
     }
 
+    /// Enables or disables router advertisement emission in RA-driven mode.
+    pub fn ra_enabled(mut self, enabled: bool) -> Self {
+        if self.result.is_ok() {
+            self.ra_enabled = enabled;
+        }
+        self
+    }
+
+    /// Sets the RA interval in seconds, clamped to at least 1 second.
+    pub fn ra_interval_secs(mut self, secs: u64) -> Self {
+        if self.result.is_ok() {
+            self.ra_interval_secs = secs.max(1);
+        }
+        self
+    }
+
     /// Overrides the downstream subnet instead of auto-allocating from the pool.
     ///
     /// The gateway address is the `.1` host of the given CIDR. Device addresses
@@ -1748,6 +1780,8 @@ impl RouterBuilder {
                 r.cfg.mtu = self.mtu;
                 r.cfg.block_icmp_frag_needed = self.block_icmp_frag_needed;
                 r.cfg.firewall = self.firewall.clone();
+                r.cfg.ra_enabled = self.ra_enabled;
+                r.cfg.ra_interval_secs = self.ra_interval_secs.max(1);
             }
             let has_v4 = self.ip_support.has_v4();
             let has_v6 = self.ip_support.has_v6();
@@ -1937,6 +1971,8 @@ impl RouterBuilder {
             };
 
             let has_v6 = router.cfg.ip_support.has_v6();
+            let ra_enabled = router.cfg.ra_enabled;
+            let ra_interval_secs = router.cfg.ra_interval_secs.max(1);
             let setup_data = RouterSetupData {
                 router,
                 root_ns: cfg.root_ns.clone(),
@@ -1966,6 +2002,8 @@ impl RouterBuilder {
                 cancel: self.inner.cancel.clone(),
                 dad_mode: self.inner.ipv6_dad_mode,
                 provisioning_mode: self.inner.ipv6_provisioning_mode,
+                ra_enabled,
+                ra_interval_secs,
             };
 
             (id, setup_data)

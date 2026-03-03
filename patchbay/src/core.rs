@@ -82,6 +82,10 @@ pub(crate) struct RouterConfig {
     pub block_icmp_frag_needed: bool,
     /// Firewall preset for the router's forward chain.
     pub firewall: Firewall,
+    /// Whether this router emits Router Advertisements in RA-driven mode.
+    pub ra_enabled: bool,
+    /// Router Advertisement interval in seconds.
+    pub ra_interval_secs: u64,
 }
 
 impl RouterConfig {
@@ -746,6 +750,8 @@ impl NetworkCore {
                     mtu: None,
                     block_icmp_frag_needed: false,
                     firewall: Firewall::None,
+                    ra_enabled: true,
+                    ra_interval_secs: 30,
                 },
                 downlink_bridge,
                 uplink: None,
@@ -1855,6 +1861,10 @@ pub(crate) struct RouterSetupData {
     pub dad_mode: Ipv6DadMode,
     /// IPv6 provisioning behavior.
     pub provisioning_mode: Ipv6ProvisioningMode,
+    /// Whether RA worker should run for this router.
+    pub ra_enabled: bool,
+    /// RA worker interval in seconds.
+    pub ra_interval_secs: u64,
 }
 
 /// Sets up a single router's namespaces, links, and NAT. No lock held.
@@ -2190,8 +2200,16 @@ pub(crate) async fn setup_router_async(
     }
 
     // RA worker scaffold for RA-driven mode.
-    if data.provisioning_mode == Ipv6ProvisioningMode::RaDriven && router.cfg.ip_support.has_v6() {
-        spawn_ra_worker(netns, &router.ns, data.cancel.clone())?;
+    if data.provisioning_mode == Ipv6ProvisioningMode::RaDriven
+        && data.ra_enabled
+        && router.cfg.ip_support.has_v6()
+    {
+        spawn_ra_worker(
+            netns,
+            &router.ns,
+            data.cancel.clone(),
+            data.ra_interval_secs.max(1),
+        )?;
     }
 
     Ok(())
@@ -2201,16 +2219,17 @@ fn spawn_ra_worker(
     netns: &Arc<netns::NetnsManager>,
     ns: &str,
     cancel: CancellationToken,
+    interval_secs: u64,
 ) -> Result<()> {
     let rt = netns.rt_handle_for(ns)?;
     let ns = ns.to_string();
     rt.spawn(async move {
-        let interval = tokio::time::Duration::from_secs(30);
+        let interval = tokio::time::Duration::from_secs(interval_secs.max(1));
         loop {
             tokio::select! {
                 _ = cancel.cancelled() => break,
                 _ = tokio::time::sleep(interval) => {
-                    tracing::trace!(ns = %ns, "ra-worker: tick");
+                    tracing::trace!(ns = %ns, interval_secs, "ra-worker: tick");
                 }
             }
         }

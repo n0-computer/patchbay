@@ -1,11 +1,29 @@
 //! IPv6 link-local focused tests.
 
-use std::net::Ipv6Addr;
+use std::{
+    fs,
+    net::Ipv6Addr,
+    path::Path,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 
 use super::*;
 
 fn is_link_local(ip: Ipv6Addr) -> bool {
     ip.segments()[0] & 0xffc0 == 0xfe80
+}
+
+async fn wait_for_file_contains(path: &Path, needle: &str, timeout: Duration) -> Result<bool> {
+    let start = tokio::time::Instant::now();
+    while start.elapsed() < timeout {
+        if let Ok(content) = fs::read_to_string(path) {
+            if content.contains(needle) {
+                return Ok(true);
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    Ok(false)
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -235,6 +253,80 @@ async fn radriven_link_up_restores_scoped_ll_default_route() -> Result<()> {
     assert!(
         after.contains("dev eth0"),
         "expected default route via eth0"
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[traced_test]
+async fn radriven_ra_worker_respects_router_enable_flag() -> Result<()> {
+    check_caps()?;
+
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let outdir = std::env::temp_dir().join(format!("patchbay-ra-worker-{unique}"));
+    fs::create_dir_all(&outdir)?;
+    std::env::set_var("PATCHBAY_LOG", "trace");
+
+    let lab_enabled = Lab::with_opts(
+        LabOpts::default()
+            .outdir(&outdir)
+            .label("ra-enabled")
+            .ipv6_dad_mode(Ipv6DadMode::Disabled)
+            .ipv6_provisioning_mode(Ipv6ProvisioningMode::RaDriven),
+    )
+    .await?;
+    let r_enabled = lab_enabled
+        .add_router("r-enabled")
+        .ip_support(IpSupport::DualStack)
+        .ra_enabled(true)
+        .ra_interval_secs(1)
+        .build()
+        .await?;
+    let _dev_enabled = lab_enabled
+        .add_device("d-enabled")
+        .uplink(r_enabled.id())
+        .build()
+        .await?;
+    let enabled_trace = r_enabled
+        .filepath("tracing.jsonl")
+        .context("missing enabled router tracing path")?;
+    let has_tick =
+        wait_for_file_contains(&enabled_trace, "ra-worker: tick", Duration::from_secs(3)).await?;
+    assert!(has_tick, "expected RA worker tick in tracing log");
+    drop(lab_enabled);
+
+    let lab_disabled = Lab::with_opts(
+        LabOpts::default()
+            .outdir(&outdir)
+            .label("ra-disabled")
+            .ipv6_dad_mode(Ipv6DadMode::Disabled)
+            .ipv6_provisioning_mode(Ipv6ProvisioningMode::RaDriven),
+    )
+    .await?;
+    let r_disabled = lab_disabled
+        .add_router("r-disabled")
+        .ip_support(IpSupport::DualStack)
+        .ra_enabled(false)
+        .ra_interval_secs(1)
+        .build()
+        .await?;
+    let _dev_disabled = lab_disabled
+        .add_device("d-disabled")
+        .uplink(r_disabled.id())
+        .build()
+        .await?;
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let disabled_trace = r_disabled
+        .filepath("tracing.jsonl")
+        .context("missing disabled router tracing path")?;
+    let disabled_content = fs::read_to_string(&disabled_trace).unwrap_or_default();
+    assert!(
+        !disabled_content.contains("ra-worker: tick"),
+        "unexpected RA worker tick while RA is disabled"
     );
 
     Ok(())

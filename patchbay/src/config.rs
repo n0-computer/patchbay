@@ -45,4 +45,8 @@ pub struct RouterConfig {
     /// IPv6 NAT mode.  Defaults to `"none"`.
     #[serde(default)]
     pub nat_v6: NatV6Mode,
+    /// Optional override for RA emission in RA-driven provisioning mode.
+    pub ra_enabled: Option<bool>,
+    /// Optional RA interval in seconds.
+    pub ra_interval_secs: Option<u64>,
 }
