@@ -45,6 +45,9 @@ jobs:
       - name: Enable unprivileged user namespaces
         run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
 
+      - name: Install iperf3
+        run: sudo apt-get update && sudo apt-get install -y iperf3
+
       - name: Check
         run: cargo check --workspace --tests
 
