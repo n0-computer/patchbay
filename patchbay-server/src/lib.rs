@@ -522,9 +522,7 @@ fn detect_log_kind(filename: &str, sample: &[u8]) -> Option<LogKind> {
 
     let text = std::str::from_utf8(sample).ok()?;
     let text = text.trim_start_matches('\u{feff}');
-    if filename.ends_with(".qlog")
-        || filename.contains(".qlog-")
-        || looks_like_qlog_json_seq(text)
+    if filename.ends_with(".qlog") || filename.contains(".qlog-") || looks_like_qlog_json_seq(text)
     {
         return Some(LogKind::Qlog);
     }

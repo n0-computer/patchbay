@@ -231,6 +231,41 @@ let charlie = lab.add_device("charlie").uplink(corp.id()).build().await?;
 | NAT64 | `NatV6Mode::Nat64` | Userspace SIIT + nftables masquerade |
 | DHCPv6-PD | *not planned* | Use static /64 allocation |
 
+## Link-Local Addressing and Scope
+
+Patchbay assigns and exposes link-local IPv6 addresses on IPv6-capable
+interfaces.
+
+- Device side: `DeviceIface::ll6()`
+- Router side: `RouterIface::ll6()`
+- Router snapshots: `Router::iface(name)` and `Router::interfaces()`
+
+Use `ip6()` when you need a global/ULA source or destination. Use `ll6()`
+for neighbor/router-local checks and link-local route assertions.
+
+### Provisioning mode and DAD mode
+
+Configure IPv6 behavior at lab creation with `LabOpts`:
+
+```rust
+let lab = Lab::with_opts(
+    LabOpts::default()
+        .ipv6_provisioning_mode(Ipv6ProvisioningMode::Static)
+        .ipv6_dad_mode(Ipv6DadMode::Enabled),
+).await?;
+```
+
+- `Ipv6ProvisioningMode::Static`: patchbay installs routes during wiring.
+- `Ipv6ProvisioningMode::RaDriven`: enables RA-driven provisioning path.
+- `Ipv6DadMode::Disabled`: deterministic mode, current default.
+- `Ipv6DadMode::Enabled`: kernel DAD behavior in namespaces.
+
+### Scoped default route behavior
+
+When an IPv6 default gateway is link-local (`fe80::/10`), route installation
+must include interface scope. Patchbay uses scoped route installation for this
+path, so default routing remains valid after interface changes.
+
 ---
 
 ## Common Pitfalls

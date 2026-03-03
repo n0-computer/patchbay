@@ -2380,6 +2380,7 @@ pub(crate) async fn remove_firewall(netns: &netns::NetnsManager, ns: &str) -> Re
 
 /// Sets up a single device's namespace and wires all interfaces. No lock held.
 #[instrument(name = "device", skip_all, fields(id = dev.id.0))]
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn setup_device_async(
     netns: &Arc<netns::NetnsManager>,
     prefix: &str,

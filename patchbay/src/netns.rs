@@ -80,7 +80,9 @@ fn setup_namespace_thread(
 fn apply_mount_overlay(overlay: Option<&DnsOverlay>) {
     if overlay.is_some() {
         if let Err(e) = unshare(CloneFlags::CLONE_NEWNS) {
-            tracing::warn!("unshare(CLONE_NEWNS) failed: {e} — DNS overlay bind-mounts may affect the host");
+            tracing::warn!(
+                "unshare(CLONE_NEWNS) failed: {e} — DNS overlay bind-mounts may affect the host"
+            );
         }
     }
     if let Some(o) = overlay {

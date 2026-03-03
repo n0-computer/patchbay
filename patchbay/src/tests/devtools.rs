@@ -5,9 +5,10 @@
 //! PATCHBAY_OUTDIR=/tmp/patchbay-e2e cargo test -p patchbay simple_lab_for_e2e -- --ignored
 //! ```
 
+use tracing::{info_span, Instrument};
+
 use super::*;
 use crate::consts;
-use tracing::{info_span, Instrument};
 
 /// Creates a minimal lab with a DC server, home-NAT router, and client device.
 /// Runs a TCP echo roundtrip and writes all events + state to `PATCHBAY_OUTDIR`.

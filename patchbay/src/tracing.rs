@@ -271,8 +271,7 @@ impl NsWriterSubscriber {
     fn write_event_to_files(&self, event: &tracing::Event<'_>) {
         let meta = event.metadata();
         let target = meta.target();
-        let timestamp =
-            chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Micros, true);
+        let timestamp = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Micros, true);
 
         // Write to .events.jsonl — only _events:: targets.
         if let Some(kind) = target.split_once("_events::").map(|(_, k)| k) {
@@ -321,10 +320,7 @@ impl NsWriterSubscriber {
             let span_chain = self.span_chain_for_event(event);
             if !span_chain.is_empty() {
                 let current = span_chain[span_chain.len() - 1].clone();
-                obj.insert(
-                    "span".to_string(),
-                    serde_json::Value::Object(current),
-                );
+                obj.insert("span".to_string(), serde_json::Value::Object(current));
                 obj.insert(
                     "spans".to_string(),
                     serde_json::Value::Array(

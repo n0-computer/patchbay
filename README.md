@@ -145,6 +145,30 @@ between IPv6 and IPv4 headers; nftables masquerade handles port mapping.
 Use `RouterPreset::MobileV6` or `.nat_v6(NatV6Mode::Nat64)` directly.
 See [docs/reference/ipv6.md](docs/reference/ipv6.md) for details.
 
+### IPv6 link-local and provisioning modes
+
+Every IPv6-capable device/router interface now exposes a link-local address
+through the handle snapshots:
+
+- `Device::default_iface().and_then(|i| i.ll6())`
+- `Device::interfaces()[..].ll6()`
+- `Router::iface(\"wan\").and_then(|i| i.ll6())`
+- `Router::interfaces()[..].ll6()`
+
+Patchbay also supports explicit IPv6 provisioning and DAD modes via `LabOpts`:
+
+```rust
+let lab = Lab::with_opts(
+    LabOpts::default()
+        .ipv6_provisioning_mode(Ipv6ProvisioningMode::Static)
+        .ipv6_dad_mode(Ipv6DadMode::Enabled),
+).await?;
+```
+
+`Ipv6ProvisioningMode::Static` keeps route wiring deterministic.  
+`Ipv6ProvisioningMode::RaDriven` enables the RA-driven path.  
+`Ipv6DadMode::Disabled` is the current default for deterministic test setup.
+
 ### Firewalls
 
 Firewall presets control both inbound and outbound traffic:
@@ -264,6 +288,12 @@ provide `spawn`, `run_sync`, `spawn_thread`, `spawn_command`,
 `spawn_command_sync`, and `spawn_reflector` for running code in their
 namespace. Handle methods return `Result` or `Option` when the underlying
 node has been removed from the lab.
+
+For IPv6 diagnostics, use per-interface snapshots instead of only `ip6()`:
+
+- `DeviceIface::ip6()` for global/ULA address.
+- `DeviceIface::ll6()` for `fe80::/10` link-local address.
+- `RouterIface::ip6()` and `RouterIface::ll6()` for router-side interface state.
 
 ## TOML configuration
 
