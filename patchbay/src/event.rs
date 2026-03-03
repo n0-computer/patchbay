@@ -3,18 +3,25 @@
 use std::{
     collections::BTreeMap,
     net::{Ipv4Addr, Ipv6Addr},
-    sync::atomic::Ordering,
 };
+
+#[cfg(target_os = "linux")]
+use std::sync::atomic::Ordering;
 
 use chrono::{DateTime, Utc};
 use ipnet::{Ipv4Net, Ipv6Net};
 use serde::{Deserialize, Serialize};
 
+// Import types from the appropriate module based on platform
+#[cfg(target_os = "linux")]
 use crate::{
     firewall::Firewall,
     lab::LinkCondition,
     nat::{IpSupport, Nat, NatV6Mode},
 };
+
+#[cfg(not(target_os = "linux"))]
+use crate::types_portable::{Firewall, IpSupport, LinkCondition, Nat, NatV6Mode};
 
 // ─────────────────────────────────────────────
 // Event types
@@ -405,6 +412,7 @@ pub struct RegionLinkState {
     pub broken: bool,
 }
 
+#[cfg(target_os = "linux")]
 impl RouterState {
     /// Construct from core `RouterData`, resolving upstream name and downstream bridge.
     pub(crate) fn from_router_data(
@@ -435,6 +443,7 @@ impl RouterState {
     }
 }
 
+#[cfg(target_os = "linux")]
 impl DeviceState {
     /// Construct from core `DeviceData`, resolving router names via the core.
     pub(crate) fn from_device_data(
@@ -743,6 +752,7 @@ pub fn parse_proc_net_dev(content: &str) -> Vec<IfaceCounters> {
 // Emit helper on LabInner
 // ─────────────────────────────────────────────
 
+#[cfg(target_os = "linux")]
 impl crate::core::LabInner {
     /// Emits an event on the broadcast channel. Returns the assigned opid.
     pub(crate) fn emit(&self, kind: LabEventKind) -> u64 {

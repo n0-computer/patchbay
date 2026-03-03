@@ -1,5 +1,8 @@
 [workspace]
 members = ["patchbay", "patchbay-utils", "patchbay-runner", "patchbay-vm", "patchbay-server"]
+# On macOS, use: cargo build (without --workspace) to skip patchbay-runner
+# patchbay-runner requires Linux and will only compile there
+default-members = ["patchbay", "patchbay-utils", "patchbay-vm", "patchbay-server"]
 resolver = "2"
 
 [workspace.package]

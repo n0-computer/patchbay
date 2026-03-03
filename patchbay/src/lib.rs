@@ -10,6 +10,12 @@
 //! veth pairs, nftables NAT, and tc netem link conditions. The library handles
 //! namespace creation, IP allocation, and teardown automatically.
 //!
+//! # Platform support
+//!
+//! The full functionality requires Linux. On other platforms (macOS, Windows),
+//! stub types are provided so that dependent crates like `patchbay-server` and
+//! `patchbay-vm` can compile. Cross-compilation to Linux works from any platform.
+//!
 //! # How it works
 //!
 //! A [`Lab`] owns a root namespace with an IX (Internet Exchange) bridge.
@@ -31,86 +37,151 @@
 //! # Quick start (from TOML)
 //!
 //! ```no_run
+//! # #[cfg(target_os = "linux")]
 //! # use patchbay::Lab;
 //! # use std::process::Command;
+//! # #[cfg(target_os = "linux")]
 //! # #[tokio::main(flavor = "current_thread")]
 //! # async fn main() -> anyhow::Result<()> {
-//! let lab = Lab::load("lab.toml").await?;
-//! let dev = lab.device_by_name("home-eu1").unwrap();
-//! let mut cmd = Command::new("ping");
-//! cmd.args(["-c1", "8.8.8.8"]);
-//! dev.spawn_command_sync(cmd)?;
+//! # let lab = Lab::load("lab.toml").await?;
+//! # let dev = lab.device_by_name("home-eu1").unwrap();
+//! # let mut cmd = Command::new("ping");
+//! # cmd.args(["-c1", "8.8.8.8"]);
+//! # dev.spawn_command_sync(cmd)?;
 //! # Ok(())
 //! # }
+//! # #[cfg(not(target_os = "linux"))]
+//! # fn main() {}
 //! ```
 //!
 //! # Builder API
 //!
 //! ```no_run
+//! # #[cfg(target_os = "linux")]
 //! # use patchbay::{Lab, Nat};
+//! # #[cfg(target_os = "linux")]
 //! # #[tokio::main(flavor = "current_thread")]
 //! # async fn main() -> anyhow::Result<()> {
-//! let lab = Lab::new().await?;
-//! let isp = lab.add_router("isp1").nat(Nat::Cgnat).build().await?;
-//! let home = lab
-//!     .add_router("home1")
-//!     .upstream(isp.id())
-//!     .nat(Nat::Home)
-//!     .build()
-//!     .await?;
-//! lab.add_device("dev1")
-//!     .iface("eth0", home.id(), None)
-//!     .build()
-//!     .await?;
+//! # let lab = Lab::new().await?;
+//! # let isp = lab.add_router("isp1").nat(Nat::Cgnat).build().await?;
+//! # let home = lab
+//! #     .add_router("home1")
+//! #     .upstream(isp.id())
+//! #     .nat(Nat::Home)
+//! #     .build()
+//! #     .await?;
+//! # lab.add_device("dev1")
+//! #     .iface("eth0", home.id(), None)
+//! #     .build()
+//! #     .await?;
 //! # Ok(())
 //! # }
+//! # #[cfg(not(target_os = "linux"))]
+//! # fn main() {}
 //! ```
 //!
 //! Namespace transitions are executed inside dedicated worker threads, so
 //! callers can use any Tokio runtime flavor.
 
-use anyhow::{anyhow, bail, Context, Result};
+// ─────────────────────────────────────────────────────────────────────────────
+// Cross-platform modules (always compiled)
+// ─────────────────────────────────────────────────────────────────────────────
 
 /// TOML configuration structures used by [`Lab::load`].
 pub mod config;
 /// Shared filename constants for the run output directory.
 pub mod consts;
-pub(crate) mod core;
 /// Lab event system: typed events, state reducer, file writer.
 pub mod event;
-pub(crate) mod firewall;
-pub(crate) mod handles;
-mod lab;
-pub(crate) mod nat;
-pub(crate) mod nat64;
-mod netlink;
-mod netns;
-#[path = "tracing.rs"]
-mod ns_tracing;
-mod qdisc;
-/// Probe and reflector helpers for integration tests.
-pub mod test_utils;
-#[cfg(test)]
-mod tests;
-mod userns;
 /// String sanitizers for filenames and environment variable names.
 pub mod util;
 /// Event file writer and run discovery.
 pub mod writer;
 
-pub use firewall::PortPolicy;
+// Cross-platform type definitions (firewall, nat, qdisc types)
+#[cfg(target_os = "linux")]
+pub(crate) mod firewall;
+#[cfg(target_os = "linux")]
+pub(crate) mod nat;
+#[cfg(target_os = "linux")]
+mod qdisc;
+
+#[cfg(not(target_os = "linux"))]
+#[path = "types_portable.rs"]
+mod types_portable;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Linux-only modules
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[cfg(target_os = "linux")]
+pub(crate) mod core;
+#[cfg(target_os = "linux")]
+pub(crate) mod handles;
+#[cfg(target_os = "linux")]
+mod lab;
+#[cfg(target_os = "linux")]
+pub(crate) mod nat64;
+#[cfg(target_os = "linux")]
+mod netlink;
+#[cfg(target_os = "linux")]
+mod netns;
+#[cfg(target_os = "linux")]
+#[path = "tracing.rs"]
+mod ns_tracing;
+#[cfg(target_os = "linux")]
+mod userns;
+
+/// Probe and reflector helpers for integration tests.
+#[cfg(target_os = "linux")]
+pub mod test_utils;
+#[cfg(all(target_os = "linux", test))]
+mod tests;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Stub module for non-Linux platforms
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[cfg(not(target_os = "linux"))]
+mod stubs;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Public exports
+// ─────────────────────────────────────────────────────────────────────────────
+
 pub use ipnet::Ipv4Net;
+
+// Linux: export real types
+#[cfg(target_os = "linux")]
+pub use firewall::PortPolicy;
+#[cfg(target_os = "linux")]
 pub use lab::{
     ConntrackTimeouts, DefaultRegions, Device, DeviceBuilder, DeviceIface, Firewall,
     FirewallConfig, FirewallConfigBuilder, IpSupport, Ix, Lab, LabOpts, LinkCondition, LinkLimits,
     Nat, NatConfig, NatConfigBuilder, NatFiltering, NatMapping, NatV6Mode, ObservedAddr, Region,
     RegionLink, Router, RouterBuilder, RouterPreset,
 };
+#[cfg(target_os = "linux")]
+pub use crate::core::NodeId;
+#[cfg(target_os = "linux")]
+pub use crate::userns::{init_userns, init_userns_for_ctor};
 
+// Non-Linux: export stubs and portable types
+#[cfg(not(target_os = "linux"))]
+pub use stubs::{
+    check_caps, init_userns, init_userns_for_ctor, DefaultRegions, Device, DeviceBuilder,
+    DeviceIface, Ix, Lab, LabOpts, NodeId, ObservedAddr, Region, RegionLink, Router, RouterBuilder,
+};
+#[cfg(not(target_os = "linux"))]
+pub use types_portable::{
+    ConntrackTimeouts, Firewall, FirewallConfig, FirewallConfigBuilder, IpSupport, LinkCondition,
+    LinkLimits, Nat, NatConfig, NatConfigBuilder, NatFiltering, NatMapping, NatV6Mode, PortPolicy,
+    RouterPreset,
+};
+
+// Cross-platform event types
 pub use crate::{
-    core::NodeId,
     event::{IfaceCounters, IfaceSnapshot, LabEvent, LabEventKind, LabState},
-    userns::{init_userns, init_userns_for_ctor},
     writer::{discover_runs, RunInfo},
 };
 
@@ -123,7 +194,10 @@ pub use crate::{
 /// # Errors
 ///
 /// Returns an error listing the missing capabilities.
-pub fn check_caps() -> Result<()> {
+#[cfg(target_os = "linux")]
+pub fn check_caps() -> anyhow::Result<()> {
+    use anyhow::{anyhow, bail, Context};
+
     if nix::unistd::Uid::effective().is_root() {
         return Ok(());
     }

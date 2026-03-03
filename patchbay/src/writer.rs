@@ -2,29 +2,33 @@
 
 use std::{
     fs,
-    io::{BufWriter, Write},
     path::{Path, PathBuf},
-    time::Duration,
 };
 
 use anyhow::{Context, Result};
 use serde::Serialize;
 
-use crate::{
-    consts,
-    event::{LabEvent, LabState},
-};
+use crate::consts;
+#[cfg(target_os = "linux")]
+use crate::event::LabEvent;
+use crate::event::LabState;
+
+#[cfg(target_os = "linux")]
+use std::{io::{BufWriter, Write}, time::Duration};
 
 /// How often events.jsonl is flushed and state.json is written.
+#[cfg(target_os = "linux")]
 const FLUSH_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Writes events to `events.jsonl` and maintains `state.json`.
+#[cfg(target_os = "linux")]
 pub(crate) struct LabWriter {
     outdir: PathBuf,
     state: LabState,
     events_file: BufWriter<fs::File>,
 }
 
+#[cfg(target_os = "linux")]
 impl LabWriter {
     pub(crate) fn new(outdir: &Path) -> Result<Self> {
         fs::create_dir_all(outdir)?;
@@ -71,6 +75,7 @@ impl LabWriter {
 ///
 /// Events are buffered in memory and flushed to `events.jsonl` + `state.json`
 /// at most once per [`FLUSH_INTERVAL`], with a final flush on channel close.
+#[cfg(target_os = "linux")]
 pub(crate) fn spawn_writer(
     outdir: PathBuf,
     mut rx: tokio::sync::broadcast::Receiver<LabEvent>,

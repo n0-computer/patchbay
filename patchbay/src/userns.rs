@@ -14,7 +14,6 @@ pub fn init_userns() -> anyhow::Result<()> {
     static RESULT: OnceLock<Result<(), String>> = OnceLock::new();
     RESULT
         .get_or_init(|| {
-            #[cfg(target_os = "linux")]
             if nix::unistd::Uid::effective().is_root() {
                 return Ok(());
             }
@@ -33,13 +32,11 @@ pub fn init_userns() -> anyhow::Result<()> {
 /// `#[ctor::ctor]` function) before the Rust standard library has been
 /// initialized.  After that point use [`init_userns`] instead.
 pub unsafe fn init_userns_for_ctor() {
-    #[cfg(target_os = "linux")]
     unsafe {
         userns_bootstrap_libc();
     }
 }
 
-#[cfg(target_os = "linux")]
 fn do_bootstrap() -> anyhow::Result<()> {
     use anyhow::Context;
     use nix::sched::{unshare, CloneFlags};
@@ -59,12 +56,6 @@ fn do_bootstrap() -> anyhow::Result<()> {
     }
 }
 
-#[cfg(not(target_os = "linux"))]
-fn do_bootstrap() -> anyhow::Result<()> {
-    Ok(())
-}
-
-#[cfg(target_os = "linux")]
 unsafe fn userns_bootstrap_libc() {
     let uid = unsafe { libc::getuid() };
     if uid == 0 {
@@ -86,7 +77,6 @@ unsafe fn userns_bootstrap_libc() {
     unsafe { proc_write(c"/proc/self/gid_map".as_ptr(), gid_line) };
 }
 
-#[cfg(target_os = "linux")]
 unsafe fn proc_write(path: *const libc::c_char, data: &[u8]) {
     let fd = unsafe { libc::open(path, libc::O_WRONLY) };
     if fd < 0 {
@@ -96,7 +86,6 @@ unsafe fn proc_write(path: *const libc::c_char, data: &[u8]) {
     let _ = unsafe { libc::close(fd) };
 }
 
-#[cfg(target_os = "linux")]
 fn format_map_line(buf: &mut [u8; 32], id: u32) -> &[u8] {
     buf[0] = b'0';
     buf[1] = b' ';

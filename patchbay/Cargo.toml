@@ -14,10 +14,6 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "serd
 derive_more = { version = "2.1.1", features = ["display"] }
 futures = "0.3"
 ipnet = { version = "2.11", features = ["serde"] }
-libc = "0.2"
-netlink-packet-route = "0.28"
-nix = { version = "0.30", features = ["sched", "mount", "fs", "signal", "process", "user", "ioctl"] }
-rtnetlink = "0.20"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 strum = { version = "0.26", features = ["derive"] }
@@ -26,6 +22,13 @@ tokio-util = "0.7"
 toml = "0.8"
 tracing = "0.1"
 tracing-core = "0.1"
+
+# Linux-only dependencies
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
+netlink-packet-route = "0.28"
+nix = { version = "0.30", features = ["sched", "mount", "fs", "signal", "process", "user", "ioctl"] }
+rtnetlink = "0.20"
 
 [dev-dependencies]
 ctor = "0.2"
