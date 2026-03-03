@@ -19,15 +19,38 @@ use crate::util::stage_binary_overrides;
 
 const VM_STATE_DIR: &str = ".qemu-vm";
 const DEFAULT_VM_NAME: &str = "patchbay-vm";
-const DEFAULT_IMAGE_URL: &str =
+const DEFAULT_IMAGE_URL_X86: &str =
     "https://cloud.debian.org/images/cloud/trixie/latest/debian-13-genericcloud-amd64.qcow2";
+const DEFAULT_IMAGE_URL_ARM64: &str =
+    "https://cloud.debian.org/images/cloud/trixie/latest/debian-13-genericcloud-arm64.qcow2";
 const DEFAULT_MEM_MB: &str = "4096";
 const DEFAULT_CPUS: &str = "4";
 const DEFAULT_DISK_GB: &str = "40";
 const DEFAULT_SSH_USER: &str = "dev";
-const DEFAULT_QEMU_BIN: &str = "qemu-system-x86_64";
+const DEFAULT_QEMU_BIN_X86: &str = "qemu-system-x86_64";
+const DEFAULT_QEMU_BIN_ARM64: &str = "qemu-system-aarch64";
 const DEFAULT_SSH_PORT: &str = "2222";
 const DEFAULT_SEED_PORT: &str = "8555";
+
+fn is_arm64_host() -> bool {
+    std::env::consts::ARCH == "aarch64"
+}
+
+fn default_qemu_bin() -> &'static str {
+    if is_arm64_host() {
+        DEFAULT_QEMU_BIN_ARM64
+    } else {
+        DEFAULT_QEMU_BIN_X86
+    }
+}
+
+fn default_image_url() -> &'static str {
+    if is_arm64_host() {
+        DEFAULT_IMAGE_URL_ARM64
+    } else {
+        DEFAULT_IMAGE_URL_X86
+    }
+}
 const DEFAULT_VIRTIOFSD: [&str; 5] = [
     "/usr/lib/virtiofsd",
     "/usr/libexec/virtiofsd",
@@ -55,9 +78,27 @@ const SERIAL_LOG: &str = "serial.log";
 const SSH_KEY: &str = "id_ed25519";
 const KNOWN_HOSTS: &str = "known_hosts";
 const RUNTIME_ENV: &str = "runtime.env";
-const RELEASE_MUSL_ASSET: &str = "patchbay-x86_64-unknown-linux-musl.tar.gz";
+const RELEASE_MUSL_ASSET_X86: &str = "patchbay-x86_64-unknown-linux-musl.tar.gz";
+const RELEASE_MUSL_ASSET_ARM64: &str = "patchbay-aarch64-unknown-linux-musl.tar.gz";
 const GITHUB_REPO: &str = "https://github.com/n0-computer/patchbay.git";
-const DEFAULT_MUSL_TARGET: &str = "x86_64-unknown-linux-musl";
+const DEFAULT_MUSL_TARGET_X86: &str = "x86_64-unknown-linux-musl";
+const DEFAULT_MUSL_TARGET_ARM64: &str = "aarch64-unknown-linux-musl";
+
+fn default_musl_target() -> &'static str {
+    if is_arm64_host() {
+        DEFAULT_MUSL_TARGET_ARM64
+    } else {
+        DEFAULT_MUSL_TARGET_X86
+    }
+}
+
+fn release_musl_asset() -> &'static str {
+    if is_arm64_host() {
+        RELEASE_MUSL_ASSET_ARM64
+    } else {
+        RELEASE_MUSL_ASSET_X86
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct RunVmArgs {
@@ -133,10 +174,18 @@ pub fn run_tests_in_vm(args: TestVmArgs) -> Result<()> {
     }
 
     let staged = stage_test_binaries(&vm, &test_bins)?;
+
+    // In rsync mode, sync the work directory to the VM since it's not mounted
+    if vm.fs_mode == "rsync" {
+        eprintln!("qemu-vm: syncing test binaries to VM...");
+        rsync_to_guest(&vm, &vm.work_dir, "/work", &[])?;
+    }
+
     let mut passed = 0usize;
     let mut failed = 0usize;
     for guest_bin in staged {
-        let rc = ssh_cmd_status(&vm, &["sudo", &guest_bin]);
+        // Use PATH that includes /sbin for nft, /usr/bin for ping, etc.
+        let rc = ssh_cmd_status(&vm, &["sudo", "env", "PATH=/usr/local/bin:/usr/bin:/bin:/sbin:/usr/sbin", &guest_bin]);
         match rc {
             Ok(()) => {
                 passed += 1;
@@ -152,6 +201,53 @@ pub fn run_tests_in_vm(args: TestVmArgs) -> Result<()> {
     if failed > 0 {
         bail!("{} test binaries failed in VM", failed);
     }
+    Ok(())
+}
+
+/// Compiles and runs tests directly inside the VM (used for rsync mode).
+fn run_tests_inside_vm(vm: &VmConfig, args: &TestVmArgs) -> Result<()> {
+    eprintln!("qemu-vm: compiling and running tests inside VM (rsync mode)...");
+
+    // Install build dependencies and test tools (C compiler, linker, nodejs/npm, nftables)
+    eprintln!("qemu-vm: ensuring build tools are installed...");
+    ssh_cmd(
+        vm,
+        &[
+            "sudo",
+            "sh",
+            "-c",
+            "(command -v cc >/dev/null 2>&1 && command -v npm >/dev/null 2>&1 && command -v nft >/dev/null 2>&1) || (apt-get update -qq && apt-get install -qq -y build-essential nodejs npm nftables iproute2 iptables)",
+        ],
+    )?;
+
+    // Install Rust toolchain in VM if not present
+    ssh_cmd(
+        vm,
+        &[
+            "sh",
+            "-c",
+            "command -v cargo >/dev/null 2>&1 || (curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable)",
+        ],
+    )?;
+
+    // Build the cargo test command
+    // Include /sbin and /usr/sbin in PATH for nftables and other system tools
+    let mut test_cmd = String::from("export PATH=\"/sbin:/usr/sbin:$PATH\" && cd /app && . ~/.cargo/env && cargo test");
+    for pkg in &args.packages {
+        test_cmd.push_str(&format!(" -p {}", pkg));
+    }
+    for test in &args.tests {
+        test_cmd.push_str(&format!(" --test {}", test));
+    }
+    for arg in &args.cargo_args {
+        test_cmd.push_str(&format!(" {}", arg));
+    }
+
+    // Run tests inside the VM
+    ssh_cmd(vm, &["sh", "-c", &test_cmd])
+        .context("tests failed inside VM")?;
+
+    eprintln!("qemu-vm: all tests passed");
     Ok(())
 }
 
@@ -220,12 +316,12 @@ impl VmConfig {
 
         Ok(Self {
             vm_name: env_or("QEMU_VM_NAME", DEFAULT_VM_NAME),
-            image_url: env_or("QEMU_VM_IMAGE_URL", DEFAULT_IMAGE_URL),
+            image_url: env_or("QEMU_VM_IMAGE_URL", default_image_url()),
             mem_mb: env_or("QEMU_VM_MEM_MB", DEFAULT_MEM_MB),
             cpus: env_or("QEMU_VM_CPUS", DEFAULT_CPUS),
             disk_gb: env_or("QEMU_VM_DISK_GB", DEFAULT_DISK_GB),
             ssh_user: env_or("QEMU_VM_SSH_USER", DEFAULT_SSH_USER),
-            qemu_bin: env_or("QEMU_VM_QEMU_BIN", DEFAULT_QEMU_BIN),
+            qemu_bin: env_or("QEMU_VM_QEMU_BIN", default_qemu_bin()),
             ssh_port: env_or("QEMU_VM_SSH_PORT", DEFAULT_SSH_PORT),
             seed_port: env_or("QEMU_VM_SEED_PORT", DEFAULT_SEED_PORT),
             workspace: cwd,
@@ -251,12 +347,12 @@ impl VmConfig {
 
         Ok(Self {
             vm_name: env_or("QEMU_VM_NAME", DEFAULT_VM_NAME),
-            image_url: env_or("QEMU_VM_IMAGE_URL", DEFAULT_IMAGE_URL),
+            image_url: env_or("QEMU_VM_IMAGE_URL", default_image_url()),
             mem_mb: env_or("QEMU_VM_MEM_MB", DEFAULT_MEM_MB),
             cpus: env_or("QEMU_VM_CPUS", DEFAULT_CPUS),
             disk_gb: env_or("QEMU_VM_DISK_GB", DEFAULT_DISK_GB),
             ssh_user: env_or("QEMU_VM_SSH_USER", DEFAULT_SSH_USER),
-            qemu_bin: env_or("QEMU_VM_QEMU_BIN", DEFAULT_QEMU_BIN),
+            qemu_bin: env_or("QEMU_VM_QEMU_BIN", default_qemu_bin()),
             ssh_port: env_or("QEMU_VM_SSH_PORT", DEFAULT_SSH_PORT),
             seed_port: env_or("QEMU_VM_SEED_PORT", DEFAULT_SEED_PORT),
             workspace: cwd.clone(),
@@ -374,6 +470,9 @@ fn up(vm: &mut VmConfig) -> Result<()> {
     log(&format!("target={}", vm.target_dir.display()));
     log(&format!("work={}", vm.work_dir.display()));
 
+    // Determine fs_mode early - needed for ensure_guest_mounts even if VM is already running
+    select_fs_mode(vm);
+
     if vm.recreate && is_running(vm)? {
         log("recreate requested; stopping existing VM");
         down(vm)?;
@@ -446,7 +545,7 @@ fn run_in_guest(vm: &VmConfig, args: &RunVmArgs) -> Result<()> {
         &args.binary_overrides,
         &vm.work_dir,
         &vm.target_dir,
-        DEFAULT_MUSL_TARGET,
+        default_musl_target(),
     )?;
 
     let mut parts = vec![
@@ -692,7 +791,7 @@ fn build_vm_binary_and_guest_path(
         "build".into(),
         "--release".into(),
         "--target".into(),
-        DEFAULT_MUSL_TARGET.into(),
+        default_musl_target().into(),
     ];
     if req.all_features {
         base_args.push("--all-features".into());
@@ -714,7 +813,7 @@ fn build_vm_binary_and_guest_path(
         )?;
         return Ok(format!(
             "/target/{}/release/examples/{}",
-            DEFAULT_MUSL_TARGET, example
+            default_musl_target(), example
         ));
     }
 
@@ -729,7 +828,7 @@ fn build_vm_binary_and_guest_path(
                 .current_dir(&req.source_dir),
             "build VM bin binary",
         )?;
-        return Ok(format!("/target/{}/release/{}", DEFAULT_MUSL_TARGET, bin));
+        return Ok(format!("/target/{}/release/{}", default_musl_target(), bin));
     }
 
     let mut example_args = base_args.clone();
@@ -744,7 +843,7 @@ fn build_vm_binary_and_guest_path(
     if example_status.success() {
         return Ok(format!(
             "/target/{}/release/examples/{}",
-            DEFAULT_MUSL_TARGET, name
+            default_musl_target(), name
         ));
     }
 
@@ -758,7 +857,7 @@ fn build_vm_binary_and_guest_path(
             .current_dir(&req.source_dir),
         "build VM fallback bin",
     )?;
-    Ok(format!("/target/{}/release/{}", DEFAULT_MUSL_TARGET, name))
+    Ok(format!("/target/{}/release/{}", default_musl_target(), name))
 }
 
 fn find_ancestor_with_file(path: &Path, file_name: &str) -> Option<PathBuf> {
@@ -829,11 +928,12 @@ fn download_release_runner(vm: &VmConfig, version: &str) -> Result<PathBuf> {
     let archive = cache_root.join(format!(
         "{}-{}",
         version_key.replace('/', "_"),
-        RELEASE_MUSL_ASSET
+        release_musl_asset()
     ));
     let unpack = cache_root.join(format!(
-        "release-{}-x86_64-unknown-linux-musl",
-        version_key.replace('/', "_")
+        "release-{}-{}",
+        version_key.replace('/', "_"),
+        default_musl_target()
     ));
     let cached_bin = unpack.join("patchbay");
     if cached_bin.exists() {
@@ -843,13 +943,13 @@ fn download_release_runner(vm: &VmConfig, version: &str) -> Result<PathBuf> {
     let url = if version == "latest" {
         format!(
             "https://github.com/n0-computer/patchbay/releases/latest/download/{}",
-            RELEASE_MUSL_ASSET
+            release_musl_asset()
         )
     } else {
         format!(
             "https://github.com/n0-computer/patchbay/releases/download/{}/{}",
             normalize_release_tag(version),
-            RELEASE_MUSL_ASSET
+            release_musl_asset()
         )
     };
 
@@ -915,7 +1015,7 @@ fn build_musl_from_git_ref(vm: &VmConfig, git_ref: &str) -> Result<PathBuf> {
                 "build",
                 "--release",
                 "--target",
-                DEFAULT_MUSL_TARGET,
+                default_musl_target(),
                 "--bin",
                 "patchbay",
             ])
@@ -924,7 +1024,7 @@ fn build_musl_from_git_ref(vm: &VmConfig, git_ref: &str) -> Result<PathBuf> {
         "build patchbay from git ref",
     )?;
     let bin = target_dir
-        .join(DEFAULT_MUSL_TARGET)
+        .join(default_musl_target())
         .join("release")
         .join("patchbay");
     if !bin.exists() {
@@ -1151,6 +1251,9 @@ fn select_fs_mode(vm: &mut VmConfig) {
     if let Some(bin) = detect_virtiofsd_bin(vm) {
         vm.fs_mode = "virtiofs".to_string();
         vm.virtiofsd_bin = Some(bin);
+    } else if is_arm64_host() && std::env::consts::OS == "macos" {
+        // ARM64 Debian cloud images don't have 9p module, use rsync instead
+        vm.fs_mode = "rsync".to_string();
     } else {
         vm.fs_mode = "9p".to_string();
     }
@@ -1239,9 +1342,10 @@ fn render_cloud_init(vm: &VmConfig) -> Result<()> {
     )
     .with_context(|| format!("write {}", vm.meta_data().display()))?;
 
+    // Use wildcard matching to handle interface renaming (eth0 on x86, enp0s1 on arm64)
     std::fs::write(
         vm.network_cfg(),
-        "version: 2\nethernets:\n  eth0:\n    dhcp4: true\n",
+        "version: 2\nethernets:\n  id0:\n    match:\n      driver: virtio_net\n    dhcp4: true\n",
     )
     .with_context(|| format!("write {}", vm.network_cfg().display()))?;
 
@@ -1484,7 +1588,6 @@ fn wait_for_ssh(vm: &VmConfig) -> Result<()> {
 }
 
 fn ensure_guest_mounts(vm: &VmConfig) -> Result<()> {
-    let mnt_opts = "trans=virtio,version=9p2000.L,msize=262144";
     ssh_cmd(vm, &["sudo", "mkdir", "-p", "/app", "/target", "/work"])?;
     ssh_cmd(
         vm,
@@ -1496,67 +1599,101 @@ fn ensure_guest_mounts(vm: &VmConfig) -> Result<()> {
         ],
     )?;
 
-    if vm.fs_mode == "virtiofs" {
+    if vm.fs_mode == "rsync" {
+        // rsync mode: copy files via SSH instead of mounting
+        // Install rsync if not present (Debian minimal images don't include it)
+        eprintln!("qemu-vm: ensuring rsync is installed on guest...");
         ssh_cmd(
             vm,
             &[
                 "sudo",
                 "sh",
-                "-lc",
-                &format!("mountpoint -q /app || mount -t virtiofs -o ro workspace /app || mount -t 9p -o {mnt_opts},ro workspace /app"),
+                "-c",
+                "command -v rsync >/dev/null 2>&1 || (apt-get update -qq && apt-get install -qq -y rsync)",
             ],
         )?;
-        ssh_cmd(
-            vm,
-            &[
-                "sudo",
-                "sh",
-                "-lc",
-                &format!("mountpoint -q /target || mount -t virtiofs -o ro target /target || mount -t 9p -o {mnt_opts},ro target /target"),
-            ],
-        )?;
-        ssh_cmd(
-            vm,
-            &[
-                "sudo",
-                "sh",
-                "-lc",
-                &format!("mountpoint -q /work || mount -t virtiofs work /work || mount -t 9p -o {mnt_opts} work /work"),
-            ],
-        )?;
-    } else {
-        ssh_cmd(
-            vm,
-            &[
-                "sudo",
-                "sh",
-                "-lc",
-                &format!("mountpoint -q /app || mount -t 9p -o {mnt_opts},ro workspace /app || mount -t virtiofs -o ro workspace /app"),
-            ],
-        )?;
-        ssh_cmd(
-            vm,
-            &[
-                "sudo",
-                "sh",
-                "-lc",
-                &format!("mountpoint -q /target || mount -t 9p -o {mnt_opts},ro target /target || mount -t virtiofs -o ro target /target"),
-            ],
-        )?;
-        ssh_cmd(
-            vm,
-            &[
-                "sudo",
-                "sh",
-                "-lc",
-                &format!("mountpoint -q /work || mount -t 9p -o {mnt_opts} work /work || mount -t virtiofs work /work"),
-            ],
-        )?;
-    }
 
-    ssh_cmd(vm, &["sudo", "mount", "-o", "remount,ro", "/app"])?;
-    ssh_cmd(vm, &["sudo", "mount", "-o", "remount,ro", "/target"])?;
-    ssh_cmd(vm, &["sudo", "mount", "-o", "remount,rw", "/work"])?;
+        // Make directories writable for rsync
+        ssh_cmd(vm, &["sudo", "chown", "-R", &vm.ssh_user, "/app", "/target", "/work"])?;
+
+        eprintln!("qemu-vm: syncing workspace to /app via rsync...");
+        rsync_to_guest(
+            vm,
+            &vm.workspace,
+            "/app",
+            &[".git", "target", ".patchbay-work", "*.qcow2"],
+        )?;
+
+        eprintln!("qemu-vm: syncing target to /target via rsync...");
+        rsync_to_guest(vm, &vm.target_dir, "/target", &[])?;
+
+        // /work is just a writable directory, no need to sync
+        eprintln!("qemu-vm: rsync complete");
+    } else {
+        let mnt_opts = "trans=virtio,version=9p2000.L,msize=262144";
+
+        if vm.fs_mode == "virtiofs" {
+            ssh_cmd(
+                vm,
+                &[
+                    "sudo",
+                    "sh",
+                    "-lc",
+                    &format!("mountpoint -q /app || mount -t virtiofs -o ro workspace /app || mount -t 9p -o {mnt_opts},ro workspace /app"),
+                ],
+            )?;
+            ssh_cmd(
+                vm,
+                &[
+                    "sudo",
+                    "sh",
+                    "-lc",
+                    &format!("mountpoint -q /target || mount -t virtiofs -o ro target /target || mount -t 9p -o {mnt_opts},ro target /target"),
+                ],
+            )?;
+            ssh_cmd(
+                vm,
+                &[
+                    "sudo",
+                    "sh",
+                    "-lc",
+                    &format!("mountpoint -q /work || mount -t virtiofs work /work || mount -t 9p -o {mnt_opts} work /work"),
+                ],
+            )?;
+        } else {
+            ssh_cmd(
+                vm,
+                &[
+                    "sudo",
+                    "sh",
+                    "-lc",
+                    &format!("mountpoint -q /app || mount -t 9p -o {mnt_opts},ro workspace /app || mount -t virtiofs -o ro workspace /app"),
+                ],
+            )?;
+            ssh_cmd(
+                vm,
+                &[
+                    "sudo",
+                    "sh",
+                    "-lc",
+                    &format!("mountpoint -q /target || mount -t 9p -o {mnt_opts},ro target /target || mount -t virtiofs -o ro target /target"),
+                ],
+            )?;
+            ssh_cmd(
+                vm,
+                &[
+                    "sudo",
+                    "sh",
+                    "-lc",
+                    &format!("mountpoint -q /work || mount -t 9p -o {mnt_opts} work /work || mount -t virtiofs work /work"),
+                ],
+            )?;
+        }
+
+        ssh_cmd(vm, &["sudo", "mount", "-o", "remount,ro", "/app"])?;
+        ssh_cmd(vm, &["sudo", "mount", "-o", "remount,ro", "/target"])?;
+        ssh_cmd(vm, &["sudo", "mount", "-o", "remount,rw", "/work"])?;
+    }
 
     ssh_cmd(vm, &["test", "-f", "/app/Cargo.toml"])
         .context("/app is mounted but missing /app/Cargo.toml")?;
@@ -1592,6 +1729,31 @@ fn ssh_cmd_status(vm: &VmConfig, remote_args: &[&str]) -> Result<()> {
         cmd.arg(remote);
     }
     run_checked(&mut cmd, "ssh")
+}
+
+/// Rsync files from host to guest via SSH
+fn rsync_to_guest(vm: &VmConfig, src: &Path, dest: &str, excludes: &[&str]) -> Result<()> {
+    let mut cmd = Command::new("rsync");
+    cmd.arg("-az")
+        .arg("--delete")
+        .arg("-e")
+        .arg(format!(
+            "ssh -i {} -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile={} -o IdentitiesOnly=yes -p {}",
+            vm.ssh_key().display(),
+            vm.known_hosts().display(),
+            vm.ssh_port
+        ));
+
+    for exclude in excludes {
+        cmd.arg("--exclude").arg(exclude);
+    }
+
+    // Ensure trailing slash on source to copy contents
+    let src_str = format!("{}/", src.display());
+    cmd.arg(&src_str)
+        .arg(format!("{}@127.0.0.1:{}", vm.ssh_user, dest));
+
+    run_checked(&mut cmd, "rsync")
 }
 
 fn ssh_probe(vm: &VmConfig) -> bool {
@@ -1642,6 +1804,7 @@ fn start_vm(vm: &mut VmConfig) -> Result<()> {
 
     let (accel, cpu) = detect_accel(vm)?;
     let seed_mode = std::fs::read_to_string(vm.seed_mode_file()).unwrap_or_default();
+    let is_aarch64 = vm.qemu_bin.contains("aarch64");
 
     let mut qemu = Command::new(&vm.qemu_bin);
     qemu.arg("-name")
@@ -1658,10 +1821,20 @@ fn start_vm(vm: &mut VmConfig) -> Result<()> {
         .arg("-smp")
         .arg(&vm.cpus)
         .arg("-accel")
-        .arg(accel)
+        .arg(&accel)
         .arg("-cpu")
-        .arg(cpu)
-        .arg("-drive")
+        .arg(&cpu);
+
+    // ARM64 requires explicit machine type and UEFI firmware
+    if is_aarch64 {
+        qemu.arg("-M").arg("virt");
+        // Find UEFI firmware relative to QEMU binary
+        if let Some(efi_path) = find_aarch64_efi(&vm.qemu_bin) {
+            qemu.arg("-bios").arg(efi_path);
+        }
+    }
+
+    qemu.arg("-drive")
         .arg(format!(
             "if=virtio,format=qcow2,file={}",
             vm.disk_img().display()
@@ -1716,7 +1889,7 @@ fn start_vm(vm: &mut VmConfig) -> Result<()> {
             ))
             .arg("-device")
             .arg("vhost-user-fs-pci,chardev=workfs,tag=work");
-    } else {
+    } else if vm.fs_mode == "9p" {
         qemu.arg("-virtfs").arg(format!(
             "local,path={},mount_tag=workspace,security_model=none,multidevs=remap,id=workspace,readonly=on",
             vm.workspace.display()
@@ -1730,6 +1903,7 @@ fn start_vm(vm: &mut VmConfig) -> Result<()> {
             vm.work_dir.display()
         ));
     }
+    // rsync mode: no virtfs args, files will be synced via SSH
 
     run_checked(&mut qemu, "start qemu")?;
     persist_runtime(vm)
@@ -1768,6 +1942,38 @@ fn cargo_target_dir() -> Result<PathBuf> {
         .and_then(|s| s.as_str())
         .context("cargo metadata missing target_directory")?;
     Ok(PathBuf::from(dir))
+}
+
+/// Find UEFI firmware for aarch64 QEMU, searching relative to the QEMU binary
+fn find_aarch64_efi(qemu_bin: &str) -> Option<PathBuf> {
+    // Try to find edk2-aarch64-code.fd relative to QEMU binary using `which`
+    if let Ok(output) = Command::new("which").arg(qemu_bin).output() {
+        if output.status.success() {
+            let qemu_path = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
+            if let Some(bin_dir) = qemu_path.parent() {
+                // Check ../share/qemu/ (typical Nix/Homebrew layout)
+                let share_qemu = bin_dir.join("../share/qemu/edk2-aarch64-code.fd");
+                if let Ok(canonical) = share_qemu.canonicalize() {
+                    if canonical.exists() {
+                        return Some(canonical);
+                    }
+                }
+            }
+        }
+    }
+    // Fallback paths
+    for path in [
+        "/opt/homebrew/share/qemu/edk2-aarch64-code.fd",
+        "/usr/share/qemu/edk2-aarch64-code.fd",
+        "/usr/share/AAVMF/AAVMF_CODE.fd",
+        "/usr/share/edk2/aarch64/QEMU_EFI.fd",
+    ] {
+        let p = PathBuf::from(path);
+        if p.exists() {
+            return Some(p);
+        }
+    }
+    None
 }
 
 fn shared_image_dir() -> Result<PathBuf> {

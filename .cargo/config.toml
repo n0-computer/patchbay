@@ -1,0 +1,7 @@
+[target.aarch64-unknown-linux-musl]
+linker = ".zig-cache/bin/aarch64-linux-musl-zig-cc"
+rustflags = ["-C", "link-self-contained=no"]
+
+[target.x86_64-unknown-linux-musl]
+linker = ".zig-cache/bin/x86_64-linux-musl-zig-cc"
+rustflags = ["-C", "link-self-contained=no"]

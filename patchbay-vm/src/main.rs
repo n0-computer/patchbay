@@ -7,6 +7,14 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use patchbay_server::DEFAULT_UI_BIND;
 
+fn default_test_target() -> String {
+    if std::env::consts::ARCH == "aarch64" {
+        "aarch64-unknown-linux-musl".to_string()
+    } else {
+        "x86_64-unknown-linux-musl".to_string()
+    }
+}
+
 #[derive(Parser)]
 #[command(name = "patchbay-vm", about = "Standalone VM runner for patchbay")]
 struct Cli {
@@ -62,7 +70,7 @@ enum Command {
     },
     /// Build and run tests in VM (replaces legacy test-vm flow).
     Test {
-        #[arg(long, default_value = "x86_64-unknown-linux-musl")]
+        #[arg(long, default_value_t = default_test_target())]
         target: String,
         #[arg(long = "package")]
         packages: Vec<String>,
