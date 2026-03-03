@@ -649,7 +649,7 @@ async fn inspect_command(input: PathBuf, work_dir: PathBuf) -> Result<()> {
         let name = router.name.clone();
         let r = lab
             .router_by_name(&name)
-            .with_context(|| "unknown router '{name}'")?;
+            .with_context(|| format!("unknown router '{name}'"))?;
         let child = r.spawn_command_sync(keeper_commmand())?;
         node_keeper_pids.insert(name.clone(), child.id());
         node_namespaces.insert(name.clone(), r.ns().to_string());
@@ -660,7 +660,7 @@ async fn inspect_command(input: PathBuf, work_dir: PathBuf) -> Result<()> {
     for name in topo.device.keys() {
         let d = lab
             .device_by_name(name)
-            .with_context(|| "unknown device '{name}'")?;
+            .with_context(|| format!("unknown device '{name}'"))?;
         let child = d.spawn_command_sync(keeper_commmand())?;
         node_keeper_pids.insert(name.clone(), child.id());
         node_namespaces.insert(name.clone(), d.ns().to_string());

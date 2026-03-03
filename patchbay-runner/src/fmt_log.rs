@@ -172,8 +172,7 @@ pub fn run(path: Option<&Path>, follow: bool) -> Result<()> {
     }
 
     // Follow only makes sense for files.
-    if follow && path.is_some() {
-        let path = path.unwrap();
+    if let Some(path) = path.filter(|_| follow) {
         let mut last_pos = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
         loop {
             std::thread::sleep(std::time::Duration::from_millis(100));

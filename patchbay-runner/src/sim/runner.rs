@@ -1290,17 +1290,17 @@ fn collect_node_logs(
 // Step expansion: extends, groups, templates
 // ─────────────────────────────────────────────
 
-/// Load template and group definitions from `[[extends]]` files, merging with inline definitions.
-/// Inline definitions override extends.
-fn load_extends(
-    sim: &SimFile,
-    sim_path: &Path,
-) -> Result<(
+/// Resolved definitions from `[[extends]]` files merged with inline definitions.
+type ExtendsDefs = (
     HashMap<String, StepTemplateDef>,
     HashMap<String, StepGroupDef>,
     Vec<BinarySpec>,
     Vec<PrepareSpec>,
-)> {
+);
+
+/// Load template and group definitions from `[[extends]]` files, merging with inline definitions.
+/// Inline definitions override extends.
+fn load_extends(sim: &SimFile, sim_path: &Path) -> Result<ExtendsDefs> {
     let mut templates: HashMap<String, StepTemplateDef> = HashMap::new();
     let mut groups: HashMap<String, StepGroupDef> = HashMap::new();
     let mut binaries: Vec<BinarySpec> = Vec::new();

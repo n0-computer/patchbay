@@ -621,8 +621,28 @@ impl LabState {
                 }
             }
             LabEventKind::InterfaceRemoved { device, iface_name } => {
+                // Find which router this interface was on before removing it.
+                let router_name = self
+                    .devices
+                    .get(device)
+                    .and_then(|d| d.interfaces.iter().find(|i| i.name == *iface_name))
+                    .map(|i| i.router.clone());
                 if let Some(d) = self.devices.get_mut(device) {
                     d.interfaces.retain(|i| i.name != *iface_name);
+                }
+                // Remove device from router's device list if it has no remaining
+                // interfaces on that router.
+                if let Some(rn) = router_name {
+                    let still_connected = self
+                        .devices
+                        .get(device)
+                        .map(|d| d.interfaces.iter().any(|i| i.router == rn))
+                        .unwrap_or(false);
+                    if !still_connected {
+                        if let Some(r) = self.routers.get_mut(&rn) {
+                            r.devices.retain(|d| d != device);
+                        }
+                    }
                 }
             }
             LabEventKind::InterfaceReplugged {
@@ -661,12 +681,8 @@ impl LabState {
                 if let Some(d) = self.devices.get_mut(device) {
                     for i in &mut d.interfaces {
                         if i.name == *iface_name {
-                            if new_ip.is_some() {
-                                i.ip = *new_ip;
-                            }
-                            if new_ip_v6.is_some() {
-                                i.ip_v6 = *new_ip_v6;
-                            }
+                            i.ip = *new_ip;
+                            i.ip_v6 = *new_ip_v6;
                         }
                     }
                 }

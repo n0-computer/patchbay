@@ -96,29 +96,36 @@ struct LogEntry {
 
 // ── Path safety ────────────────────────────────────────────────────
 
-/// Returns `None` if the path contains `..` or is absolute.
+/// Returns `None` if the resolved path escapes `base`.
+///
+/// Canonicalizes both paths to defeat symlink traversal.
 fn safe_run_dir(base: &Path, run: &str) -> Option<PathBuf> {
     if run.contains("..") || run.starts_with('/') {
         return None;
     }
     let p = base.join(run);
-    // Resolved path must still be under base.
-    if !p.starts_with(base) {
+    let canonical = p.canonicalize().ok()?;
+    let canonical_base = base.canonicalize().ok()?;
+    if !canonical.starts_with(&canonical_base) {
         return None;
     }
-    Some(p)
+    Some(canonical)
 }
 
-/// Returns `None` if the sub-path tries to escape via `..`.
+/// Returns `None` if the sub-path escapes `run_dir`.
+///
+/// Canonicalizes both paths to defeat symlink traversal.
 fn safe_sub_path(run_dir: &Path, sub: &str) -> Option<PathBuf> {
     if sub.contains("..") {
         return None;
     }
     let p = run_dir.join(sub);
-    if !p.starts_with(run_dir) {
+    let canonical = p.canonicalize().ok()?;
+    let canonical_run = run_dir.canonicalize().ok()?;
+    if !canonical.starts_with(&canonical_run) {
         return None;
     }
-    Some(p)
+    Some(canonical)
 }
 
 // ── Router construction ────────────────────────────────────────────
@@ -148,11 +155,11 @@ fn build_router(state: AppState) -> Router {
         .with_state(state)
 }
 
-/// Creates an axum [`Router`] and a [`ServerHandle`] for registering live labs.
-pub fn router(base: PathBuf) -> (Router, ServerHandle) {
-    let (state, handle) = build_state(base);
-    // Spawn background run scanner.
-    let scan_state = state.clone();
+/// Spawns the background run scanner task.
+///
+/// Must be called from within a tokio runtime context.
+fn spawn_run_scanner(state: AppState) {
+    let scan_state = state;
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(RUN_SCAN_INTERVAL);
         let mut last_count = 0usize;
@@ -166,7 +173,28 @@ pub fn router(base: PathBuf) -> (Router, ServerHandle) {
             }
         }
     });
-    (build_router(state), handle)
+}
+
+/// Creates an axum [`Router`] and a [`ServerHandle`] for registering live labs.
+///
+/// The background run scanner is started lazily on first request, so
+/// the router can be constructed from a sync context (e.g. [`start_server`]).
+pub fn router(base: PathBuf) -> (Router, ServerHandle) {
+    let (state, handle) = build_state(base);
+    let router = build_router(state.clone());
+    // Wrap in a middleware that starts the scanner on first request.
+    let scanner_started = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let router = router.layer(axum::middleware::from_fn(move |req, next: axum::middleware::Next| {
+        let state = state.clone();
+        let started = scanner_started.clone();
+        async move {
+            if !started.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                spawn_run_scanner(state);
+            }
+            next.run(req).await
+        }
+    }));
+    (router, handle)
 }
 
 /// Creates an axum [`Router`] for static mode (no live labs).
@@ -199,10 +227,14 @@ pub async fn serve_live(lab: &Lab, base: PathBuf, bind: &str) -> anyhow::Result<
     Ok(())
 }
 
-/// Handle returned by [`start_server`]. Keeps the server alive until dropped.
+/// Handle returned by [`start_server`].
+///
+/// The server runs on a background thread and is shut down when this handle
+/// is dropped.
 pub struct RunningServer {
     addr: std::net::SocketAddr,
-    _join: std::thread::JoinHandle<()>,
+    shutdown: Option<tokio::sync::oneshot::Sender<()>>,
+    join: Option<std::thread::JoinHandle<()>>,
 }
 
 impl RunningServer {
@@ -218,6 +250,19 @@ impl RunningServer {
     }
 }
 
+impl Drop for RunningServer {
+    fn drop(&mut self) {
+        // Signal the server to shut down.
+        if let Some(tx) = self.shutdown.take() {
+            let _ = tx.send(());
+        }
+        // Wait for the thread to finish.
+        if let Some(join) = self.join.take() {
+            let _ = join.join();
+        }
+    }
+}
+
 /// Start the devtools server on a background thread (sync-friendly).
 ///
 /// Returns a handle that keeps the server alive. The server stops when
@@ -227,6 +272,7 @@ pub fn start_server(base: PathBuf, bind: &str) -> anyhow::Result<RunningServer> 
     let addr = listener.local_addr()?;
     listener.set_nonblocking(true)?;
     let app = router_static(base);
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
 
     let join = std::thread::Builder::new()
         .name("patchbay-server".into())
@@ -238,11 +284,20 @@ pub fn start_server(base: PathBuf, bind: &str) -> anyhow::Result<RunningServer> 
             rt.block_on(async move {
                 let listener = tokio::net::TcpListener::from_std(listener.try_clone().unwrap())
                     .expect("convert TcpListener");
-                axum::serve(listener, app).await.ok();
+                axum::serve(listener, app)
+                    .with_graceful_shutdown(async {
+                        let _ = shutdown_rx.await;
+                    })
+                    .await
+                    .ok();
             });
         })?;
 
-    Ok(RunningServer { addr, _join: join })
+    Ok(RunningServer {
+        addr,
+        shutdown: Some(shutdown_tx),
+        join: Some(join),
+    })
 }
 
 // ── Route handlers ─────────────────────────────────────────────────
@@ -373,9 +428,16 @@ async fn run_events_sse(
                     continue;
                 }
                 let new_bytes = &contents[pos as usize..];
-                pos = len;
-                let new_str = String::from_utf8_lossy(new_bytes);
-                for line in new_str.lines() {
+                // Only advance cursor to the last complete newline to avoid
+                // consuming a partial line written concurrently.
+                let advance = match new_bytes.iter().rposition(|&b| b == b'\n') {
+                    Some(idx) => idx + 1,
+                    None => continue, // no complete line yet
+                };
+                let complete = &new_bytes[..advance];
+                pos += advance as u64;
+                let text = String::from_utf8_lossy(complete);
+                for line in text.lines() {
                     if let Ok(event) = serde_json::from_str::<LabEvent>(line) {
                         if event.opid > after {
                             yield event;

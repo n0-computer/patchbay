@@ -78,7 +78,11 @@ fn setup_namespace_thread(
 /// Private mount namespace + optional DNS overlay bind-mounts.
 /// Called on every thread that enters a namespace (sync, async, user, blocking pool).
 fn apply_mount_overlay(overlay: Option<&DnsOverlay>) {
-    let _ = unshare(CloneFlags::CLONE_NEWNS);
+    if overlay.is_some() {
+        if let Err(e) = unshare(CloneFlags::CLONE_NEWNS) {
+            tracing::warn!("unshare(CLONE_NEWNS) failed: {e} — DNS overlay bind-mounts may affect the host");
+        }
+    }
     if let Some(o) = overlay {
         o.apply();
     }
