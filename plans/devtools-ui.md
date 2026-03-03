@@ -1,5 +1,33 @@
 # Devtools & UI: Observability, Event System, and Live Server
 
+## Status: Complete
+
+All 8 phases implemented. Additional work beyond the original plan:
+
+- **Unified UI** — merged DevtoolsApp and runner App into single unified shell
+  with run selector, topology/events/logs/timeline/perf tabs
+- **Lazy file creation** — `LazyFile` defers `File::create` until first write,
+  no empty files for silent namespaces
+- **Removed `devtools` subcommand** — merged into `serve` (takes outdir positional arg)
+- **Path traversal fix** in `run_events_sse` SSE handler
+- **Writer subscription ordering** — subscribe before initial events to capture
+  `LabCreated`/`IxCreated`
+- **Per-namespace tracing guard** properly dropped on thread exit (no `mem::forget`)
+- **LogsTab** — JSON tracing format parsing, level filter toggles, search with
+  next/prev navigation
+- **TimelineTab** — lab lifecycle events integrated into timeline grid
+- **TopologyGraph** — node selection highlighting, differentiated shapes
+  (circular IX, rounded routers, square devices)
+- **E2E test** — playwright test verifying all views with data-driven assertions
+
+### Remaining future work
+- Counter collection (Phase 4 — `PacketCounters` events at 1Hz)
+- `patchbay fmt-log -r .` recursive conversion
+- Migrate `patchbay-vm` from `patchbay-utils/serve.rs` to `patchbay-server`
+- `applyEvent` reducer handles only 6 event kinds — add remaining kinds
+  (`link_condition_changed`, `interface_added`, etc.)
+- SSE historical+live race window (subscribe before file read)
+
 ## Overview
 
 This plan adds first-class observability to patchbay: typed lab events with

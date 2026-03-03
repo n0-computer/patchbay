@@ -12,6 +12,7 @@
 
 ## Completed
 
+- [devtools-ui.md](devtools-ui.md) - priority 5; all phases complete, unified UI, per-namespace tracing, event system, axum server
 - [real-world-conditions.md](real-world-conditions.md) - priority 5; all 6 phases complete (NAT, impairment, MTU/removal/IP, hairpin, region routing, firewall)
 - [region-routing.md](region-routing.md) - priority 5; per-region router namespaces, 198.18.0.0/15 address space, inter-region veths, break/restore
 - [no-globals-better-spawn.md](no-globals-better-spawn.md) - priority 5; globals removed, RT handle cloning, Ix handle, namespace-free helpers

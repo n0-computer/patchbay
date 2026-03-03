@@ -10,24 +10,25 @@ repository.workspace = true
 
 [dependencies]
 anyhow = "1"
-chrono = { version = "0.4", default-features = false, features = ["clock"] }
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 derive_more = { version = "2.1.1", features = ["display"] }
 futures = "0.3"
-ipnet = "2.11"
+ipnet = { version = "2.11", features = ["serde"] }
 libc = "0.2"
 netlink-packet-route = "0.28"
 nix = { version = "0.30", features = ["sched", "mount", "fs", "signal", "process", "user", "ioctl"] }
 rtnetlink = "0.20"
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 strum = { version = "0.26", features = ["derive"] }
 tokio = { version = "1", features = ["rt", "macros", "sync", "time", "fs", "net", "io-util", "process"] }
 tokio-util = "0.7"
 toml = "0.8"
 tracing = "0.1"
+tracing-core = "0.1"
 
 [dev-dependencies]
 ctor = "0.2"
 futures-buffered = "0.2"
 hickory-resolver = { version = "0.25", default-features = false, features = ["system-config", "tokio"] }
 n0-tracing-test = "0.3.0"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }

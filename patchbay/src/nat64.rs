@@ -12,8 +12,10 @@
 //!   → IPv4 routing + nftables masquerade → IX → destination
 //! ```
 
-use std::net::{Ipv4Addr, Ipv6Addr};
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::{
+    net::{Ipv4Addr, Ipv6Addr},
+    os::fd::{AsRawFd, FromRawFd, OwnedFd},
+};
 
 use anyhow::{Context, Result};
 use tracing::{debug, trace, warn};
@@ -404,8 +406,10 @@ pub(crate) async fn run_nat64_loop(
     v4_src: Ipv4Addr,
     cancel: tokio_util::sync::CancellationToken,
 ) -> Result<()> {
-    use std::collections::HashMap;
-    use std::sync::{Arc, Mutex};
+    use std::{
+        collections::HashMap,
+        sync::{Arc, Mutex},
+    };
 
     let tun = tokio::io::unix::AsyncFd::new(tun_fd).context("AsyncFd on TUN")?;
     let translations: Arc<Mutex<HashMap<(Ipv4Addr, u16), Ipv6Addr>>> =

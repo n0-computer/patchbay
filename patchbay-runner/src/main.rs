@@ -1,5 +1,6 @@
 //! Runs the `patchbay` CLI entrypoint.
 
+mod fmt_log;
 mod sim;
 
 use std::{
@@ -9,7 +10,7 @@ use std::{
 use anyhow::{anyhow, bail, Context, Result};
 use clap::{Parser, Subcommand};
 use patchbay::check_caps;
-use patchbay_utils::ui::{start_ui_server, DEFAULT_UI_BIND};
+use patchbay_server::DEFAULT_UI_BIND;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -87,11 +88,11 @@ enum Command {
         #[arg(long, default_value_t = false)]
         no_build: bool,
     },
-    /// Serve embedded UI + work directory over HTTP.
+    /// Serve embedded devtools UI over HTTP for a lab output directory.
     Serve {
-        /// Work directory containing run outputs.
-        #[arg(long, default_value = ".patchbay-work")]
-        work_dir: PathBuf,
+        /// Output directory containing lab run subdirectories.
+        #[arg(default_value = ".patchbay-work")]
+        outdir: PathBuf,
         /// Bind address for HTTP server.
         #[arg(long, default_value = DEFAULT_UI_BIND)]
         bind: String,
@@ -114,6 +115,16 @@ enum Command {
         /// Work directory for inspect session metadata.
         #[arg(long, default_value = ".patchbay-work")]
         work_dir: PathBuf,
+    },
+    /// Format JSON log files as human-readable ANSI output.
+    ///
+    /// Reads from stdin if no file is specified.
+    FmtLog {
+        /// Path to a JSON log file ({name}.log). Reads stdin if omitted.
+        file: Option<PathBuf>,
+        /// Follow the file for new lines (like tail -f). Ignored for stdin.
+        #[arg(short = 'f', long, default_value_t = false)]
+        follow: bool,
     },
     /// Run a command inside a node namespace from an inspect session.
     RunIn {
@@ -155,14 +166,18 @@ async fn tokio_main() -> Result<()> {
         } => {
             check_caps()?;
             install_signal_cleanup_handler(vec![])?;
-            let _server = if open {
-                let srv = start_ui_server(work_dir.clone(), &bind)?;
-                println!("patchbay UI: {}", srv.url());
-                srv.open_browser()?;
-                Some(srv)
-            } else {
-                None
-            };
+            if open {
+                let bind_addr = bind.clone();
+                let work = work_dir.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = patchbay_server::serve(work, &bind_addr).await {
+                        tracing::error!("server error: {e}");
+                    }
+                });
+                println!("patchbay: http://{bind}/");
+                let url = format!("http://{bind}/");
+                let _ = std::process::Command::new("xdg-open").arg(&url).spawn();
+            }
             let run_spec = resolve_run_spec(sims, repo, r#ref, clone, &work_dir)?;
             let res = sim::run_sims(
                 run_spec.sims,
@@ -174,9 +189,9 @@ async fn tokio_main() -> Result<()> {
             )
             .await;
             if open && res.is_ok() {
-                println!("run finished; UI server still running (Ctrl-C to exit)");
+                println!("run finished; server still running (Ctrl-C to exit)");
                 loop {
-                    std::thread::sleep(Duration::from_secs(60));
+                    tokio::time::sleep(Duration::from_secs(60)).await;
                 }
             }
             res
@@ -200,20 +215,15 @@ async fn tokio_main() -> Result<()> {
             )
             .await
         }
-        Command::Serve {
-            work_dir,
-            bind,
-            open,
-        } => {
-            let _server = start_ui_server(work_dir, &bind)?;
-            println!("patchbay UI: {}", _server.url());
+        Command::Serve { outdir, bind, open } => {
+            println!("patchbay: http://{bind}/");
             if open {
-                _server.open_browser()?;
+                let url = format!("http://{bind}/");
+                let _ = std::process::Command::new("xdg-open").arg(&url).spawn();
             }
-            loop {
-                std::thread::sleep(Duration::from_secs(60));
-            }
+            patchbay_server::serve(outdir, &bind).await
         }
+        Command::FmtLog { file, follow } => fmt_log::run(file.as_deref(), follow),
         Command::Cleanup { prefixes } => cleanup_command(prefixes),
         Command::Inspect { input, work_dir } => inspect_command(input, work_dir).await,
         Command::RunIn {

@@ -1,5 +1,7 @@
 //! Firewall presets and configuration types.
 
+use serde::{Deserialize, Serialize};
+
 /// Firewall preset for a router's forward chain.
 ///
 /// Firewall rules are applied as nftables rules in a separate `inet fw` table
@@ -8,7 +10,8 @@
 ///
 /// All presets expand to a [`FirewallConfig`] via [`Firewall::to_config`].
 /// Use [`Firewall::Custom`] for full control.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Firewall {
     /// No filtering beyond NAT (default).
     #[default]
@@ -53,7 +56,8 @@ pub enum Firewall {
 ///
 /// Controls which destination ports are allowed for outbound traffic
 /// traversing the router's forward chain.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum PortPolicy {
     /// All destination ports are allowed (no filtering).
     #[default]
@@ -75,7 +79,7 @@ pub enum PortPolicy {
 ///     .outbound_udp(patchbay::PortPolicy::Allow(vec![53]))
 ///     .build();
 /// ```
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct FirewallConfig {
     /// Block unsolicited inbound traffic on the WAN interface (RFC 6092).
     /// When true, only established/related return traffic is allowed inbound.

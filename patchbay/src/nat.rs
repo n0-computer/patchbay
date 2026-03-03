@@ -1,6 +1,6 @@
 //! NAT behavior presets and configuration types.
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// NAT behavior preset for common real-world equipment.
 ///
@@ -10,7 +10,16 @@ use serde::Deserialize;
 /// - EIF: Endpoint-Independent Filtering (any host can reach the mapped port)
 /// - APDF: Address-and-Port-Dependent Filtering (only contacted host:port can reply)
 #[derive(
-    Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, strum::EnumIter, strum::Display,
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    strum::EnumIter,
+    strum::Display,
 )]
 #[serde(rename_all = "kebab-case")]
 pub enum Nat {
@@ -90,7 +99,6 @@ pub enum Nat {
     ///         .build(),
     /// );
     /// ```
-    #[serde(skip)]
     #[strum(disabled)]
     Custom(NatConfig),
 }
@@ -104,7 +112,8 @@ impl From<NatConfig> for Nat {
 /// NAT mapping behavior per RFC 4787 Section 4.1.
 ///
 /// Controls how the NAT assigns external ports when translating outbound packets.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum NatMapping {
     /// Same external port for all destinations (EIM).
     ///
@@ -120,7 +129,8 @@ pub enum NatMapping {
 /// NAT filtering behavior per RFC 4787 Section 5.
 ///
 /// Controls which inbound packets the NAT allows through to the internal host.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum NatFiltering {
     /// Any external host can send to the mapped port (full cone).
     ///
@@ -133,7 +143,7 @@ pub enum NatFiltering {
 }
 
 /// Conntrack timeout configuration for a NAT profile.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConntrackTimeouts {
     /// Timeout for a single unreplied UDP packet (seconds).
     pub udp: u32,
@@ -170,7 +180,7 @@ impl Default for ConntrackTimeouts {
 ///     .udp_stream_timeout(120)
 ///     .build();
 /// ```
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NatConfig {
     /// How outbound port mapping works.
     pub mapping: NatMapping,
@@ -321,7 +331,7 @@ impl Nat {
 }
 
 /// IPv6 NAT mode for a router.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum NatV6Mode {
     /// No translation; devices use global unicast directly.
@@ -343,7 +353,7 @@ pub enum NatV6Mode {
 }
 
 /// Selects which IP address families a router supports.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum IpSupport {
     /// IPv4 only (default, backwards-compatible).

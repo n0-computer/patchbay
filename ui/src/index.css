@@ -4,7 +4,7 @@
     --surface2: #21262d;
     --border: #30363d;
     --text: #c9d1d9;
-    --text-muted: #6e7681;
+    --text-muted: #8b949e;
     --accent: #58a6ff;
     --green: #3fb950;
     --yellow: #d29922;
@@ -16,7 +16,7 @@
     --level-warn: #d29922;
     --level-info: #3fb950;
     --level-debug: #58a6ff;
-    --level-trace: #6e7681;
+    --level-trace: #8b949e;
 }
 
 *,
@@ -387,9 +387,12 @@ tbody td {
     color: var(--text-muted);
     margin-right: 8px;
 }
+.log-spans {
+    color: var(--text);
+    font-weight: bold;
+}
 .log-target {
     color: var(--text-muted);
-    margin-right: 6px;
     font-size: 11px;
 }
 .log-msg {
@@ -397,20 +400,25 @@ tbody td {
 }
 .log-fields {
     color: var(--text-muted);
-    margin-left: 20px;
-    font-size: 11px;
 }
 .log-raw {
     color: var(--text-muted);
     white-space: pre-wrap;
     word-break: break-all;
 }
-.log-iroh-events {
+.log-events {
     background: rgba(212, 153, 34, 0.06);
 }
 .log-entry.jump-hit {
     background: #24324a;
     outline: 1px solid var(--accent);
+}
+.log-entry.search-hit {
+    background: rgba(210, 153, 34, 0.1);
+}
+.log-entry.search-current {
+    background: rgba(210, 153, 34, 0.25);
+    outline: 1px solid var(--yellow);
 }
 
 /* ── Timeline tab ── */
@@ -471,6 +479,9 @@ tbody td {
 .timeline-time-cell {
     color: var(--text-muted);
     font-size: 11px;
+    min-width: 80px;
+    max-width: 100px;
+    width: 80px;
 }
 .timeline-event-cell.has-event {
     cursor: pointer;
@@ -558,6 +569,87 @@ tbody td {
 }
 .selected-row {
     background: var(--surface2) !important;
+}
+
+/* ── Topology ── */
+.topology-node {
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--surface);
+    padding: 8px 12px;
+    font-size: 11px;
+    white-space: pre-line;
+    min-width: 160px;
+    text-align: center;
+}
+.topology-node--ix {
+    border-color: var(--accent);
+    background: #1a2840;
+}
+.topology-node--router {
+    border-color: var(--green);
+    background: #1a3a1e;
+}
+.topology-node--device {
+    border-color: var(--text-muted);
+}
+.topology-node--selected {
+    border-color: var(--accent) !important;
+    box-shadow: 0 0 0 2px var(--accent);
+}
+
+/* ── Node detail sidebar ── */
+.node-detail {
+    font-size: 12px;
+}
+.node-detail h3 {
+    font-size: 14px;
+    margin-bottom: 8px;
+    color: var(--accent);
+}
+.node-detail h4 {
+    font-size: 12px;
+    color: var(--text-muted);
+    margin-bottom: 4px;
+}
+.node-detail table {
+    font-size: 11px;
+}
+.node-detail td {
+    padding: 2px 6px;
+}
+
+/* ── KV pairs ── */
+.kv-pairs {
+    display: inline;
+}
+.kv-pair {
+    margin-right: 10px;
+    white-space: nowrap;
+}
+.kv-key {
+    color: var(--accent);
+}
+.kv-eq {
+    color: var(--text-muted);
+}
+.kv-value {
+    color: var(--text);
+}
+.kv-empty {
+    color: var(--text-muted);
+    font-style: italic;
+}
+
+/* ── Events tab ── */
+.events-time-cell {
+    color: var(--text-muted);
+    font-size: 11px;
+    white-space: nowrap;
+}
+.events-kind {
+    color: var(--yellow);
+    font-weight: 600;
 }
 
 /* ── Misc ── */

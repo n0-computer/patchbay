@@ -4,7 +4,7 @@ use tokio::process::Command;
 /// Parameters for `tc netem` impairment.
 ///
 /// All fields default to zero (no impairment). Set only the fields you need.
-#[derive(Clone, Copy, Debug, Default, PartialEq, serde::Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct LinkLimits {
     /// Rate limit in kbit/s (0 = unlimited).

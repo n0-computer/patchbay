@@ -73,7 +73,11 @@ use anyhow::{anyhow, bail, Context, Result};
 
 /// TOML configuration structures used by [`Lab::load`].
 pub mod config;
+/// Shared filename constants for the run output directory.
+pub mod consts;
 pub(crate) mod core;
+/// Lab event system: typed events, state reducer, file writer.
+pub mod event;
 pub(crate) mod firewall;
 pub(crate) mod handles;
 mod lab;
@@ -81,6 +85,8 @@ pub(crate) mod nat;
 pub(crate) mod nat64;
 mod netlink;
 mod netns;
+#[path = "tracing.rs"]
+mod ns_tracing;
 mod qdisc;
 /// Probe and reflector helpers for integration tests.
 pub mod test_utils;
@@ -89,19 +95,23 @@ mod tests;
 mod userns;
 /// String sanitizers for filenames and environment variable names.
 pub mod util;
+/// Event file writer and run discovery.
+pub mod writer;
 
 pub use firewall::PortPolicy;
 pub use ipnet::Ipv4Net;
 pub use lab::{
     ConntrackTimeouts, DefaultRegions, Device, DeviceBuilder, DeviceIface, Firewall,
-    FirewallConfig, FirewallConfigBuilder, IpSupport, Ix, Lab, LinkCondition, LinkLimits, Nat,
-    NatConfig, NatConfigBuilder, NatFiltering, NatMapping, NatV6Mode, ObservedAddr, Region,
+    FirewallConfig, FirewallConfigBuilder, IpSupport, Ix, Lab, LabOpts, LinkCondition, LinkLimits,
+    Nat, NatConfig, NatConfigBuilder, NatFiltering, NatMapping, NatV6Mode, ObservedAddr, Region,
     RegionLink, Router, RouterBuilder, RouterPreset,
 };
 
 pub use crate::{
     core::NodeId,
+    event::{IfaceCounters, IfaceSnapshot, LabEvent, LabEventKind, LabState},
     userns::{init_userns, init_userns_for_ctor},
+    writer::{discover_runs, RunInfo},
 };
 
 /// Verifies the process has enough privileges to manage namespaces, routes, and raw sockets.

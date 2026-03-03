@@ -89,4 +89,9 @@ export default defineConfig({
       output: { inlineDynamicImports: true },
     },
   },
+  server: {
+    proxy: {
+      '/api': 'http://localhost:3000',
+    },
+  },
 })

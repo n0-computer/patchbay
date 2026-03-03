@@ -3,7 +3,7 @@
 use std::{
     collections::HashMap,
     net::{Ipv4Addr, Ipv6Addr, SocketAddr},
-    path::Path,
+    path::{Path, PathBuf},
     process::Command,
     sync::{
         atomic::{AtomicU64, Ordering},
@@ -22,6 +22,7 @@ use crate::{
         self, apply_or_remove_impair, setup_device_async, setup_root_ns_async, setup_router_async,
         CoreConfig, DownstreamPool, IfaceBuild, LabInner, NetworkCore, NodeId, RouterSetupData,
     },
+    event::{DeviceState, LabEvent, LabEventKind, RouterState},
     netlink::Netlink,
 };
 
@@ -61,7 +62,8 @@ pub use crate::{
 ///
 /// Named presets model common last-mile conditions. Use [`LinkCondition::Manual`]
 /// with [`LinkLimits`] for full control over all `tc netem` parameters.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum LinkCondition {
     /// Wired LAN (1G Ethernet). No impairment.
     ///
@@ -265,13 +267,67 @@ pub struct Lab {
     pub(crate) inner: Arc<LabInner>,
 }
 
+/// Options for constructing a [`Lab`].
+///
+/// Use the builder methods to configure output directory and label, then pass
+/// to [`Lab::with_opts`].
+///
+/// # Example
+/// ```no_run
+/// # use patchbay::{Lab, LabOpts};
+/// # #[tokio::main(flavor = "current_thread")]
+/// # async fn main() -> anyhow::Result<()> {
+/// let lab = Lab::with_opts(
+///     LabOpts::default()
+///         .outdir("/tmp/patchbay-out")
+///         .label("my-test"),
+/// )
+/// .await?;
+/// # Ok(())
+/// # }
+/// ```
+#[derive(Default)]
+pub struct LabOpts {
+    outdir: Option<PathBuf>,
+    label: Option<String>,
+}
+
+impl LabOpts {
+    /// Sets the output directory for event log and state files.
+    pub fn outdir(mut self, path: impl Into<PathBuf>) -> Self {
+        self.outdir = Some(path.into());
+        self
+    }
+
+    /// Sets a human-readable label for this lab (used in output directory naming).
+    pub fn label(mut self, label: impl Into<String>) -> Self {
+        self.label = Some(label.into());
+        self
+    }
+
+    /// Reads the output directory from the `PATCHBAY_OUTDIR` environment variable,
+    /// if set. Does nothing if the variable is absent.
+    pub fn outdir_from_env(mut self) -> Self {
+        if let Ok(v) = std::env::var("PATCHBAY_OUTDIR") {
+            self.outdir = Some(v.into());
+        }
+        self
+    }
+}
+
 impl Lab {
     // ── Constructors ────────────────────────────────────────────────────
 
     /// Creates a new lab with default address ranges and IX settings.
     ///
-    /// Sets up the root network namespace and IX bridge before returning.
+    /// Reads `PATCHBAY_OUTDIR` from the environment for event output.
+    /// Use [`Lab::with_opts`] for explicit configuration.
     pub async fn new() -> Result<Self> {
+        Self::with_opts(LabOpts::default().outdir_from_env()).await
+    }
+
+    /// Creates a new lab with the given options.
+    pub async fn with_opts(opts: LabOpts) -> Result<Self> {
         let pid = std::process::id();
         let pid_tag = pid % 9999 + 1;
         let lab_seq = LAB_COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -280,6 +336,7 @@ impl Lab {
         let root_ns = format!("lab{lab_seq}-root");
         let bridge_tag = format!("p{}{}", pid_tag, uniq);
         let ix_gw = Ipv4Addr::new(198, 18, 0, 1);
+        let label: Option<Arc<str>> = opts.label.map(|s| Arc::from(s.as_str()));
         let lab_span = debug_span!("lab", id = lab_seq);
         {
             let _enter = lab_span.enter();
@@ -302,13 +359,36 @@ impl Lab {
             span: lab_span,
         })
         .context("failed to create DNS entries directory")?;
-        let netns = Arc::new(crate::netns::NetnsManager::new());
+
+        // Compute run_dir before constructing LabInner (needed for writer + tracing).
+        let run_dir = opts.outdir.as_ref().map(|base| {
+            let label_or_prefix = label
+                .as_ref()
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| prefix.clone());
+            let ts = chrono::Local::now().format("%Y%m%d_%H%M%S");
+            base.join(format!("{ts}-{label_or_prefix}"))
+        });
+
+        let mut netns_mgr = crate::netns::NetnsManager::new();
+        if let Some(ref rd) = run_dir {
+            netns_mgr.set_run_dir(rd.clone());
+        }
+        let netns = Arc::new(netns_mgr);
         let cancel = tokio_util::sync::CancellationToken::new();
+        let (events_tx, _rx) = tokio::sync::broadcast::channel::<LabEvent>(256);
+        drop(_rx);
+
         let lab = Self {
             inner: Arc::new(LabInner {
                 core: std::sync::Mutex::new(core),
                 netns: Arc::clone(&netns),
                 cancel,
+                opid: AtomicU64::new(0),
+                events_tx,
+                label: label.clone(),
+                ns_to_name: std::sync::Mutex::new(HashMap::new()),
+                run_dir: run_dir.clone(),
             }),
         };
         // Initialize root namespace and IX bridge eagerly — no lazy-init race.
@@ -316,12 +396,50 @@ impl Lab {
         setup_root_ns_async(&cfg, &netns)
             .await
             .context("failed to set up root namespace")?;
+
+        // Spawn file writer if outdir is configured — subscribe before emitting
+        // initial events so the writer captures LabCreated and IxCreated.
+        if let Some(ref run_dir) = run_dir {
+            crate::writer::spawn_writer(run_dir.clone(), lab.inner.events_tx.subscribe());
+        }
+
+        // Emit lifecycle events.
+        lab.inner.emit(LabEventKind::LabCreated {
+            lab_prefix: cfg.prefix.to_string(),
+            label: label.as_ref().map(|s| s.to_string()),
+        });
+        lab.inner.emit(LabEventKind::IxCreated {
+            bridge: cfg.ix_br.to_string(),
+            cidr: cfg.ix_cidr,
+            gw: cfg.ix_gw,
+            cidr_v6: cfg.ix_cidr_v6,
+            gw_v6: cfg.ix_gw_v6,
+        });
+
         Ok(lab)
     }
 
     /// Returns the unique resource prefix associated with this lab instance.
     pub fn prefix(&self) -> String {
         self.inner.core.lock().unwrap().cfg.prefix.to_string()
+    }
+
+    /// Subscribe to the lab event stream.
+    pub fn subscribe(&self) -> tokio::sync::broadcast::Receiver<LabEvent> {
+        self.inner.events_tx.subscribe()
+    }
+
+    /// Returns the resolved run output directory, if outdir was configured.
+    ///
+    /// This is the `{base}/{timestamp}-{label}` subdirectory where events, state,
+    /// and per-namespace tracing logs are written.
+    pub fn run_dir(&self) -> Option<&Path> {
+        self.inner.run_dir.as_deref()
+    }
+
+    /// Returns the human-readable label, if one was set at construction.
+    pub fn label(&self) -> Option<&str> {
+        self.inner.label.as_deref()
     }
 
     /// Parses `lab.toml`, builds the network, and returns a ready-to-use lab.
@@ -333,7 +451,15 @@ impl Lab {
 
     /// Builds a `Lab` from a parsed config, creating all namespaces and links.
     pub async fn from_config(cfg: crate::config::LabConfig) -> Result<Self> {
-        let lab = Self::new().await?;
+        Self::from_config_with_opts(cfg, LabOpts::default().outdir_from_env()).await
+    }
+
+    /// Builds a `Lab` from a parsed config with explicit options.
+    pub async fn from_config_with_opts(
+        cfg: crate::config::LabConfig,
+        opts: LabOpts,
+    ) -> Result<Self> {
+        let lab = Self::with_opts(opts).await?;
 
         // Region latency pairs from TOML config are ignored in the new region API.
         // TODO: support regions in TOML config via add_region / link_regions.
@@ -579,8 +705,11 @@ impl Lab {
     ///
     /// The kernel automatically destroys veth pairs when the namespace closes.
     pub fn remove_device(&self, id: NodeId) -> Result<()> {
-        let ns = self.inner.core.lock().unwrap().remove_device(id)?;
-        self.inner.netns.remove_worker(&ns);
+        let dev = self.inner.core.lock().unwrap().remove_device(id)?;
+        self.inner.netns.remove_worker(&dev.ns);
+        self.inner.emit(LabEventKind::DeviceRemoved {
+            name: dev.name.to_string(),
+        });
         Ok(())
     }
 
@@ -589,8 +718,11 @@ impl Lab {
     /// Fails if any devices are still connected to this router's downstream switch.
     /// Remove or replug those devices first.
     pub fn remove_router(&self, id: NodeId) -> Result<()> {
-        let ns = self.inner.core.lock().unwrap().remove_router(id)?;
-        self.inner.netns.remove_worker(&ns);
+        let router = self.inner.core.lock().unwrap().remove_router(id)?;
+        self.inner.netns.remove_worker(&router.ns);
+        self.inner.emit(LabEventKind::RouterRemoved {
+            name: router.name.to_string(),
+        });
         Ok(())
     }
 
@@ -738,6 +870,11 @@ impl Lab {
         })
         .await?;
 
+        self.inner.emit(LabEventKind::RegionAdded {
+            name: name.to_string(),
+            router: region_router_name,
+        });
+
         Ok(Region {
             name: Arc::from(name),
             idx,
@@ -811,6 +948,24 @@ impl Lab {
             Ok(())
         })
         .await?;
+
+        // Emit RegionLinkAdded event.
+        {
+            let inner = self.inner.core.lock().unwrap();
+            let ra = inner
+                .router(a.router_id)
+                .map(|r| r.name.to_string())
+                .unwrap_or_default();
+            let rb = inner
+                .router(b.router_id)
+                .map(|r| r.name.to_string())
+                .unwrap_or_default();
+            drop(inner);
+            self.inner.emit(LabEventKind::RegionLinkAdded {
+                router_a: ra,
+                router_b: rb,
+            });
+        }
 
         // Apply netem impairment on both veth ends.
         if link.latency_ms > 0 || link.jitter_ms > 0 || link.loss_pct > 0.0 {
@@ -902,6 +1057,26 @@ impl Lab {
             .lock()
             .unwrap()
             .set_region_link_broken(&s.link_key, true);
+
+        // Emit event.
+        {
+            let inner = self.inner.core.lock().unwrap();
+            let ra = inner
+                .router(a.router_id)
+                .map(|r| r.name.to_string())
+                .unwrap_or_default();
+            let rb = inner
+                .router(b.router_id)
+                .map(|r| r.name.to_string())
+                .unwrap_or_default();
+            drop(inner);
+            self.inner.emit(LabEventKind::RegionLinkBroken {
+                router_a: ra,
+                router_b: rb,
+                condition: None,
+            });
+        }
+
         Ok(())
     }
 
@@ -971,6 +1146,25 @@ impl Lab {
             .lock()
             .unwrap()
             .set_region_link_broken(&s.link_key, false);
+
+        // Emit event.
+        {
+            let inner = self.inner.core.lock().unwrap();
+            let ra = inner
+                .router(a.router_id)
+                .map(|r| r.name.to_string())
+                .unwrap_or_default();
+            let rb = inner
+                .router(b.router_id)
+                .map(|r| r.name.to_string())
+                .unwrap_or_default();
+            drop(inner);
+            self.inner.emit(LabEventKind::RegionLinkRestored {
+                router_a: ra,
+                router_b: rb,
+            });
+        }
+
         Ok(())
     }
 
@@ -1744,6 +1938,38 @@ impl RouterBuilder {
         let router = {
             let inner = self.inner.core.lock().unwrap();
             let r = inner.router(id).unwrap();
+            let ix_sw = inner.ix_sw();
+
+            // Resolve upstream router name.
+            let upstream_name = r.uplink.and_then(|sw_id| {
+                if sw_id == ix_sw {
+                    return None;
+                }
+                let sw = inner.switch(sw_id)?;
+                let owner = sw.owner_router?;
+                Some(inner.router(owner)?.name.to_string())
+            });
+
+            // Resolve downstream bridge name.
+            let ds_bridge = r
+                .downlink
+                .and_then(|sw_id| inner.switch(sw_id)?.bridge.as_ref().map(|b| b.to_string()))
+                .unwrap_or_default();
+
+            // Emit RouterAdded event.
+            let router_state = RouterState::from_router_data(r, upstream_name, ds_bridge);
+            self.inner.emit(LabEventKind::RouterAdded {
+                name: r.name.to_string(),
+                state: Box::new(router_state),
+            });
+
+            // Register ns → name mapping.
+            self.inner
+                .ns_to_name
+                .lock()
+                .unwrap()
+                .insert(r.ns.to_string(), r.name.to_string());
+
             Router::new(id, r.name.clone(), r.ns.clone(), Arc::clone(&self.inner))
         };
         if let Some(cond) = self.downlink_condition {
@@ -1896,6 +2122,25 @@ impl DeviceBuilder {
         }
         .instrument(self.lab_span.clone())
         .await?;
+
+        // Emit DeviceAdded event.
+        {
+            let inner = self.inner.core.lock().unwrap();
+            let d = inner.device(self.id).unwrap();
+            let device_state = DeviceState::from_device_data(d, &inner);
+
+            self.inner.emit(LabEventKind::DeviceAdded {
+                name: d.name.to_string(),
+                state: device_state,
+            });
+
+            // Register ns → name mapping.
+            self.inner
+                .ns_to_name
+                .lock()
+                .unwrap()
+                .insert(d.ns.to_string(), d.name.to_string());
+        }
 
         Ok(Device::new(
             self.id,

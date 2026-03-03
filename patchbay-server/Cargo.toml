@@ -1,0 +1,17 @@
+[package]
+name = "patchbay-server"
+version = "0.1.0"
+edition.workspace = true
+
+[dependencies]
+axum = { version = "0.8", features = ["tokio"] }
+tokio = { version = "1", features = ["rt", "macros", "sync", "time", "fs", "io-util"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+anyhow = "1"
+async-stream = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+patchbay = { path = "../patchbay" }
+tower-http = { version = "0.6", features = ["cors"] }
+tracing = "0.1"
+open = "5"

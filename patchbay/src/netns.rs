@@ -9,6 +9,7 @@ use std::{
     collections::HashMap,
     fs::File,
     os::unix::fs::MetadataExt,
+    path::PathBuf,
     sync::{mpsc, Arc, Mutex},
     thread,
 };
@@ -24,13 +25,25 @@ use crate::netlink::Netlink;
 // Thread-local namespace setup (shared by all worker types)
 // ─────────────────────────────────────────────
 
+/// Per-namespace options: DNS overlay + run output directory for tracing.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct NamespaceOpts {
+    /// DNS overlay paths for bind-mounting `/etc/hosts` and `/etc/resolv.conf`.
+    pub dns_overlay: Option<DnsOverlay>,
+    /// Run output directory for per-namespace tracing logs.
+    pub run_dir: Option<PathBuf>,
+    /// Log file prefix like `"device.client"` or `"router.home"`.
+    /// Used to name `{prefix}.tracing.jsonl` and `{prefix}.events.jsonl`.
+    pub log_prefix: Option<String>,
+}
+
 /// DNS overlay paths for bind-mounting `/etc/hosts` and `/etc/resolv.conf`.
 #[derive(Clone, Debug)]
 pub(crate) struct DnsOverlay {
     /// Path to the generated hosts file for this namespace.
-    pub hosts_path: std::path::PathBuf,
+    pub hosts_path: PathBuf,
     /// Path to the generated resolv.conf for this lab.
-    pub resolv_path: std::path::PathBuf,
+    pub resolv_path: PathBuf,
 }
 
 impl DnsOverlay {
@@ -44,6 +57,22 @@ impl DnsOverlay {
             debug!(error = %e, "dns overlay: resolv.conf bind mount failed");
         }
     }
+}
+
+/// Applies mount overlay and installs per-namespace tracing subscriber.
+/// Called on every worker thread that enters or creates a namespace.
+///
+/// Returns a tracing `DefaultGuard` that must be held for the thread's lifetime.
+fn setup_namespace_thread(
+    _name: &str,
+    opts: &NamespaceOpts,
+) -> Option<tracing::subscriber::DefaultGuard> {
+    apply_mount_overlay(opts.dns_overlay.as_ref());
+    // Only install file-writing tracing when log_prefix is set (routers/devices).
+    // The root namespace (IX) has no log_prefix and should not create tracing files.
+    let run_dir = opts.log_prefix.as_ref().and(opts.run_dir.as_ref());
+    let log_name = opts.log_prefix.as_deref().unwrap_or("ns");
+    crate::ns_tracing::install_namespace_subscriber(log_name, run_dir.map(|p| p.as_path()))
 }
 
 /// Private mount namespace + optional DNS overlay bind-mounts.
@@ -126,22 +155,17 @@ struct SyncWorker {
 }
 
 impl SyncWorker {
-    fn spawn(
-        ns: &str,
-        fd: &File,
-        span: tracing::Span,
-        overlay: Option<DnsOverlay>,
-    ) -> Result<Self> {
+    fn spawn(ns: &str, fd: &File, span: tracing::Span, opts: NamespaceOpts) -> Result<Self> {
         let target = fd.try_clone().context("clone fd for sync worker")?;
         let (tx, rx) = mpsc::sync_channel(64);
+        let ns_name = ns.to_string();
         let join = thread::Builder::new()
             .name(thread_name(ns, "sw"))
             .spawn(move || {
                 let _guard = span.entered();
-                if let Err(e) = enter_namespace(&target, overlay.as_ref()) {
-                    debug!(error = %e, "sync worker: enter_namespace failed");
-                    return;
-                }
+                setns(&target, CloneFlags::CLONE_NEWNET)
+                    .expect("sync worker: setns CLONE_NEWNET failed");
+                let _tracing_guard = setup_namespace_thread(&ns_name, &opts);
                 while let Ok(msg) = rx.recv() {
                     match msg {
                         SyncMsg::Task(f) => f(),
@@ -181,7 +205,7 @@ struct Worker {
     cancel: CancellationToken,
     async_join: Mutex<Option<thread::JoinHandle<()>>>,
     sync_worker: Mutex<Option<SyncWorker>>,
-    dns_overlay: Option<DnsOverlay>,
+    opts: NamespaceOpts,
 }
 
 /// Sent back from the async worker thread after namespace creation.
@@ -193,15 +217,12 @@ struct WorkerInit {
 impl Worker {
     /// Spawns the async worker thread which *creates* the namespace via
     /// `unshare(CLONE_NEWNET)`, builds a tokio RT, and stays alive.
-    fn spawn(
-        ns: &str,
-        parent_span: tracing::Span,
-        dns_overlay: Option<DnsOverlay>,
-    ) -> Result<Self> {
+    fn spawn(ns: &str, parent_span: tracing::Span, opts: NamespaceOpts) -> Result<Self> {
         let cancel = CancellationToken::new();
         let cancel2 = cancel.clone();
         let span = debug_span!(parent: &parent_span, "async", ns = %ns);
-        let overlay = dns_overlay.clone();
+        let thread_opts = opts.clone();
+        let ns_name = ns.to_string();
         let (init_tx, init_rx) = mpsc::channel::<Result<WorkerInit>>();
 
         let join = thread::Builder::new()
@@ -210,11 +231,10 @@ impl Worker {
                 let _guard = span.entered();
                 let init = (|| -> Result<(File, tokio::runtime::Runtime)> {
                     unshare(CloneFlags::CLONE_NEWNET).context("unshare CLONE_NEWNET")?;
-                    apply_mount_overlay(overlay.as_ref());
                     let ns_fd = open_current_thread_netns_fd()?;
                     let mut builder = tokio::runtime::Builder::new_current_thread();
                     builder.enable_all();
-                    if let Some(overlay) = overlay {
+                    if let Some(overlay) = thread_opts.dns_overlay.clone() {
                         builder.on_thread_start(move || apply_mount_overlay(Some(&overlay)));
                     }
                     let rt = builder.build().context("build tokio runtime")?;
@@ -226,6 +246,9 @@ impl Worker {
                         let _ = init_tx.send(Err(e));
                     }
                     Ok((ns_fd, rt)) => {
+                        // Install tracing subscriber for this namespace thread.
+                        // The guard lives until the thread exits, ensuring proper flush.
+                        let _tracing_guard = setup_namespace_thread(&ns_name, &thread_opts);
                         let fd = match ns_fd.try_clone() {
                             Ok(fd) => fd,
                             Err(e) => {
@@ -270,7 +293,7 @@ impl Worker {
             cancel,
             async_join: Mutex::new(Some(join)),
             sync_worker: Mutex::new(None),
-            dns_overlay,
+            opts,
         })
     }
 
@@ -304,7 +327,7 @@ impl Worker {
                 &self.ns,
                 &self.ns_fd,
                 span,
-                self.dns_overlay.clone(),
+                self.opts.clone(),
             )?);
         }
         Ok(guard.as_ref().unwrap().tx.clone())
@@ -335,6 +358,8 @@ impl Drop for Worker {
 pub(crate) struct NetnsManager {
     parent_span: tracing::Span,
     workers: Mutex<HashMap<String, Worker>>,
+    /// Run output directory for per-namespace tracing logs.
+    run_dir: Option<PathBuf>,
 }
 
 impl Default for NetnsManager {
@@ -348,7 +373,13 @@ impl NetnsManager {
         Self {
             parent_span: tracing::Span::none(),
             workers: Mutex::new(HashMap::new()),
+            run_dir: None,
         }
+    }
+
+    /// Set the run output directory for per-namespace tracing logs.
+    pub(crate) fn set_run_dir(&mut self, run_dir: PathBuf) {
+        self.run_dir = Some(run_dir);
     }
 
     // ── Namespace lifecycle ──────────────────────────────────────────
@@ -358,10 +389,20 @@ impl NetnsManager {
     /// Spawns a thread that calls `unshare(CLONE_NEWNET)` to create the
     /// namespace, applies the optional DNS overlay, builds a tokio runtime,
     /// and stays alive as the namespace's async worker.
-    pub(crate) fn create_netns(&self, name: &str, dns_overlay: Option<DnsOverlay>) -> Result<()> {
+    pub(crate) fn create_netns(
+        &self,
+        name: &str,
+        dns_overlay: Option<DnsOverlay>,
+        log_prefix: Option<String>,
+    ) -> Result<()> {
         debug!(ns = %name, "create namespace");
         self.remove_worker(name);
-        let worker = Worker::spawn(name, self.parent_span.clone(), dns_overlay)?;
+        let opts = NamespaceOpts {
+            dns_overlay,
+            run_dir: self.run_dir.clone(),
+            log_prefix,
+        };
+        let worker = Worker::spawn(name, self.parent_span.clone(), opts)?;
         self.workers
             .lock()
             .expect("netns worker map poisoned")
@@ -443,7 +484,7 @@ impl NetnsManager {
             let w = workers
                 .get(ns)
                 .ok_or_else(|| anyhow!("namespace '{ns}' not registered"))?;
-            (w.ns_fd.clone(), w.dns_overlay.clone())
+            (w.ns_fd.clone(), w.opts.dns_overlay.clone())
         };
         thread::Builder::new()
             .name(thread_name(ns, "u"))
@@ -471,8 +512,8 @@ mod tests {
     #[test]
     fn create_and_cleanup() {
         let mgr = NetnsManager::new();
-        mgr.create_netns("test-ns-1", None).unwrap();
-        mgr.create_netns("test-ns-2", None).unwrap();
+        mgr.create_netns("test-ns-1", None, None).unwrap();
+        mgr.create_netns("test-ns-2", None, None).unwrap();
         mgr.remove_worker("test-ns-1");
         assert!(mgr.rt_handle_for("test-ns-2").is_ok());
         assert!(mgr.rt_handle_for("test-ns-1").is_err());
@@ -481,9 +522,9 @@ mod tests {
     #[test]
     fn prefix_cleanup() {
         let mgr = NetnsManager::new();
-        mgr.create_netns("lab-a", None).unwrap();
-        mgr.create_netns("lab-b", None).unwrap();
-        mgr.create_netns("other", None).unwrap();
+        mgr.create_netns("lab-a", None, None).unwrap();
+        mgr.create_netns("lab-b", None, None).unwrap();
+        mgr.create_netns("other", None, None).unwrap();
         mgr.cleanup_prefix("lab-");
         assert!(mgr.rt_handle_for("lab-a").is_err());
         assert!(mgr.rt_handle_for("lab-b").is_err());

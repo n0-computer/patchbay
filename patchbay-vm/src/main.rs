@@ -5,7 +5,7 @@ use std::{path::PathBuf, time::Duration};
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use patchbay_utils::ui::{start_ui_server, DEFAULT_UI_BIND};
+use patchbay_server::{start_server, DEFAULT_UI_BIND};
 
 #[derive(Parser)]
 #[command(name = "patchbay-vm", about = "Standalone VM runner for patchbay")]
@@ -95,7 +95,7 @@ fn main() -> Result<()> {
             bind,
         } => {
             let _server = if open {
-                let srv = start_ui_server(work_dir.clone(), &bind)?;
+                let srv = start_server(work_dir.clone(), &bind)?;
                 println!("patchbay UI: {}", srv.url());
                 srv.open_browser()?;
                 Some(srv)
@@ -123,7 +123,7 @@ fn main() -> Result<()> {
             bind,
             open,
         } => {
-            let _server = start_ui_server(work_dir, &bind)?;
+            let _server = start_server(work_dir, &bind)?;
             println!("patchbay UI: {}", _server.url());
             if open {
                 _server.open_browser()?;

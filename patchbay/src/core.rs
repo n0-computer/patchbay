@@ -2,7 +2,7 @@ use std::{
     collections::HashMap,
     net::{IpAddr, Ipv4Addr, Ipv6Addr},
     path::PathBuf,
-    sync::Arc,
+    sync::{atomic::AtomicU64, Arc},
 };
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -450,6 +450,16 @@ pub(crate) struct LabInner {
     pub core: std::sync::Mutex<NetworkCore>,
     pub netns: Arc<netns::NetnsManager>,
     pub cancel: CancellationToken,
+    /// Monotonically increasing event counter.
+    pub opid: AtomicU64,
+    /// Broadcast channel for lab events.
+    pub events_tx: tokio::sync::broadcast::Sender<crate::event::LabEvent>,
+    /// Human-readable lab label (immutable after construction).
+    pub label: Option<Arc<str>>,
+    /// Namespace name → node name mapping (for log file naming).
+    pub ns_to_name: std::sync::Mutex<HashMap<String, String>>,
+    /// Resolved run output directory (e.g. `{base}/{ts}-{label}/`), if outdir was configured.
+    pub run_dir: Option<PathBuf>,
 }
 
 impl Drop for LabInner {
@@ -1341,21 +1351,19 @@ impl NetworkCore {
     }
 
     /// Validates and removes a device, returning its namespace for worker cleanup.
-    pub(crate) fn remove_device(&mut self, id: NodeId) -> Result<Arc<str>> {
+    pub(crate) fn remove_device(&mut self, id: NodeId) -> Result<DeviceData> {
         let dev = self
             .devices
-            .get(&id)
+            .remove(&id)
             .ok_or_else(|| anyhow!("unknown device id {:?}", id))?;
-        let ns = dev.ns.clone();
         self.nodes_by_name.remove(&dev.name);
-        self.devices.remove(&id);
-        Ok(ns)
+        Ok(dev)
     }
 
     /// Validates and removes a router, returning its namespace for worker cleanup.
     ///
     /// Fails if any devices are still connected to this router's downstream switch.
-    pub(crate) fn remove_router(&mut self, id: NodeId) -> Result<Arc<str>> {
+    pub(crate) fn remove_router(&mut self, id: NodeId) -> Result<RouterData> {
         let router = self
             .routers
             .get(&id)
@@ -1374,12 +1382,12 @@ impl NetworkCore {
                 }
             }
         }
-        let ns = router.ns.clone();
         self.nodes_by_name.remove(&router.name);
-        if let Some(sw_id) = self.routers.remove(&id).unwrap().downlink {
+        let router_data = self.routers.remove(&id).unwrap();
+        if let Some(sw_id) = router_data.downlink {
             self.switches.remove(&sw_id);
         }
-        Ok(ns)
+        Ok(router_data)
     }
 
     /// Validates and removes an interface from a device, returning the device ns.
@@ -1744,7 +1752,7 @@ pub(crate) async fn setup_root_ns_async(
     netns: &Arc<netns::NetnsManager>,
 ) -> Result<()> {
     let root_ns = cfg.root_ns.clone();
-    create_named_netns(netns, &root_ns, None)?;
+    create_named_netns(netns, &root_ns, None, None)?;
 
     netns.run_closure_in(&root_ns, || {
         set_sysctl_root("net/ipv4/ip_forward", "1")?;
@@ -1815,7 +1823,8 @@ pub(crate) async fn setup_router_async(
     let id = router.id;
     debug!(name = %router.name, ns = %router.ns, "router: setup");
 
-    create_named_netns(netns, &router.ns, None)?;
+    let log_prefix = format!("{}.{}", crate::consts::KIND_ROUTER, router.name);
+    create_named_netns(netns, &router.ns, None, Some(log_prefix))?;
 
     let uplink = router
         .uplink
@@ -2309,7 +2318,8 @@ pub(crate) async fn setup_device_async(
     dns_overlay: Option<netns::DnsOverlay>,
 ) -> Result<()> {
     debug!(name = %dev.name, ns = %dev.ns, "device: setup");
-    create_named_netns(netns, &dev.ns, dns_overlay)?;
+    let log_prefix = format!("{}.{}", crate::consts::KIND_DEVICE, dev.name);
+    create_named_netns(netns, &dev.ns, dns_overlay, Some(log_prefix))?;
 
     for iface in ifaces {
         wire_iface_async(netns, prefix, root_ns, iface).await?;
@@ -2427,8 +2437,9 @@ pub(crate) fn create_named_netns(
     netns: &netns::NetnsManager,
     name: &str,
     dns_overlay: Option<netns::DnsOverlay>,
+    log_prefix: Option<String>,
 ) -> Result<()> {
-    netns.create_netns(name, dns_overlay)?;
+    netns.create_netns(name, dns_overlay, log_prefix)?;
     // Disable DAD before any interfaces are created or moved in.
     netns.run_closure_in(name, || {
         set_sysctl_root("net/ipv6/conf/all/accept_dad", "0").ok();

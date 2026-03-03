@@ -22,18 +22,19 @@ use std::{
     future::Future,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use anyhow::{anyhow, bail, Context, Result};
 use n0_tracing_test::traced_test;
 use tokio::{net::UdpSocket, sync::oneshot};
-use tracing::{error, error_span, info, Instrument};
+use tracing::{debug, error, error_span, info, Instrument};
 
 use super::*;
 use crate::{check_caps, config};
 
 mod alloc;
+mod devtools;
 mod dns;
 mod firewall;
 mod hairpin;
@@ -263,11 +264,13 @@ async fn spawn_tcp_echo_server(bind: SocketAddr) -> Result<()> {
     tokio::spawn(async move {
         match tokio::net::TcpListener::bind(bind).await {
             Ok(listener) => {
+                debug!(addr = %listener.local_addr().unwrap(), "TCP listener bound");
                 let _ = ready_tx.send(Ok(()));
                 loop {
-                    let Ok((mut stream, _)) = listener.accept().await else {
+                    let Ok((mut stream, remote)) = listener.accept().await else {
                         break;
                     };
+                    debug!(%remote, "accepted stream");
                     let mut buf = [0u8; 64];
                     if let Ok(n) = stream.read(&mut buf).await {
                         let _ = stream.write_all(&buf[..n]).await;
@@ -288,11 +291,14 @@ async fn spawn_tcp_echo_server(bind: SocketAddr) -> Result<()> {
 async fn tcp_roundtrip(target: SocketAddr) -> Result<()> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let timeout = Duration::from_millis(500);
+    let start = Instant::now();
     let mut stream = tokio::time::timeout(timeout, tokio::net::TcpStream::connect(target))
         .await
         .context("tcp connect timeout")?
         .context("tcp connect")?;
+    debug!(remote = %target, local_addr = %stream.local_addr().unwrap(), time=?start.elapsed(), "connected");
     let payload = b"ping";
+    let start = Instant::now();
     tokio::time::timeout(timeout, stream.write_all(payload))
         .await
         .context("tcp write timeout")?
@@ -302,6 +308,7 @@ async fn tcp_roundtrip(target: SocketAddr) -> Result<()> {
         .await
         .context("tcp read timeout")?
         .context("tcp read")?;
+    debug!(time=?start.elapsed(), "echo complete");
     if &buf != payload {
         bail!("tcp echo mismatch: {:?}", buf);
     }

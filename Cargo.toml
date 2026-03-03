@@ -1,5 +1,5 @@
 [workspace]
-members = ["patchbay", "patchbay-utils", "patchbay-runner", "patchbay-vm"]
+members = ["patchbay", "patchbay-utils", "patchbay-runner", "patchbay-vm", "patchbay-server"]
 resolver = "2"
 
 [workspace.package]

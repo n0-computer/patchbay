@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import type { SimLogEntry } from '../types'
 
 const ANSI_RE = /\x1b\[[0-9;]*m/g
@@ -6,7 +6,7 @@ const TRACING_RE = /^(\d{4}-\d{2}-\d{2}T[\d:.]+Z)\s+(ERROR|WARN|INFO|DEBUG|TRACE
 const PREVIEW_BYTES = 256 * 1024
 
 type ParsedLine =
-  | { type: 'tracing'; level: string; ts: string; target: string; msg: string }
+  | { type: 'tracing'; level: string; ts: string; target: string; spans: string; msg: string; fields: string }
   | { type: 'event'; kind: string; raw: string }
   | { type: 'raw'; raw: string }
 
@@ -22,10 +22,7 @@ type QlogEvent = {
 
 type RenderMode = 'rendered' | 'raw'
 
-type LogMeta = {
-  size_bytes: number
-  line_count: number
-}
+const ALL_LEVELS = ['ERROR', 'WARN', 'INFO', 'DEBUG', 'TRACE'] as const
 
 interface Props {
   base: string
@@ -49,15 +46,64 @@ function valueString(v: unknown): string {
   }
 }
 
+/** Format a spans array as "span1{k=v}:span2{k=v}" like tracing fmt subscriber. */
+function formatSpans(spans: unknown): string {
+  if (!Array.isArray(spans)) return ''
+  const parts: string[] = []
+  for (const span of spans) {
+    if (typeof span !== 'object' || span == null) continue
+    const obj = span as Record<string, unknown>
+    const name = typeof obj.name === 'string' ? obj.name : '?'
+    const fields = Object.entries(obj)
+      .filter(([k]) => k !== 'name')
+      .map(([k, val]) => `${k}=${valueString(val)}`)
+    if (fields.length === 0) parts.push(name)
+    else parts.push(`${name}{${fields.join(',')}}`)
+  }
+  return parts.join(':')
+}
+
+/** Parse a single line from a log file. Handles JSON tracing format, ANSI tracing, JSON events, and raw text. */
 function parseLine(raw: string): ParsedLine {
   const stripped = raw.replace(ANSI_RE, '')
+
+  // Try JSON parse first
   try {
     const v = JSON.parse(stripped) as Record<string, unknown>
+
+    // JSON event format: { kind: "...", ... }
     if (typeof v.kind === 'string') return { type: 'event', kind: v.kind, raw: stripped }
+
+    // tracing-subscriber JSON format:
+    // { timestamp, level, fields: { message, ... }, target, span: {...}, spans: [...] }
+    if (typeof v.level === 'string' && typeof v.timestamp === 'string') {
+      const level = (v.level as string).toUpperCase()
+      const ts = v.timestamp as string
+      const target = (v.target as string) ?? ''
+      const fieldsObj = v.fields as Record<string, unknown> | undefined
+
+      // message lives inside fields (standard format)
+      const msg = fieldsObj?.message != null ? String(fieldsObj.message) : ''
+
+      // Extra fields (everything in fields except message)
+      const extras = fieldsObj
+        ? Object.entries(fieldsObj)
+          .filter(([k]) => k !== 'message')
+          .map(([k, val]) => `${k}=${valueString(val)}`)
+          .join(' ')
+        : ''
+
+      // Spans chain: tracing-subscriber includes "spans" array
+      const spans = formatSpans(v.spans)
+
+      return { type: 'tracing', level, ts, target, spans, msg, fields: extras }
+    }
   } catch { }
 
+  // ANSI tracing format: 2026-03-03T14:30:01.200Z INFO target: message
   const m = stripped.match(TRACING_RE)
-  if (m) return { type: 'tracing', ts: m[1], level: m[2], target: m[3], msg: m[4] }
+  if (m) return { type: 'tracing', ts: m[1], level: m[2], target: m[3], spans: '', msg: m[4], fields: '' }
+
   return { type: 'raw', raw: stripped }
 }
 
@@ -104,42 +150,28 @@ function formatBytes(bytes: number): string {
   return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GiB`
 }
 
-async function fetchLogMeta(url: string): Promise<LogMeta> {
-  const res = await fetch(`${url}?__meta=1`)
-  if (!res.ok) {
-    throw new Error(`HTTP ${res.status}`)
-  }
-  const body = await res.json() as { size_bytes?: number; line_count?: number }
-  return {
-    size_bytes: body.size_bytes ?? 0,
-    line_count: body.line_count ?? 0,
-  }
-}
-
-async function fetchRangePreview(url: string, sizeBytes: number): Promise<string> {
-  const start = Math.max(0, sizeBytes - PREVIEW_BYTES)
-  const end = Math.max(0, sizeBytes - 1)
-  const range = sizeBytes > 0 ? `bytes=${start}-${end}` : `bytes=0-${PREVIEW_BYTES - 1}`
-  const res = await fetch(url, { headers: { Range: range } })
-  if (!res.ok && res.status !== 206) {
-    throw new Error(`HTTP ${res.status}`)
-  }
-  return await res.text()
-}
-
 export default function LogsTab({ base, logs, jumpTarget }: Props) {
   const [active, setActive] = useState<SimLogEntry | null>(null)
-  const [meta, setMeta] = useState<LogMeta | null>(null)
-  const [loaded, setLoaded] = useState(false)
   const [text, setText] = useState('')
+  const [loaded, setLoaded] = useState(false)
+  const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const [loadingMeta, setLoadingMeta] = useState(false)
-  const [loadingContent, setLoadingContent] = useState(false)
   const [renderMode, setRenderMode] = useState<RenderMode>('raw')
   const [jumpNeedle, setJumpNeedle] = useState<string | null>(null)
   const [jumpLine, setJumpLine] = useState<number | null>(null)
   const [jumpHandledNonce, setJumpHandledNonce] = useState<number | null>(null)
+  const jumpingRef = useRef(false)
 
+  // Level filter (for tracing logs)
+  const [enabledLevels, setEnabledLevels] = useState<Set<string>>(new Set(ALL_LEVELS))
+
+  // Search
+  const [searchQuery, setSearchQuery] = useState('')
+  const [searchMatches, setSearchMatches] = useState<number[]>([])
+  const [searchIdx, setSearchIdx] = useState(0)
+  const contentRef = useRef<HTMLDivElement>(null)
+
+  // Auto-select first log
   useEffect(() => {
     setActive((prev) => {
       if (prev && logs.some((l) => l.path === prev.path)) return prev
@@ -147,68 +179,79 @@ export default function LogsTab({ base, logs, jumpTarget }: Props) {
     })
   }, [logs])
 
+  // Clear content state when switching active log.
+  // Skip clearing jump state if a jump triggered the switch.
   useEffect(() => {
     if (!active) return
-    let dead = false
-    const url = `${base}${active.path}`
     setLoaded(false)
     setText('')
     setError(null)
-    setMeta(null)
-    setLoadingMeta(true)
-    setLoadingContent(false)
     setRenderMode('raw')
-    fetchLogMeta(url)
-      .then((m) => {
-        if (dead) return
-        setMeta(m)
-      })
-      .catch((e) => {
-        if (dead) return
-        setError(String(e))
-      })
-      .finally(() => {
-        if (!dead) setLoadingMeta(false)
-      })
-    return () => {
-      dead = true
+    if (!jumpingRef.current) {
+      setJumpNeedle(null)
+      setJumpLine(null)
     }
+    jumpingRef.current = false
+    setSearchQuery('')
+    setSearchMatches([])
+    setSearchIdx(0)
   }, [active, base])
 
+  // Handle jump target from timeline
   useEffect(() => {
     if (!jumpTarget || logs.length === 0) return
     if (jumpHandledNonce === jumpTarget.nonce) return
+    // Prefer tracing log for the target node
+    const tracingLog = logs.find((l) => l.node === jumpTarget.node && l.kind === 'tracing')
     const direct = logs.find((l) => l.path === jumpTarget.path)
-    const byNode = logs.find((l) => l.node === jumpTarget.node && l.path.endsWith('/stderr.log'))
-      ?? logs.find((l) => l.node === jumpTarget.node && l.path.endsWith('/stdout.log'))
-      ?? logs.find((l) => l.node === jumpTarget.node && l.kind === 'transfer')
     const fallback = logs.find((l) => l.node === jumpTarget.node) ?? logs[0] ?? null
-    setActive(direct ?? byNode ?? fallback)
+    jumpingRef.current = true
+    setActive(tracingLog ?? direct ?? fallback)
     setJumpNeedle(jumpTarget.timeLabel)
     setJumpHandledNonce(jumpTarget.nonce)
   }, [jumpTarget, logs, jumpHandledNonce])
 
-  const loadPreview = async () => {
+  // Load log content (fetches last 256KB via Range header, or full file)
+  const loadContent = async () => {
     if (!active) return
     const url = `${base}${active.path}`
-    setLoadingContent(true)
+    setLoading(true)
     setError(null)
     try {
-      const content = await fetchRangePreview(url, meta?.size_bytes ?? 0)
-      setText(content)
+      // Try Range request for last chunk
+      const rangeRes = await fetch(url, {
+        headers: { Range: `bytes=-${PREVIEW_BYTES}` },
+      })
+      if (rangeRes.ok || rangeRes.status === 206) {
+        setText(await rangeRes.text())
+        setLoaded(true)
+        return
+      }
+      // Fallback to full fetch
+      const fullRes = await fetch(url)
+      if (!fullRes.ok) throw new Error(`HTTP ${fullRes.status}`)
+      setText(await fullRes.text())
       setLoaded(true)
-      setRenderMode('raw')
     } catch (e) {
       setError(String(e))
     } finally {
-      setLoadingContent(false)
+      setLoading(false)
     }
   }
 
+  // Auto-load when jump is pending
   useEffect(() => {
-    if (!active || !jumpNeedle || loaded || loadingContent) return
-    loadPreview()
-  }, [active, jumpNeedle, loaded, loadingContent])
+    if (!active || !jumpNeedle || loaded || loading) return
+    loadContent()
+  }, [active, jumpNeedle, loaded, loading])
+
+  // Auto-load tracing/events logs immediately (they're typically small)
+  useEffect(() => {
+    if (!active || loaded || loading) return
+    if (active.kind === 'tracing' || active.kind === 'events') {
+      loadContent()
+    }
+  }, [active, loaded, loading])
 
   const byNode = useMemo(() => {
     const m = new Map<string, SimLogEntry[]>()
@@ -223,20 +266,54 @@ export default function LogsTab({ base, logs, jumpTarget }: Props) {
   const transferEvents = useMemo(() => parseTransferPreview(text), [text])
   const qlogEvents = useMemo(() => parseQlogEvents(text), [text])
   const supportsRendered = (active?.kind === 'transfer' && transferEvents.length > 0) || active?.kind === 'qlog'
+  const isTracingLog = active?.kind === 'tracing'
 
+  // Apply level filter to parsed lines
+  const filteredLines = useMemo(() => {
+    if (!isTracingLog) return parsed.map((line, i) => ({ line, origIdx: i }))
+    return parsed
+      .map((line, i) => ({ line, origIdx: i }))
+      .filter(({ line }) => {
+        if (line.type === 'tracing') return enabledLevels.has(line.level)
+        return true // show raw/event lines always
+      })
+  }, [parsed, enabledLevels, isTracingLog])
+
+  // Search matches
+  useEffect(() => {
+    if (!searchQuery) {
+      setSearchMatches([])
+      setSearchIdx(0)
+      return
+    }
+    const q = searchQuery.toLowerCase()
+    const matches: number[] = []
+    filteredLines.forEach(({ line }, i) => {
+      const text = line.type === 'tracing'
+        ? `${line.ts} ${line.level} ${line.spans} ${line.target} ${line.msg} ${line.fields}`
+        : line.type === 'event' ? `${line.kind} ${line.raw}`
+          : line.raw
+      if (text.toLowerCase().includes(q)) matches.push(i)
+    })
+    setSearchMatches(matches)
+    setSearchIdx(0)
+  }, [searchQuery, filteredLines])
+
+  // Jump needle resolution
   useEffect(() => {
     if (!jumpNeedle) {
       setJumpLine(null)
       return
     }
-    const idx = parsed.findIndex((line) => {
-      if (line.type === 'tracing') return line.ts === jumpNeedle
+    const idx = filteredLines.findIndex(({ line }) => {
+      if (line.type === 'tracing') return line.ts === jumpNeedle || line.ts.includes(jumpNeedle)
       if (line.type === 'event') return line.raw.includes(jumpNeedle)
       return line.raw.includes(jumpNeedle)
     })
     setJumpLine(idx >= 0 ? idx : null)
-  }, [parsed, jumpNeedle])
+  }, [filteredLines, jumpNeedle])
 
+  // Scroll to jump target
   useEffect(() => {
     if (jumpLine == null) return
     const el = document.querySelector(`[data-log-line="${jumpLine}"]`)
@@ -244,6 +321,28 @@ export default function LogsTab({ base, logs, jumpTarget }: Props) {
       el.scrollIntoView({ block: 'center' })
     }
   }, [jumpLine])
+
+  // Scroll to search match
+  useEffect(() => {
+    if (searchMatches.length === 0) return
+    const targetIdx = searchMatches[searchIdx]
+    if (targetIdx == null) return
+    const el = document.querySelector(`[data-log-line="${targetIdx}"]`)
+    if (el instanceof HTMLElement) {
+      el.scrollIntoView({ block: 'center' })
+    }
+  }, [searchIdx, searchMatches])
+
+  const toggleLevel = (level: string) => {
+    setEnabledLevels((prev) => {
+      const next = new Set(prev)
+      if (next.has(level)) next.delete(level)
+      else next.add(level)
+      return next
+    })
+  }
+
+  const fileSize = text.length
 
   return (
     <div className="logs-layout">
@@ -273,9 +372,12 @@ export default function LogsTab({ base, logs, jumpTarget }: Props) {
           <>
             <div className="logs-toolbar">
               <span>{active.path}</span>
-              {meta && (
+              {loaded && (
                 <span style={{ color: 'var(--text-muted)' }}>
-                  {formatBytes(meta.size_bytes)} · {meta.line_count} lines
+                  {formatBytes(fileSize)} · {parsed.length} lines
+                  {isTracingLog && filteredLines.length !== parsed.length
+                    ? ` (${filteredLines.length} shown)`
+                    : ''}
                 </span>
               )}
               {supportsRendered && loaded && (
@@ -294,24 +396,57 @@ export default function LogsTab({ base, logs, jumpTarget }: Props) {
                   </button>
                 </>
               )}
-              {!loaded && (
-                <button className="btn" onClick={loadPreview} disabled={loadingMeta || loadingContent}>
-                  {loadingContent ? 'loading…' : 'load log'}
+              {!loaded && !loading && (
+                <button className="btn" onClick={loadContent}>
+                  load log
                 </button>
               )}
+              {loading && <span style={{ color: 'var(--text-muted)' }}>loading...</span>}
               {jumpNeedle && (
                 <span style={{ color: 'var(--yellow)' }}>
-                  jump: {jumpNeedle} {jumpLine == null && loaded ? '(not in loaded range)' : ''}
+                  jump: {jumpNeedle} {jumpLine == null && loaded ? '(not in range)' : ''}
                 </span>
               )}
-              <button className="btn" onClick={() => { setLoaded(false); setText(''); setJumpLine(null); setError(null); }}>
-                clear
-              </button>
             </div>
 
-            {!loaded && (
+            {/* Level filter + search toolbar (for tracing logs) */}
+            {isTracingLog && loaded && (
+              <div className="logs-toolbar">
+                {ALL_LEVELS.map((level) => (
+                  <span
+                    key={level}
+                    className={`level-toggle level-${level} ${enabledLevels.has(level) ? 'on' : 'off'}`}
+                    onClick={() => toggleLevel(level)}
+                  >
+                    {level}
+                  </span>
+                ))}
+                <input
+                  type="search"
+                  placeholder="search..."
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  style={{ marginLeft: 'auto' }}
+                />
+                {searchMatches.length > 0 && (
+                  <>
+                    <span style={{ color: 'var(--text-muted)', fontSize: 11 }}>
+                      {searchIdx + 1}/{searchMatches.length}
+                    </span>
+                    <button className="btn" onClick={() => setSearchIdx((i) => (i - 1 + searchMatches.length) % searchMatches.length)}>
+                      prev
+                    </button>
+                    <button className="btn" onClick={() => setSearchIdx((i) => (i + 1) % searchMatches.length)}>
+                      next
+                    </button>
+                  </>
+                )}
+              </div>
+            )}
+
+            {!loaded && !loading && (
               <div className="empty">
-                {loadingMeta ? 'reading metadata…' : 'load log to view this file'}
+                load log to view this file
               </div>
             )}
 
@@ -358,22 +493,29 @@ export default function LogsTab({ base, logs, jumpTarget }: Props) {
             )}
 
             {loaded && (!supportsRendered || renderMode === 'raw') && (
-              <div className="logs-content">
-                {parsed.map((line, i) => {
+              <div className="logs-content" ref={contentRef}>
+                {filteredLines.map(({ line, origIdx }, i) => {
+                  const isSearchHit = searchMatches.includes(i)
+                  const isCurrentSearch = searchMatches[searchIdx] === i
+                  const isJump = jumpLine === i
+                  const highlight = isJump ? ' jump-hit' : isCurrentSearch ? ' search-current' : isSearchHit ? ' search-hit' : ''
+
                   if (line.type === 'tracing') {
                     return (
-                      <div key={i} data-log-line={i} className={`log-entry${jumpLine === i ? ' jump-hit' : ''}`}>
+                      <div key={origIdx} data-log-line={i} className={`log-entry${highlight}`}>
                         <span className="log-ts">{line.ts.split('T')[1]?.replace('Z', '')}</span>
-                        <span className={`level-${line.level}`} style={{ marginRight: 8 }}>{line.level}</span>
-                        <span className="log-target">{line.target}:</span>
-                        <span className="log-msg">{line.msg}</span>
+                        <span className={`level-${line.level}`}>{line.level.padStart(5)}</span>
+                        {line.spans && <span className="log-spans"> {line.spans}</span>}
+                        <span className="log-target">{line.spans ? ': ' : ' '}{line.target}:</span>
+                        {line.msg && <span className="log-msg"> {line.msg}</span>}
+                        {line.fields && <span className="log-fields"> {line.fields}</span>}
                       </div>
                     )
                   }
                   if (line.type === 'event') {
-                    return <div key={i} data-log-line={i} className={`log-entry log-iroh-events${jumpLine === i ? ' jump-hit' : ''}`}>{line.kind} {line.raw}</div>
+                    return <div key={origIdx} data-log-line={i} className={`log-entry log-events${highlight}`}>{line.kind} {line.raw}</div>
                   }
-                  return <div key={i} data-log-line={i} className={`log-entry log-raw${jumpLine === i ? ' jump-hit' : ''}`}>{line.raw}</div>
+                  return <div key={origIdx} data-log-line={i} className={`log-entry log-raw${highlight}`}>{line.raw}</div>
                 })}
               </div>
             )}

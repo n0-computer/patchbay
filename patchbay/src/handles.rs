@@ -30,6 +30,7 @@ use crate::{
         self, apply_nat_for_router, apply_nat_v6, apply_or_remove_impair, run_nft_in, LabInner,
         NodeId,
     },
+    event::{IfaceSnapshot, LabEventKind},
     firewall::Firewall,
     lab::{LinkCondition, ObservedAddr},
     nat::{IpSupport, Nat, NatV6Mode},
@@ -215,11 +216,16 @@ impl Device {
     /// operation fails.
     pub async fn link_down(&self, ifname: &str) -> Result<()> {
         let ns = self.ns.to_string();
-        let ifname = ifname.to_string();
+        let ifname_owned = ifname.to_string();
         core::nl_run(&self.lab.netns, &ns, move |nl: Netlink| async move {
-            nl.set_link_down(&ifname).await
+            nl.set_link_down(&ifname_owned).await
         })
-        .await
+        .await?;
+        self.lab.emit(LabEventKind::LinkDown {
+            device: self.name.to_string(),
+            iface: ifname.to_string(),
+        });
+        Ok(())
     }
 
     /// Brings an interface administratively up.
@@ -260,6 +266,10 @@ impl Device {
             })
             .await?;
         }
+        self.lab.emit(LabEventKind::LinkUp {
+            device: self.name.to_string(),
+            iface: ifname.to_string(),
+        });
         Ok(())
     }
 
@@ -342,6 +352,11 @@ impl Device {
                 }
             }
         }
+        self.lab.emit(LabEventKind::LinkConditionChanged {
+            device: self.name.to_string(),
+            iface: resolved_ifname,
+            condition: impair,
+        });
         Ok(())
     }
 
@@ -519,6 +534,29 @@ impl Device {
             .await?;
         }
 
+        // Emit event.
+        {
+            let inner = self.lab.core.lock().unwrap();
+            let router_name = inner
+                .router(router)
+                .map(|r| r.name.to_string())
+                .unwrap_or_default();
+            let dev = inner.device(self.id);
+            let iface_ip = dev.and_then(|d| d.iface(ifname)).and_then(|i| i.ip);
+            let iface_ip_v6 = dev.and_then(|d| d.iface(ifname)).and_then(|i| i.ip_v6);
+            drop(inner);
+            self.lab.emit(LabEventKind::InterfaceAdded {
+                device: self.name.to_string(),
+                iface: IfaceSnapshot {
+                    name: ifname.to_string(),
+                    router: router_name,
+                    ip: iface_ip,
+                    ip_v6: iface_ip_v6,
+                    link_condition: impair,
+                },
+            });
+        }
+
         Ok(())
     }
 
@@ -555,6 +593,10 @@ impl Device {
         })
         .await?;
 
+        self.lab.emit(LabEventKind::InterfaceRemoved {
+            device: self.name.to_string(),
+            iface_name: ifname.to_string(),
+        });
         Ok(())
     }
 
@@ -597,11 +639,44 @@ impl Device {
         core::wire_iface_async(netns, &setup.prefix, &setup.root_ns, setup.iface_build).await?;
 
         // Phase 4: Lock → update internal records → unlock
+        let from_router_name = {
+            let inner = self.lab.core.lock().unwrap();
+            // Get old router name before finishing replug
+            let dev = inner.device(self.id);
+            let old_uplink = dev.and_then(|d| d.iface(ifname)).map(|i| i.uplink);
+            let from_name = old_uplink
+                .and_then(|sw| inner.switch(sw))
+                .and_then(|sw| sw.owner_router)
+                .and_then(|r| inner.router(r))
+                .map(|r| r.name.to_string())
+                .unwrap_or_default();
+            drop(inner);
+            from_name
+        };
+
         self.lab
             .core
             .lock()
             .unwrap()
             .finish_replug_iface(self.id, ifname, to_router, new_ip, new_ip_v6)?;
+
+        let to_router_name = self
+            .lab
+            .core
+            .lock()
+            .unwrap()
+            .router(to_router)
+            .map(|r| r.name.to_string())
+            .unwrap_or_default();
+
+        self.lab.emit(LabEventKind::InterfaceReplugged {
+            device: self.name.to_string(),
+            iface_name: ifname.to_string(),
+            from_router: from_router_name,
+            to_router: to_router_name,
+            new_ip,
+            new_ip_v6,
+        });
 
         Ok(())
     }
@@ -627,13 +702,21 @@ impl Device {
             .renew_device_ip(self.id, ifname)?;
 
         // Phase 2: Async netlink — remove old addr, add new addr.
-        let ifname = ifname.to_string();
+        let ifname_str = ifname.to_string();
+        let ifname_owned = ifname_str.clone();
         core::nl_run(&self.lab.netns, &ns, move |h: Netlink| async move {
-            h.del_addr4(&ifname, old_ip, prefix_len).await?;
-            h.add_addr4(&ifname, new_ip, prefix_len).await?;
+            h.del_addr4(&ifname_owned, old_ip, prefix_len).await?;
+            h.add_addr4(&ifname_owned, new_ip, prefix_len).await?;
             Ok(())
         })
         .await?;
+
+        self.lab.emit(LabEventKind::DeviceIpChanged {
+            device: self.name.to_string(),
+            iface_name: ifname_str,
+            new_ip: Some(new_ip),
+            new_ip_v6: None,
+        });
 
         Ok(new_ip)
     }
@@ -847,7 +930,13 @@ impl Router {
             &nat_params.wan_if,
             nat_params.upstream_ip,
         )
-        .await
+        .await?;
+
+        self.lab.emit(LabEventKind::NatChanged {
+            router: self.name.to_string(),
+            nat: mode,
+        });
+        Ok(())
     }
 
     /// Replaces IPv6 NAT rules on this router at runtime.
@@ -888,6 +977,11 @@ impl Router {
             .lock()
             .unwrap()
             .set_router_nat_v6_mode(self.id, mode)?;
+
+        self.lab.emit(LabEventKind::NatV6Changed {
+            router: self.name.to_string(),
+            nat_v6: mode,
+        });
         Ok(())
     }
 
@@ -918,7 +1012,12 @@ impl Router {
             Ok(())
         })
         .await
-        .context("conntrack flush task panicked")?
+        .context("conntrack flush task panicked")??;
+
+        self.lab.emit(LabEventKind::NatStateFlushed {
+            router: self.name.to_string(),
+        });
+        Ok(())
     }
 
     // ── Spawn / run ────────────────────────────────────────────────────
@@ -1008,6 +1107,10 @@ impl Router {
             .with_router(self.id, |r| r.downlink_bridge.clone())
             .ok_or_else(|| anyhow!("router removed"))?;
         apply_or_remove_impair(&self.lab.netns, &self.ns, &bridge, impair).await;
+        self.lab.emit(LabEventKind::DownlinkConditionChanged {
+            router: self.name.to_string(),
+            condition: impair,
+        });
         Ok(())
     }
 
@@ -1037,7 +1140,12 @@ impl Router {
         let ns = self.ns.to_string();
         // Always remove existing rules first, then apply new ones.
         core::remove_firewall(&self.lab.netns, &ns).await?;
-        core::apply_firewall(&self.lab.netns, &ns, &fw, &wan_if).await
+        core::apply_firewall(&self.lab.netns, &ns, &fw, &wan_if).await?;
+        self.lab.emit(LabEventKind::FirewallChanged {
+            router: self.name.to_string(),
+            firewall: fw,
+        });
+        Ok(())
     }
 
     /// Spawns a STUN-like UDP reflector in this router's network namespace.

@@ -1,7 +1,5 @@
 pub mod assets;
 pub mod binary_cache;
-mod serve;
-pub mod ui;
 
 /// Initialises tracing for the current process (idempotent).
 ///

@@ -1,5 +1,8 @@
 import { useEffect, useMemo, useState } from 'react'
+import type { LabEvent } from '../devtools-types'
 import type { SimLogEntry } from '../types'
+import { parseIsoMs, formatTimestamp, formatRelativeTime, kvPairs } from '../time-format'
+import KvPairs from './KvPairs'
 
 const PREVIEW_BYTES = 256 * 1024
 const ANSI_RE = /\x1b\[[0-9;]*m/g
@@ -11,7 +14,7 @@ type EventRow = {
   path: string
   kind: string
   details: string
-  fields: string
+  fieldPairs: Array<{ key: string; value: string }>
   timeLabel: string
   timeMs: number
 }
@@ -19,21 +22,19 @@ type EventRow = {
 interface Props {
   base: string
   logs: SimLogEntry[]
+  labEvents?: LabEvent[]
   onJumpToLog?: (target: { node: string; path: string; timeLabel: string }) => void
 }
 
-function tryParseJsonEvent(line: string): { kind: string; fields: string; timeLabel: string; timeMs: number } | null {
+function tryParseJsonEvent(line: string): { kind: string; fieldPairs: Array<{ key: string; value: string }>; timeLabel: string; timeMs: number } | null {
   try {
     const v = JSON.parse(line) as Record<string, unknown>
     if (typeof v.kind !== 'string') return null
-    const fields = Object.entries(v)
-      .filter(([k]) => k !== 'kind')
-      .map(([k, val]) => `${k}=${typeof val === 'string' ? val : JSON.stringify(val)}`)
-      .join(' ')
+    const pairs = kvPairs(v, ['kind'])
     const ts = typeof v.timestamp === 'string' ? v.timestamp : null
     if (ts) {
       const ms = parseIsoMs(ts)
-      if (ms != null) return { kind: v.kind, fields, timeLabel: ts, timeMs: ms }
+      if (ms != null) return { kind: v.kind, fieldPairs: pairs.filter((p) => p.key !== 'timestamp'), timeLabel: ts, timeMs: ms }
     }
     return null
   } catch {
@@ -41,34 +42,25 @@ function tryParseJsonEvent(line: string): { kind: string; fields: string; timeLa
   }
 }
 
-function parseIsoMs(value: string): number | null {
-  const ms = Date.parse(value)
-  return Number.isFinite(ms) ? ms : null
+/** Extract event kind from a tracing target containing `_events::`. */
+function parseTracingEventKind(fragment: string): string | null {
+  const match = fragment.match(/_events::([a-zA-Z0-9_:]+)/)
+  if (!match) return null
+  return match[1] || 'event'
 }
 
-function parseIrohEventKind(fragment: string): string | null {
-  const marker = 'iroh::_events'
-  const idx = fragment.indexOf(marker)
-  if (idx < 0) return null
-  let rest = fragment.slice(idx + marker.length).trim()
-  rest = rest.replace(/^:+/, '')
-  rest = rest.split(/[{:]/)[0]?.trim() ?? ''
-  return rest || 'event'
-}
-
-function parseIrohFields(fragment: string): string {
-  const marker = 'iroh::_events'
-  const idx = fragment.indexOf(marker)
-  if (idx < 0) return ''
-  const tail = fragment.slice(idx)
-  const afterKind = tail.replace(/^iroh::_events(?:::[^:\s{]+)*/, '')
-  const out: string[] = []
+/** Extract key=value pairs from a tracing line containing `_events::`. */
+function parseTracingEventPairs(fragment: string): Array<{ key: string; value: string }> {
+  const match = fragment.match(/_events::([a-zA-Z0-9_:]+)/)
+  if (!match) return []
+  const afterKind = fragment.slice(fragment.indexOf(match[0]) + match[0].length)
+  const out: Array<{ key: string; value: string }> = []
   const re = /\b([a-zA-Z_][a-zA-Z0-9_]*)=(.*?)(?=\s+[a-zA-Z_][a-zA-Z0-9_]*=|$)/g
   let m: RegExpExecArray | null = null
   while ((m = re.exec(afterKind)) != null) {
-    out.push(`${m[1]}=${m[2].trim()}`)
+    out.push({ key: m[1], value: m[2].trim() })
   }
-  return out.join(' ')
+  return out
 }
 
 function parseLogEvents(node: string, path: string, text: string, offset: number): EventRow[] {
@@ -87,7 +79,7 @@ function parseLogEvents(node: string, path: string, text: string, offset: number
         path,
         kind: jsonEv.kind,
         details: stripped,
-        fields: jsonEv.fields,
+        fieldPairs: jsonEv.fieldPairs,
         timeLabel: jsonEv.timeLabel,
         timeMs: jsonEv.timeMs,
       })
@@ -99,9 +91,9 @@ function parseLogEvents(node: string, path: string, text: string, offset: number
     const target = m[3]
     const msg = m[4]
     const fragment = `${target}: ${msg}`
-    const kind = parseIrohEventKind(fragment)
+    const kind = parseTracingEventKind(fragment)
     if (!kind) continue
-    const kv = parseIrohFields(fragment)
+    const pairs = parseTracingEventPairs(fragment)
     const parsedMs = parseIsoMs(m[1])
     if (parsedMs == null) continue
     out.push({
@@ -110,7 +102,7 @@ function parseLogEvents(node: string, path: string, text: string, offset: number
       path,
       kind,
       details: stripped,
-      fields: kv,
+      fieldPairs: pairs,
       timeLabel: m[1],
       timeMs: parsedMs,
     })
@@ -118,13 +110,43 @@ function parseLogEvents(node: string, path: string, text: string, offset: number
   return out
 }
 
-export default function TimelineTab({ base, logs, onJumpToLog }: Props) {
+/** Convert LabEvents into EventRows for the timeline. */
+function labEventsToRows(events: LabEvent[]): EventRow[] {
+  return events
+    .filter((e) => e.timestamp)
+    .map((e, i) => {
+      const ms = parseIsoMs(e.timestamp)
+      if (ms == null) return null
+      const pairs = kvPairs(e as Record<string, unknown>, ['opid', 'timestamp', 'kind'])
+      return {
+        order: -10000 + i,
+        node: '_lab',
+        path: '',
+        kind: e.kind,
+        details: JSON.stringify(e),
+        fieldPairs: pairs,
+        timeLabel: e.timestamp,
+        timeMs: ms,
+      } satisfies EventRow
+    })
+    .filter((r): r is EventRow => r != null)
+}
+
+export default function TimelineTab({ base, logs, labEvents, onJumpToLog }: Props) {
   const [events, setEvents] = useState<EventRow[]>([])
   const [selected, setSelected] = useState<EventRow | null>(null)
   const [timeMode, setTimeMode] = useState<'relative' | 'absolute'>('relative')
 
   const candidateLogs = useMemo(
-    () => logs.filter((l) => l.kind !== 'qlog' && (l.kind === 'transfer' || l.path.endsWith('/stdout.log') || l.path.endsWith('/stderr.log') || l.path.endsWith('/out.log'))),
+    () =>
+      logs.filter(
+        (l) =>
+          l.kind === 'events' ||
+          l.kind === 'transfer' ||
+          l.path.endsWith('/stdout.log') ||
+          l.path.endsWith('/stderr.log') ||
+          l.path.endsWith('/out.log'),
+      ),
     [logs],
   )
   const candidateKey = useMemo(() => candidateLogs.map((l) => `${l.node}:${l.path}:${l.kind}`).join('|'), [candidateLogs])
@@ -143,8 +165,8 @@ export default function TimelineTab({ base, logs, onJumpToLog }: Props) {
       }),
     ).then((rows) => {
       if (!dead) {
-        const flat = rows
-          .flat()
+        const labRows = labEvents ? labEventsToRows(labEvents) : []
+        const flat = [...rows.flat(), ...labRows]
           .sort((a, b) => a.timeMs - b.timeMs || a.order - b.order || a.node.localeCompare(b.node) || a.kind.localeCompare(b.kind))
         setEvents(flat)
         if (!flat.length) {
@@ -164,7 +186,7 @@ export default function TimelineTab({ base, logs, onJumpToLog }: Props) {
     return () => {
       dead = true
     }
-  }, [base, candidateKey])
+  }, [base, candidateKey, labEvents])
 
   const nodes = useMemo(() => [...new Set(events.map((e) => e.node))].sort(), [events])
   const firstTimeMs = useMemo(() => {
@@ -172,10 +194,9 @@ export default function TimelineTab({ base, logs, onJumpToLog }: Props) {
   }, [events])
 
   const displayTime = (ev: EventRow): string => {
-    if (timeMode === 'absolute') return ev.timeLabel || ''
+    if (timeMode === 'absolute') return formatTimestamp(ev.timeLabel)
     if (ev.timeMs == null || firstTimeMs == null) return ''
-    const delta = Math.max(0, ev.timeMs - firstTimeMs)
-    return `+${(delta / 1000).toFixed(3)}s`
+    return formatRelativeTime(ev.timeMs, firstTimeMs)
   }
 
   if (events.length === 0 || nodes.length === 0) {
@@ -228,7 +249,7 @@ export default function TimelineTab({ base, logs, onJumpToLog }: Props) {
           <>
             <div className="section-header">
               <span>{selected.node} · {selected.kind}</span>
-              {selected.timeLabel && <span className="timeline-detail-time">{selected.timeLabel}</span>}
+              {selected.timeLabel && <span className="timeline-detail-time">{formatTimestamp(selected.timeLabel)}</span>}
               {onJumpToLog && selected.timeLabel && (
                 <button
                   className="btn"
@@ -240,12 +261,12 @@ export default function TimelineTab({ base, logs, onJumpToLog }: Props) {
               )}
             </div>
             <div className="timeline-detail-body">
-              <div className="timeline-detail-fields">{selected.fields || '(no parsed fields)'}</div>
+              <div className="timeline-detail-fields"><KvPairs pairs={selected.fieldPairs} /></div>
               <div className="timeline-detail-raw">{selected.details}</div>
             </div>
           </>
         ) : (
-          <div className="empty">hover/click an event cell to inspect details</div>
+          <div className="empty">click an event cell to inspect details</div>
         )}
       </div>
     </div>
