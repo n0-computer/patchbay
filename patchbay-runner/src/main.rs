@@ -901,11 +901,28 @@ mod tests {
                 .as_nanos()
         ));
         std::fs::create_dir_all(&root).expect("create temp workdir");
-        let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+
+        // Try compile-time path first, then VM mount path
+        let compile_time_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .unwrap()
             .to_path_buf();
-        let sim_path = workspace_root.join("iroh-integration/patchbay/sims/iperf-1to1-public.toml");
+        let vm_root = PathBuf::from("/app");
+        let sim_subpath = "iroh-integration/patchbay/sims/iperf-1to1-public.toml";
+
+        let (workspace_root, sim_path) =
+            if compile_time_root.join(sim_subpath).exists() {
+                (compile_time_root.clone(), compile_time_root.join(sim_subpath))
+            } else if vm_root.join(sim_subpath).exists() {
+                (vm_root.clone(), vm_root.join(sim_subpath))
+            } else {
+                eprintln!(
+                    "Skipping test: sim file not found at {} or {}",
+                    compile_time_root.join(sim_subpath).display(),
+                    vm_root.join(sim_subpath).display()
+                );
+                return;
+            };
         let project_root = workspace_root;
         sim::run_sims(
             vec![sim_path],

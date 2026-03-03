@@ -82,6 +82,19 @@ fn apply_mount_overlay(overlay: Option<&DnsOverlay>) {
         if let Err(e) = unshare(CloneFlags::CLONE_NEWNS) {
             tracing::warn!("unshare(CLONE_NEWNS) failed: {e} — DNS overlay bind-mounts may affect the host");
         }
+
+        // Make the entire mount tree private to prevent mount propagation between namespaces.
+        // Without this, bind mounts in one namespace can propagate to others if they share
+        // mount points from the parent namespace.
+        unsafe {
+            libc::mount(
+                std::ptr::null(),
+                c"/".as_ptr(),
+                std::ptr::null(),
+                libc::MS_REC | libc::MS_PRIVATE,
+                std::ptr::null(),
+            );
+        }
     }
     if let Some(o) = overlay {
         o.apply();

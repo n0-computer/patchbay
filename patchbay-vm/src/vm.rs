@@ -162,12 +162,13 @@ pub fn run_tests_in_vm(args: TestVmArgs) -> Result<()> {
     prepare_vm_guest(&vm)?;
 
     let target_dir = cargo_target_dir()?;
+    // Don't pass cargo_args to build - they're test filters for runtime, not build flags
     let test_bins = build_and_collect_test_binaries(
         &target_dir,
         &args.target,
         &args.packages,
         &args.tests,
-        &args.cargo_args,
+        &[],
     )?;
     if test_bins.is_empty() {
         bail!("no test binaries were built for target {}", args.target);
@@ -184,8 +185,17 @@ pub fn run_tests_in_vm(args: TestVmArgs) -> Result<()> {
     let mut passed = 0usize;
     let mut failed = 0usize;
     for guest_bin in staged {
-        // Use PATH that includes /sbin for nft, /usr/bin for ping, etc.
-        let rc = ssh_cmd_status(&vm, &["sudo", "env", "PATH=/usr/local/bin:/usr/bin:/bin:/sbin:/usr/sbin", &guest_bin]);
+        // Build the command with test filter arguments
+        let mut cmd_args = vec![
+            "sudo".to_string(),
+            "env".to_string(),
+            "PATH=/usr/local/bin:/usr/bin:/bin:/sbin:/usr/sbin".to_string(),
+            guest_bin.clone(),
+        ];
+        // Add test filter arguments (like "tests::dns::entry_visible_in_command --exact")
+        cmd_args.extend(args.cargo_args.iter().cloned());
+        let cmd_refs: Vec<&str> = cmd_args.iter().map(|s| s.as_str()).collect();
+        let rc = ssh_cmd_status(&vm, &cmd_refs);
         match rc {
             Ok(()) => {
                 passed += 1;
@@ -1087,7 +1097,8 @@ fn build_and_collect_test_binaries(
     cmd.env("CARGO_TARGET_DIR", target_dir);
     let out = cmd.output().context("run cargo test --no-run json")?;
     if !out.status.success() {
-        bail!("cargo test --no-run failed");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        bail!("cargo test --no-run failed:\n{}", stderr);
     }
 
     let mut bins = Vec::new();
@@ -1139,6 +1150,10 @@ fn stage_test_binaries(vm: &VmConfig, bins: &[PathBuf]) -> Result<Vec<String>> {
 }
 
 fn prepare_vm_guest(vm: &VmConfig) -> Result<()> {
+    // Clean up any stale mounts from previous test runs (e.g., orphaned /etc/hosts bind mounts)
+    let cleanup_script = "while grep -q '/etc/hosts' /proc/self/mountinfo 2>/dev/null; do umount -l /etc/hosts 2>/dev/null || break; done; while grep -q '/etc/resolv.conf.*tmpfs' /proc/self/mountinfo 2>/dev/null; do umount -l /etc/resolv.conf 2>/dev/null || break; done";
+    let _ = ssh_cmd(vm, &["sudo", "bash", "-c", cleanup_script]);
+
     let script = "set -euo pipefail; export DEBIAN_FRONTEND=noninteractive; if ! command -v ip >/dev/null 2>&1 || ! command -v tc >/dev/null 2>&1 || ! command -v nft >/dev/null 2>&1; then apt-get update; apt-get install -y bridge-utils iproute2 iputils-ping iptables nftables net-tools curl iperf3 jq; fi; modprobe sch_netem || true; sysctl -w net.ipv4.ip_forward=1";
     ssh_cmd(vm, &["sudo", "bash", "-lc", script])
 }
