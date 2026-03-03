@@ -383,15 +383,99 @@ async fn ra_source_is_link_local() -> Result<()> {
 
 #[tokio::test(flavor = "current_thread")]
 #[traced_test]
-#[ignore = "RA/RS provisioning engine follow-up"]
 async fn host_learns_default_router_from_ra_link_local() -> Result<()> {
+    check_caps()?;
+
+    let lab = Lab::with_opts(
+        LabOpts::default()
+            .ipv6_dad_mode(Ipv6DadMode::Disabled)
+            .ipv6_provisioning_mode(Ipv6ProvisioningMode::RaDriven),
+    )
+    .await?;
+    let r = lab
+        .add_router("r")
+        .ip_support(IpSupport::DualStack)
+        .ra_enabled(true)
+        .ra_interval_secs(1)
+        .ra_lifetime_secs(120)
+        .build()
+        .await?;
+    let dev = lab.add_device("d").uplink(r.id()).build().await?;
+
+    let route = dev.run_sync(|| {
+        let out = std::process::Command::new("ip")
+            .args(["-6", "route", "show", "default"])
+            .output()?;
+        if !out.status.success() {
+            anyhow::bail!("ip -6 route failed with status {}", out.status);
+        }
+        Ok::<_, anyhow::Error>(String::from_utf8_lossy(&out.stdout).to_string())
+    })?;
+    assert!(
+        route.contains("via fe80:"),
+        "expected RA-driven default via LL router, got: {route:?}"
+    );
+    assert!(
+        route.contains("dev eth0"),
+        "expected RA-driven default on eth0, got: {route:?}"
+    );
     Ok(())
 }
 
 #[tokio::test(flavor = "current_thread")]
 #[traced_test]
-#[ignore = "RA/RS provisioning engine follow-up"]
 async fn router_lifetime_zero_withdraws_default_router() -> Result<()> {
+    check_caps()?;
+
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let outdir = std::env::temp_dir().join(format!("patchbay-ra-lifetime-zero-{unique}"));
+    fs::create_dir_all(&outdir)?;
+    std::env::set_var("PATCHBAY_LOG", "trace");
+
+    let lab = Lab::with_opts(
+        LabOpts::default()
+            .outdir(&outdir)
+            .label("ra-lifetime-zero")
+            .ipv6_dad_mode(Ipv6DadMode::Disabled)
+            .ipv6_provisioning_mode(Ipv6ProvisioningMode::RaDriven),
+    )
+    .await?;
+    let r = lab
+        .add_router("r")
+        .ip_support(IpSupport::DualStack)
+        .ra_enabled(true)
+        .ra_interval_secs(1)
+        .ra_lifetime_secs(0)
+        .build()
+        .await?;
+    let dev = lab.add_device("d").uplink(r.id()).build().await?;
+
+    let route = dev.run_sync(|| {
+        let out = std::process::Command::new("ip")
+            .args(["-6", "route", "show", "default"])
+            .output()?;
+        if !out.status.success() {
+            anyhow::bail!("ip -6 route failed with status {}", out.status);
+        }
+        Ok::<_, anyhow::Error>(String::from_utf8_lossy(&out.stdout).to_string())
+    })?;
+    assert!(
+        route.trim().is_empty(),
+        "expected no default v6 route when RA lifetime is zero, got: {route:?}"
+    );
+
+    let events = r
+        .filepath("events.jsonl")
+        .context("missing router events path")?;
+    let has_lifetime_zero =
+        wait_for_file_contains(&events, "\"lifetime_secs\":0", Duration::from_secs(3)).await?;
+    assert!(
+        has_lifetime_zero,
+        "expected RouterAdvertisement event with zero lifetime"
+    );
     Ok(())
 }
 

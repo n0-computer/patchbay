@@ -887,8 +887,16 @@ impl NetworkCore {
         let gw_router = sw
             .owner_router
             .ok_or_else(|| anyhow!("switch missing owner"))?;
+        let gw_router_data = self
+            .router(gw_router)
+            .ok_or_else(|| anyhow!("gateway router missing"))?;
         let gw_br = sw.bridge.clone().unwrap_or_else(|| "br-lan".into());
-        let gw_ns = self.router(gw_router).unwrap().ns.clone();
+        let gw_ns = gw_router_data.ns.clone();
+        let gw_ll_v6 = if gw_router_data.cfg.ra_enabled && gw_router_data.cfg.ra_lifetime_secs > 0 {
+            gw_router_data.downstream_ll_v6
+        } else {
+            None
+        };
         let iface_build = IfaceBuild {
             dev_ns,
             gw_ns,
@@ -898,7 +906,7 @@ impl NetworkCore {
             prefix_len: sw.cidr.map(|c| c.prefix_len()).unwrap_or(24),
             gw_ip_v6: sw.gw_v6,
             dev_ip_v6: iface.ip_v6,
-            gw_ll_v6: self.router(gw_router).and_then(|r| r.downstream_ll_v6),
+            gw_ll_v6,
             dev_ll_v6: iface.ll_v6,
             prefix_len_v6: sw.cidr_v6.map(|c| c.prefix_len()).unwrap_or(64),
             impair,
@@ -973,7 +981,11 @@ impl NetworkCore {
             prefix_len,
             gw_ip_v6: sw.gw_v6,
             dev_ip_v6: new_ip_v6,
-            gw_ll_v6: target_router.downstream_ll_v6,
+            gw_ll_v6: if target_router.cfg.ra_enabled && target_router.cfg.ra_lifetime_secs > 0 {
+                target_router.downstream_ll_v6
+            } else {
+                None
+            },
             dev_ll_v6: new_ip_v6.map(|_| link_local_from_seed(old_idx)),
             prefix_len_v6: sw.cidr_v6.map(|c| c.prefix_len()).unwrap_or(64),
             impair,
@@ -1053,6 +1065,19 @@ impl NetworkCore {
             .and_then(|rid| self.routers.get(&rid))
             .and_then(|r| r.downstream_ll_v6);
         Ok((switch.gw_v6, ll))
+    }
+
+    /// Returns whether RA-driven default-route learning is active for this switch.
+    pub(crate) fn ra_default_enabled_for_switch(&self, sw: NodeId) -> Result<bool> {
+        let switch = self
+            .switches
+            .get(&sw)
+            .ok_or_else(|| anyhow!("switch missing"))?;
+        let router = switch
+            .owner_router
+            .and_then(|rid| self.routers.get(&rid))
+            .ok_or_else(|| anyhow!("switch missing owner router"))?;
+        Ok(router.cfg.ra_enabled && router.cfg.ra_lifetime_secs > 0)
     }
 
     /// Adds a switch node and returns its identifier.
@@ -2218,7 +2243,7 @@ pub(crate) async fn setup_router_async(
                 iface: router.downlink_bridge.to_string(),
                 src_ll: router.downstream_ll_v6,
                 interval_secs: data.ra_interval_secs.max(1),
-                lifetime_secs: data.ra_lifetime_secs.max(1),
+                lifetime_secs: data.ra_lifetime_secs,
             },
         )?;
     }

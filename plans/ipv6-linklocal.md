@@ -397,12 +397,17 @@ Implemented in `patchbay/src/tests/ipv6_ll.rs` so far:
 - `radriven_default_route_uses_scoped_ll_and_switches_iface`
 - `radriven_link_up_restores_scoped_ll_default_route`
 - `radriven_ra_worker_respects_router_enable_flag`
+- `ra_source_is_link_local`
+- `host_learns_default_router_from_ra_link_local`
+- `router_lifetime_zero_withdraws_default_router`
 
 Implemented control-plane scaffolding so far:
 
 - Router-level RA controls: `ra_enabled(bool)` and `ra_interval_secs(u64)`.
-- TOML support for router RA controls: `ra_enabled`, `ra_interval_secs`.
+- Router-level RA lifetime control: `ra_lifetime_secs(u64)`, including zero-lifetime withdrawal semantics for RA-driven default routing.
+- TOML support for router RA controls: `ra_enabled`, `ra_interval_secs`, `ra_lifetime_secs`.
 - RA worker now honors per-router enable flag and configured interval.
+- RA worker emits `RouterAdvertisement` events with `src`, `interval_secs`, and `lifetime_secs`.
 
 Validation commands before completion:
 

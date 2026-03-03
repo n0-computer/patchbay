@@ -314,16 +314,27 @@ impl Device {
         })
         .await?;
         if is_default_via {
-            let (gw_ip, gw_v6, gw_ll_v6, provisioning) = {
+            let (gw_ip, gw_v6, gw_ll_v6, provisioning, ra_default_enabled) = {
                 let inner = self.lab.core.lock().unwrap();
                 let gw_ip = inner.router_downlink_gw_for_switch(uplink)?;
                 let (gw_v6, gw_ll_v6) = inner.router_downlink_gw6_for_switch(uplink)?;
-                (gw_ip, gw_v6, gw_ll_v6, self.lab.ipv6_provisioning_mode)
+                let ra_default_enabled = inner.ra_default_enabled_for_switch(uplink)?;
+                (
+                    gw_ip,
+                    gw_v6,
+                    gw_ll_v6,
+                    self.lab.ipv6_provisioning_mode,
+                    ra_default_enabled,
+                )
             };
             core::nl_run(&self.lab.netns, &ns, move |nl: Netlink| async move {
                 nl.replace_default_route_v4(&ifname_owned, gw_ip).await?;
                 let primary_v6 = if provisioning == Ipv6ProvisioningMode::RaDriven {
-                    gw_ll_v6.or(gw_v6)
+                    if ra_default_enabled {
+                        gw_ll_v6.or(gw_v6)
+                    } else {
+                        None
+                    }
                 } else {
                     gw_v6.or(gw_ll_v6)
                 };
@@ -361,7 +372,7 @@ impl Device {
             .with_device(self.id, |d| Arc::clone(&d.op))
             .ok_or_else(|| anyhow!("device removed"))?;
         let _guard = op.lock().await;
-        let (ns, impair, gw_ip, gw_v6, gw_ll_v6, provisioning) = {
+        let (ns, impair, gw_ip, gw_v6, gw_ll_v6, provisioning, ra_default_enabled) = {
             let inner = self.lab.core.lock().unwrap();
             let dev = inner
                 .device(self.id)
@@ -371,6 +382,7 @@ impl Device {
                 .ok_or_else(|| anyhow!("interface '{}' not found", to))?;
             let gw_ip = inner.router_downlink_gw_for_switch(iface.uplink)?;
             let (gw_v6, gw_ll_v6) = inner.router_downlink_gw6_for_switch(iface.uplink)?;
+            let ra_default_enabled = inner.ra_default_enabled_for_switch(iface.uplink)?;
             (
                 dev.ns.clone(),
                 iface.impair,
@@ -378,13 +390,18 @@ impl Device {
                 gw_v6,
                 gw_ll_v6,
                 self.lab.ipv6_provisioning_mode,
+                ra_default_enabled,
             )
         };
         let to_owned = to.to_string();
         core::nl_run(&self.lab.netns, &ns, move |nl: Netlink| async move {
             nl.replace_default_route_v4(&to_owned, gw_ip).await?;
             let primary_v6 = if provisioning == Ipv6ProvisioningMode::RaDriven {
-                gw_ll_v6.or(gw_v6)
+                if ra_default_enabled {
+                    gw_ll_v6.or(gw_v6)
+                } else {
+                    None
+                }
             } else {
                 gw_v6.or(gw_ll_v6)
             };

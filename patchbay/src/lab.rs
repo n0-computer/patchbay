@@ -869,7 +869,7 @@ impl Lab {
             });
             let ra_enabled = router.cfg.ra_enabled;
             let ra_interval_secs = router.cfg.ra_interval_secs.max(1);
-            let ra_lifetime_secs = router.cfg.ra_lifetime_secs.max(1);
+            let ra_lifetime_secs = router.cfg.ra_lifetime_secs;
 
             let setup_data = RouterSetupData {
                 router,
@@ -1751,10 +1751,12 @@ impl RouterBuilder {
         self
     }
 
-    /// Sets Router Advertisement lifetime in seconds, clamped to at least 1 second.
+    /// Sets Router Advertisement lifetime in seconds.
+    ///
+    /// A value of `0` advertises default-router withdrawal semantics.
     pub fn ra_lifetime_secs(mut self, secs: u64) -> Self {
         if self.result.is_ok() {
-            self.ra_lifetime_secs = secs.max(1);
+            self.ra_lifetime_secs = secs;
         }
         self
     }
@@ -1798,7 +1800,7 @@ impl RouterBuilder {
                 r.cfg.firewall = self.firewall.clone();
                 r.cfg.ra_enabled = self.ra_enabled;
                 r.cfg.ra_interval_secs = self.ra_interval_secs.max(1);
-                r.cfg.ra_lifetime_secs = self.ra_lifetime_secs.max(1);
+                r.cfg.ra_lifetime_secs = self.ra_lifetime_secs;
             }
             let has_v4 = self.ip_support.has_v4();
             let has_v6 = self.ip_support.has_v6();
@@ -1990,7 +1992,7 @@ impl RouterBuilder {
             let has_v6 = router.cfg.ip_support.has_v6();
             let ra_enabled = router.cfg.ra_enabled;
             let ra_interval_secs = router.cfg.ra_interval_secs.max(1);
-            let ra_lifetime_secs = router.cfg.ra_lifetime_secs.max(1);
+            let ra_lifetime_secs = router.cfg.ra_lifetime_secs;
             let setup_data = RouterSetupData {
                 router,
                 root_ns: cfg.root_ns.clone(),
@@ -2189,6 +2191,17 @@ impl DeviceBuilder {
                     } else {
                         sw.gw_v6
                     };
+                let gw_ll_v6 = inner.router(gw_router).and_then(|r| {
+                    if self.inner.ipv6_provisioning_mode == Ipv6ProvisioningMode::RaDriven {
+                        if r.cfg.ra_enabled && r.cfg.ra_lifetime_secs > 0 {
+                            r.downstream_ll_v6
+                        } else {
+                            None
+                        }
+                    } else {
+                        r.downstream_ll_v6
+                    }
+                });
                 iface_data.push(IfaceBuild {
                     dev_ns: dev.ns.clone(),
                     gw_ns,
@@ -2198,7 +2211,7 @@ impl DeviceBuilder {
                     prefix_len: sw.cidr.map(|c| c.prefix_len()).unwrap_or(24),
                     gw_ip_v6,
                     dev_ip_v6: iface.ip_v6,
-                    gw_ll_v6: inner.router(gw_router).and_then(|r| r.downstream_ll_v6),
+                    gw_ll_v6,
                     dev_ll_v6: iface.ll_v6,
                     prefix_len_v6: sw.cidr_v6.map(|c| c.prefix_len()).unwrap_or(64),
                     impair: iface.impair,
