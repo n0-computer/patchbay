@@ -1,0 +1,112 @@
+name: Rolling Release
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-linux-musl:
+    name: Build Linux Musl
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install musl toolchain
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Build patchbay (linux musl)
+        run: cargo build -p patchbay-runner --bin patchbay --release --target x86_64-unknown-linux-musl
+
+      - name: Build patchbay-vm (linux musl)
+        run: cargo build -p patchbay-vm --release --target x86_64-unknown-linux-musl
+
+      - name: Package linux artifacts
+        run: |
+          mkdir -p dist
+          cp target/x86_64-unknown-linux-musl/release/patchbay dist/patchbay-x86_64-unknown-linux-musl
+          cp target/x86_64-unknown-linux-musl/release/patchbay-vm dist/patchbay-vm-x86_64-unknown-linux-musl
+          tar -C dist -czf dist/patchbay-x86_64-unknown-linux-musl.tar.gz patchbay-x86_64-unknown-linux-musl
+          tar -C dist -czf dist/patchbay-vm-x86_64-unknown-linux-musl.tar.gz patchbay-vm-x86_64-unknown-linux-musl
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-linux-musl
+          path: dist/*.tar.gz
+
+  build-macos:
+    name: Build macOS
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-14
+            target: aarch64-apple-darwin
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build patchbay-vm (${{ matrix.target }})
+        run: cargo build -p patchbay-vm --release --target ${{ matrix.target }}
+
+      - name: Package macOS artifact (${{ matrix.target }})
+        run: |
+          mkdir -p dist
+          cp target/${{ matrix.target }}/release/patchbay-vm dist/patchbay-vm-${{ matrix.target }}
+          tar -C dist -czf dist/patchbay-vm-${{ matrix.target }}.tar.gz patchbay-vm-${{ matrix.target }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-macos-${{ matrix.target }}
+          path: dist/*.tar.gz
+
+  publish-rolling:
+    name: Publish Rolling Release
+    runs-on: ubuntu-latest
+    needs:
+      - build-linux-musl
+      - build-macos
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-artifacts
+
+      - name: Move rolling tag
+        run: |
+          git tag -f rolling "$GITHUB_SHA"
+          git push -f origin refs/tags/rolling
+
+      - name: Publish rolling release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: rolling
+          name: Rolling build
+          prerelease: true
+          make_latest: false
+          files: |
+            release-artifacts/**/*.tar.gz
+          body: |
+            Automated rolling release from commit ${{ github.sha }}.
+            This release is updated on every push to main.
