@@ -1838,9 +1838,10 @@ impl RouterBuilder {
 
             // For sub-routers with NatV6Mode::None: add routes so that return
             // traffic for the sub-router's ULA subnet can reach it.
-            let parent_route_v6 = if let Some(uplink_sw) = router.uplink.filter(|&u| {
-                u != ix_sw && router.cfg.nat_v6 == NatV6Mode::None
-            }) {
+            let parent_route_v6 = if let Some(uplink_sw) = router
+                .uplink
+                .filter(|&u| u != ix_sw && router.cfg.nat_v6 == NatV6Mode::None)
+            {
                 let parent_id = inner.switch(uplink_sw).and_then(|sw| sw.owner_router);
                 // Route in the parent router's ns: sub-router's LAN via sub-router's WAN IP.
                 let parent_rt = if let (Some(cidr6), Some(via6), Some(ref owner_ns)) = (
