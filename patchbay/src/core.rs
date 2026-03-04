@@ -130,6 +130,11 @@ pub(crate) struct ReplugIfaceSetup {
     pub root_ns: Arc<str>,
 }
 
+pub(crate) struct DeviceDefaultV6RouteTarget {
+    pub ns: Arc<str>,
+    pub ifname: Arc<str>,
+}
+
 /// One network interface on a device, connected to a router's downstream switch.
 #[derive(Clone, Debug)]
 pub(crate) struct DeviceIfaceData {
@@ -1065,6 +1070,31 @@ impl NetworkCore {
             .and_then(|rid| self.routers.get(&rid))
             .and_then(|r| r.downstream_ll_v6);
         Ok((switch.gw_v6, ll))
+    }
+
+    pub(crate) fn router_default_v6_targets(
+        &self,
+        router: NodeId,
+    ) -> Result<Vec<DeviceDefaultV6RouteTarget>> {
+        let downlink = self
+            .router(router)
+            .ok_or_else(|| anyhow!("router removed"))?
+            .downlink
+            .ok_or_else(|| anyhow!("router has no downlink"))?;
+
+        let mut out = Vec::new();
+        for dev in self.devices.values() {
+            let Some(iface) = dev.iface(&dev.default_via) else {
+                continue;
+            };
+            if iface.uplink == downlink && iface.ip_v6.is_some() {
+                out.push(DeviceDefaultV6RouteTarget {
+                    ns: dev.ns.clone(),
+                    ifname: iface.ifname.clone(),
+                });
+            }
+        }
+        Ok(out)
     }
 
     /// Returns whether RA-driven default-route learning is active for this switch.

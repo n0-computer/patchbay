@@ -75,6 +75,30 @@ async fn emit_router_solicitation(
     .await
 }
 
+async fn reconcile_radriven_default_v6_routes(
+    lab: &Arc<LabInner>,
+    router: NodeId,
+    install_ll: Option<Ipv6Addr>,
+) -> Result<()> {
+    let targets = {
+        let inner = lab.core.lock().unwrap();
+        inner.router_default_v6_targets(router)?
+    };
+    for t in targets {
+        let ifname = t.ifname.to_string();
+        core::nl_run(&lab.netns, &t.ns, move |nl: Netlink| async move {
+            if let Some(ll) = install_ll {
+                nl.replace_default_route_v6_scoped(&ifname, ll).await?;
+            } else {
+                nl.clear_default_route_v6().await?;
+            }
+            Ok(())
+        })
+        .await?;
+    }
+    Ok(())
+}
+
 // ─────────────────────────────────────────────
 // Device / Router / DeviceIface handles
 // ─────────────────────────────────────────────
@@ -1147,11 +1171,25 @@ impl Router {
             .with_router(self.id, |r| Arc::clone(&r.op))
             .ok_or_else(|| anyhow!("router removed"))?;
         let _guard = op.lock().await;
-        let mut inner = self.lab.core.lock().unwrap();
-        let router = inner
-            .router_mut(self.id)
-            .ok_or_else(|| anyhow!("router removed"))?;
-        router.cfg.ra_enabled = enabled;
+        let install_ll = {
+            let mut inner = self.lab.core.lock().unwrap();
+            let router = inner
+                .router_mut(self.id)
+                .ok_or_else(|| anyhow!("router removed"))?;
+            router.cfg.ra_enabled = enabled;
+            let ll = router.downstream_ll_v6;
+            if self.lab.ipv6_provisioning_mode == Ipv6ProvisioningMode::RaDriven
+                && router.cfg.ra_enabled
+                && router.cfg.ra_lifetime_secs > 0
+            {
+                ll
+            } else {
+                None
+            }
+        };
+        if self.lab.ipv6_provisioning_mode == Ipv6ProvisioningMode::RaDriven {
+            reconcile_radriven_default_v6_routes(&self.lab, self.id, install_ll).await?;
+        }
         Ok(())
     }
 
@@ -1183,11 +1221,25 @@ impl Router {
             .with_router(self.id, |r| Arc::clone(&r.op))
             .ok_or_else(|| anyhow!("router removed"))?;
         let _guard = op.lock().await;
-        let mut inner = self.lab.core.lock().unwrap();
-        let router = inner
-            .router_mut(self.id)
-            .ok_or_else(|| anyhow!("router removed"))?;
-        router.cfg.ra_lifetime_secs = secs;
+        let install_ll = {
+            let mut inner = self.lab.core.lock().unwrap();
+            let router = inner
+                .router_mut(self.id)
+                .ok_or_else(|| anyhow!("router removed"))?;
+            router.cfg.ra_lifetime_secs = secs;
+            let ll = router.downstream_ll_v6;
+            if self.lab.ipv6_provisioning_mode == Ipv6ProvisioningMode::RaDriven
+                && router.cfg.ra_enabled
+                && router.cfg.ra_lifetime_secs > 0
+            {
+                ll
+            } else {
+                None
+            }
+        };
+        if self.lab.ipv6_provisioning_mode == Ipv6ProvisioningMode::RaDriven {
+            reconcile_radriven_default_v6_routes(&self.lab, self.id, install_ll).await?;
+        }
         Ok(())
     }
 

@@ -342,6 +342,21 @@ impl Netlink {
         Ok(())
     }
 
+    pub(crate) async fn clear_default_route_v6(&self) -> Result<()> {
+        trace!("clear default route v6");
+        let mut routes = self
+            .handle
+            .route()
+            .get(RouteMessageBuilder::<Ipv6Addr>::new().build())
+            .execute();
+        while let Some(route) = routes.try_next().await? {
+            if route.header.destination_prefix_length == 0 {
+                let _ = self.handle.route().del(route).execute().await;
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) async fn add_route_v6(
         &self,
         dst: Ipv6Addr,
