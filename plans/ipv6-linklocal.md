@@ -15,6 +15,7 @@
 - [ ] Phase 5: Tests and validation matrix
 - [x] Phase 5.1: Add RA worker lifecycle coverage for router namespace removal
 - [x] Phase 5.2: Add profile-behavior test for static vs RA-driven default-route semantics
+- [x] Phase 5.3a: Verify RA reconciliation only targets RA-driven devices when mixed with static overrides
 - [ ] Phase 5.3: Close remaining matrix gaps from this plan
 - [ ] Final review
 
