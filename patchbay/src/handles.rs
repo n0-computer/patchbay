@@ -474,10 +474,12 @@ impl Device {
 
     /// Spawns a STUN-like UDP reflector in this device's network namespace.
     ///
-    /// The reflector echoes the sender's observed `ip:port` back, enabling
-    /// NAT mapping tests via [`probe_udp_mapping`](Self::probe_udp_mapping).
-    pub fn spawn_reflector(&self, bind: SocketAddr) -> Result<()> {
-        self.lab.spawn_reflector_in(&self.ns, bind)
+    /// Returns after the socket is confirmed bound. The returned
+    /// [`ReflectorGuard`](core::ReflectorGuard) aborts the reflector
+    /// task when dropped — callers must keep it alive for the reflector's
+    /// lifetime.
+    pub async fn spawn_reflector(&self, bind: SocketAddr) -> Result<core::ReflectorGuard> {
+        self.lab.spawn_reflector_in(&self.ns, bind).await
     }
 
     /// Adds a hosts entry visible only to this device.
@@ -1189,8 +1191,8 @@ impl Router {
     /// Spawns a STUN-like UDP reflector in this router's network namespace.
     ///
     /// See [`Device::spawn_reflector`] for details.
-    pub fn spawn_reflector(&self, bind: SocketAddr) -> Result<()> {
-        self.lab.spawn_reflector_in(&self.ns, bind)
+    pub async fn spawn_reflector(&self, bind: SocketAddr) -> Result<core::ReflectorGuard> {
+        self.lab.spawn_reflector_in(&self.ns, bind).await
     }
 }
 
@@ -1302,9 +1304,9 @@ impl Ix {
     /// Spawns a STUN-like UDP reflector in the IX root namespace.
     ///
     /// See [`Device::spawn_reflector`] for details.
-    pub fn spawn_reflector(&self, bind: SocketAddr) -> Result<()> {
+    pub async fn spawn_reflector(&self, bind: SocketAddr) -> Result<core::ReflectorGuard> {
         let ns = self.lab.core.lock().unwrap().root_ns().to_string();
-        self.lab.spawn_reflector_in(&ns, bind)
+        self.lab.spawn_reflector_in(&ns, bind).await
     }
 }
 

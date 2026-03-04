@@ -21,16 +21,8 @@ async fn fullcone_holepunch() -> Result<()> {
     let dev1 = lab.add_device("dev1").uplink(nat1.id()).build().await?;
     let dev2 = lab.add_device("dev2").uplink(nat2.id()).build().await?;
 
-    let (stun_tx, stun_rx) = oneshot::channel();
-    let _task_relay = stun.spawn({
-        async move |ctx| {
-            let addr = SocketAddr::from((ctx.ip().unwrap(), 9999));
-            ctx.spawn_reflector(addr)?;
-            stun_tx.send(addr).unwrap();
-            anyhow::Ok(())
-        }
-    });
-    let stun_addr = stun_rx.await.unwrap();
+    let stun_addr = SocketAddr::from((stun.ip().unwrap(), 9999));
+    let _r = stun.spawn_reflector(stun_addr).await?;
 
     info!("NOW START");
 
@@ -109,16 +101,8 @@ async fn home_nat_holepunch() -> Result<()> {
         let dev1 = lab.add_device("dev1").uplink(nat1.id()).build().await?;
         let dev2 = lab.add_device("dev2").uplink(nat2.id()).build().await?;
 
-        let (stun_tx, stun_rx) = oneshot::channel();
-        let _task_relay = stun.spawn({
-            async move |ctx| {
-                let addr = SocketAddr::from((ctx.ip().unwrap(), 9999));
-                ctx.spawn_reflector(addr)?;
-                stun_tx.send(addr).unwrap();
-                anyhow::Ok(())
-            }
-        });
-        let stun_addr = stun_rx.await.unwrap();
+        let stun_addr = SocketAddr::from((stun.ip().unwrap(), 9999));
+        let _r = stun.spawn_reflector(stun_addr).await?;
 
         let timeout = Duration::from_secs(15);
         let stagger = Duration::from_millis(stagger_ms);

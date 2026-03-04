@@ -42,8 +42,7 @@ async fn preset_home() -> Result<()> {
 
     // Outbound UDP to DC should work through NAT.
     let reflector = SocketAddr::new(IpAddr::V4(dc_ip), 9220);
-    dc.spawn_reflector(reflector)?;
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    let _r = dc.spawn_reflector(reflector).await?;
 
     let rtt = dev.run_sync(move || test_utils::udp_rtt_sync(reflector))?;
     assert!(rtt < Duration::from_millis(500), "outbound should work");
@@ -114,8 +113,7 @@ async fn preset_mobile() -> Result<()> {
 
     // Outbound should work.
     let reflector = SocketAddr::new(IpAddr::V4(dc_ip), 9222);
-    dc.spawn_reflector(reflector)?;
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    let _r = dc.spawn_reflector(reflector).await?;
 
     let rtt = phone.run_sync(move || test_utils::udp_rtt_sync(reflector))?;
     assert!(rtt < Duration::from_millis(500));
@@ -147,8 +145,7 @@ async fn preset_corporate_blocks_udp() -> Result<()> {
 
     // Corporate firewall should block arbitrary UDP.
     let reflector = SocketAddr::new(IpAddr::V4(dc_ip), 9223);
-    dc.spawn_reflector(reflector)?;
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    let _r = dc.spawn_reflector(reflector).await?;
 
     let blocked = dev.run_sync(move || test_utils::udp_rtt_sync(reflector));
     assert!(
@@ -196,8 +193,7 @@ async fn preset_override() -> Result<()> {
 
     // Outbound should work (FullCone + BlockInbound).
     let reflector = SocketAddr::new(IpAddr::V4(dc_ip), 9225);
-    dc.spawn_reflector(reflector)?;
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    let _r = dc.spawn_reflector(reflector).await?;
 
     let rtt = dev.run_sync(move || test_utils::udp_rtt_sync(reflector))?;
     assert!(rtt < Duration::from_millis(500));
@@ -360,8 +356,7 @@ async fn preset_mobile_v6() -> Result<()> {
 
     // Phone can reach v4 server via NAT64 prefix.
     let reflector = SocketAddr::new(IpAddr::V4(dc_ip), 9350);
-    dc.spawn_reflector(reflector)?;
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    let _r = dc.spawn_reflector(reflector).await?;
 
     let nat64_addr = crate::nat64::embed_v4_in_nat64(dc_ip);
     let nat64_target = SocketAddr::new(IpAddr::V6(nat64_addr), 9350);

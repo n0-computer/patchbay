@@ -97,8 +97,7 @@ async fn v6_only_no_v4_routes() -> Result<()> {
     // v6 roundtrip succeeds.
     let dc_ip_v6 = dc.uplink_ip_v6().expect("dc v6 uplink");
     let r_v6 = SocketAddr::new(IpAddr::V6(dc_ip_v6), 3491);
-    dc.spawn_reflector(r_v6)?;
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    let _r = dc.spawn_reflector(r_v6).await?;
     let o = dev.run_sync(move || test_utils::udp_roundtrip(r_v6))?;
     assert!(o.ip().is_ipv6(), "reflexive should be v6");
 
@@ -129,14 +128,12 @@ async fn dual_stack_public_addrs() -> Result<()> {
     // v4 reflector
     let dc_ip_v4 = dc.uplink_ip().expect("dc v4 uplink");
     let r_v4 = SocketAddr::new(IpAddr::V4(dc_ip_v4), 3492);
-    dc.spawn_reflector(r_v4)?;
+    let _r = dc.spawn_reflector(r_v4).await?;
 
     // v6 reflector
     let dc_ip_v6 = dc.uplink_ip_v6().expect("dc v6 uplink");
     let r_v6 = SocketAddr::new(IpAddr::V6(dc_ip_v6), 3493);
-    dc.spawn_reflector(r_v6)?;
-
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    let _r = dc.spawn_reflector(r_v6).await?;
 
     let o_v4 = dev.run_sync(move || test_utils::udp_roundtrip(r_v4))?;
     assert!(o_v4.ip().is_ipv4(), "v4 reflexive should be v4");
@@ -199,8 +196,8 @@ async fn dual_stack_home_nat_udp() -> Result<()> {
     // Spawn reflectors on both address families.
     let reflector_v4: SocketAddr = (server_v4, 3478).into();
     let reflector_v6: SocketAddr = (server_v6, 3479).into();
-    server.spawn_reflector(reflector_v4)?;
-    server.spawn_reflector(reflector_v6)?;
+    let _r = server.spawn_reflector(reflector_v4).await?;
+    let _r = server.spawn_reflector(reflector_v6).await?;
 
     // Home NAT router: dual-stack with NPTv6.
     let nat = lab

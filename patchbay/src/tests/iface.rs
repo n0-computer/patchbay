@@ -24,8 +24,7 @@ async fn add_remove_runtime() -> Result<()> {
 
     let dc_ip = dc.uplink_ip().context("no dc uplink ip")?;
     let reflector = SocketAddr::new(IpAddr::V4(dc_ip), 17_300);
-    dc.spawn_reflector(reflector)?;
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    let _r = dc.spawn_reflector(reflector).await?;
 
     // Device initially has one interface.
     assert_eq!(dev.interfaces().len(), 1);
@@ -163,8 +162,7 @@ async fn replug_to_different_subnet() -> Result<()> {
     // Connectivity through dc_b works.
     let dc_a_ip = dc_a.uplink_ip().context("dc_a uplink")?;
     let reflector = SocketAddr::new(IpAddr::V4(dc_a_ip), 20_300);
-    dc_a.spawn_reflector(reflector)?;
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    let _r = dc_a.spawn_reflector(reflector).await?;
     dev.run_sync(move || test_utils::udp_roundtrip(reflector))
         .context("udp roundtrip after replug")?;
 

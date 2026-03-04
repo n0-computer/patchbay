@@ -116,6 +116,7 @@ struct NatTestCtx {
     expected_ip: Ipv4Addr,
     r_dc: SocketAddr,
     r_ix: SocketAddr,
+    _reflectors: Vec<core::ReflectorGuard>,
 }
 
 struct DualNatLab {
@@ -125,6 +126,7 @@ struct DualNatLab {
     nat_a: Router,
     nat_b: Router,
     reflector: SocketAddr,
+    _reflector_guard: core::ReflectorGuard,
 }
 
 // ── Test helper functions ────────────────────────────────────────────
@@ -346,9 +348,9 @@ async fn build_nat_case(
     let r_dc = SocketAddr::new(IpAddr::V4(dc_ip), port_base);
     let r_ix = SocketAddr::new(IpAddr::V4(lab.ix().gw()), port_base + 1);
 
-    dc.spawn_reflector(r_dc)?;
+    let g1 = dc.spawn_reflector(r_dc).await?;
     let ix = lab.ix();
-    ix.spawn_reflector(r_ix)?;
+    let g2 = ix.spawn_reflector(r_ix).await?;
 
     dc.spawn(move |_| async move { spawn_tcp_reflector(r_dc).await })?
         .await
@@ -374,6 +376,7 @@ async fn build_nat_case(
             expected_ip,
             r_dc,
             r_ix,
+            _reflectors: vec![g1, g2],
         },
     ))
 }
@@ -394,7 +397,7 @@ async fn build_dual_nat_lab(mode_a: Nat, mode_b: Nat, port_base: u16) -> Result<
     let dc_ip = dc.uplink_ip().context("no dc uplink ip")?;
     let reflector = SocketAddr::new(IpAddr::V4(dc_ip), port_base);
 
-    dc.spawn_reflector(reflector)?;
+    let guard = dc.spawn_reflector(reflector).await?;
     dc.spawn(move |_| async move { spawn_tcp_reflector(reflector).await })?
         .await
         .context("tcp reflector task panicked")??;
@@ -407,6 +410,7 @@ async fn build_dual_nat_lab(mode_a: Nat, mode_b: Nat, port_base: u16) -> Result<
         nat_a,
         nat_b,
         reflector,
+        _reflector_guard: guard,
     })
 }
 
@@ -414,7 +418,14 @@ async fn build_single_nat_case(
     nat_mode: Nat,
     wiring: UplinkWiring,
     port_base: u16,
-) -> Result<(Lab, String, SocketAddr, SocketAddr, Ipv4Addr)> {
+) -> Result<(
+    Lab,
+    String,
+    SocketAddr,
+    SocketAddr,
+    Ipv4Addr,
+    Vec<core::ReflectorGuard>,
+)> {
     let lab = Lab::new().await?;
     let dc = lab.add_router("dc").build().await?;
     let upstream = match wiring {
@@ -438,10 +449,9 @@ async fn build_single_nat_case(
     let dc_ip = dc.uplink_ip().context("no dc uplink ip")?;
     let r_dc = SocketAddr::new(IpAddr::V4(dc_ip), port_base);
     let r_ix = SocketAddr::new(IpAddr::V4(lab.ix().gw()), port_base + 1);
-    dc.spawn_reflector(r_dc)?;
+    let g1 = dc.spawn_reflector(r_dc).await?;
     let ix = lab.ix();
-    ix.spawn_reflector(r_ix)?;
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    let g2 = ix.spawn_reflector(r_ix).await?;
 
     let dev_ns = dev.ns();
     let expected_ip = match (nat_mode, wiring) {
@@ -453,7 +463,14 @@ async fn build_single_nat_case(
         (Nat::None, _) => dev.ip().unwrap(),
         _ => nat.uplink_ip().context("no uplink ip")?,
     };
-    Ok((lab, dev_ns.to_string(), r_dc, r_ix, expected_ip))
+    Ok((
+        lab,
+        dev_ns.to_string(),
+        r_dc,
+        r_ix,
+        expected_ip,
+        vec![g1, g2],
+    ))
 }
 
 /// Wraps a future with a tracing span and tokio timeout.

@@ -23,8 +23,7 @@ async fn basic_latency() -> Result<()> {
 
     let eu_ip = dc_eu.uplink_ip().context("no uplink ip")?;
     let r_eu = SocketAddr::new(IpAddr::V4(eu_ip), 9100);
-    dc_eu.spawn_reflector(r_eu)?;
-    tokio::time::sleep(Duration::from_millis(250)).await;
+    let _r = dc_eu.spawn_reflector(r_eu).await?;
 
     let rtt = dev_us.run_sync(move || test_utils::udp_rtt_sync(r_eu))?;
     assert!(
@@ -53,8 +52,7 @@ async fn default_regions() -> Result<()> {
 
     let eu_ip = dc_eu.uplink_ip().context("no uplink ip")?;
     let r_eu = SocketAddr::new(IpAddr::V4(eu_ip), 9101);
-    dc_eu.spawn_reflector(r_eu)?;
-    tokio::time::sleep(Duration::from_millis(250)).await;
+    let _r = dc_eu.spawn_reflector(r_eu).await?;
 
     let rtt = dev_us.run_sync(move || test_utils::udp_rtt_sync(r_eu))?;
     assert!(
@@ -81,8 +79,7 @@ async fn break_restore_link() -> Result<()> {
 
     let asia_ip = dc_asia.uplink_ip().context("no uplink ip")?;
     let r_asia = SocketAddr::new(IpAddr::V4(asia_ip), 9102);
-    dc_asia.spawn_reflector(r_asia)?;
-    tokio::time::sleep(Duration::from_millis(250)).await;
+    let _r = dc_asia.spawn_reflector(r_asia).await?;
 
     let rtt_direct = dc_eu.run_sync(move || test_utils::udp_rtt_sync(r_asia))?;
     assert!(
@@ -139,12 +136,11 @@ async fn impair_stacks_with_latency() -> Result<()> {
 
     let us_ip = dc_us.uplink_ip().context("no uplink ip")?;
     let r_us = SocketAddr::new(IpAddr::V4(us_ip), 18_700);
-    dc_us.spawn_reflector(r_us)?;
+    let _r = dc_us.spawn_reflector(r_us).await?;
 
     let eu_ip = dc_eu.uplink_ip().context("no uplink ip")?;
     let r_eu = SocketAddr::new(IpAddr::V4(eu_ip), 18_701);
-    dc_eu.spawn_reflector(r_eu)?;
-    tokio::time::sleep(Duration::from_millis(250)).await;
+    let _r = dc_eu.spawn_reflector(r_eu).await?;
 
     let rtt_cross = dev.run_sync(move || test_utils::udp_rtt_sync(r_us))?;
     assert!(
@@ -189,8 +185,7 @@ async fn v6_latency() -> Result<()> {
 
     let eu_v6 = dc_eu.uplink_ip_v6().expect("eu v6 uplink");
     let r_v6 = SocketAddr::new(IpAddr::V6(eu_v6), 3495);
-    dc_eu.spawn_reflector(r_v6)?;
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    let _r = dc_eu.spawn_reflector(r_v6).await?;
 
     let rtt = dc_us.run_sync(move || test_utils::udp_rtt_sync(r_v6))?;
     assert!(
@@ -225,12 +220,11 @@ async fn dual_stack_latency() -> Result<()> {
 
     let eu_v4 = dc_eu.uplink_ip().expect("eu v4 uplink");
     let r_v4 = SocketAddr::new(IpAddr::V4(eu_v4), 3510);
-    dc_eu.spawn_reflector(r_v4)?;
+    let _r = dc_eu.spawn_reflector(r_v4).await?;
 
     let eu_v6 = dc_eu.uplink_ip_v6().expect("eu v6 uplink");
     let r_v6 = SocketAddr::new(IpAddr::V6(eu_v6), 3511);
-    dc_eu.spawn_reflector(r_v6)?;
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    let _r = dc_eu.spawn_reflector(r_v6).await?;
 
     let rtt_v4 = dc_us.run_sync(move || test_utils::udp_rtt_sync(r_v4))?;
     assert!(
@@ -259,8 +253,7 @@ async fn regionless_to_region() -> Result<()> {
 
     let us_ip = dc_us.uplink_ip().context("no uplink ip")?;
     let r_us = SocketAddr::new(IpAddr::V4(us_ip), 9104);
-    dc_us.spawn_reflector(r_us)?;
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    let _r = dc_us.spawn_reflector(r_us).await?;
 
     let rtt = dc.run_sync(move || test_utils::udp_rtt_sync(r_us))?;
     assert!(
@@ -296,8 +289,7 @@ async fn mixed_nat_region() -> Result<()> {
 
     let us_ip = dc_us.uplink_ip().context("no uplink ip")?;
     let r_us = SocketAddr::new(IpAddr::V4(us_ip), 9105);
-    dc_us.spawn_reflector(r_us)?;
-    tokio::time::sleep(Duration::from_millis(250)).await;
+    let _r = dc_us.spawn_reflector(r_us).await?;
 
     let rtt = dev.run_sync(move || test_utils::udp_rtt_sync(r_us))?;
     assert!(
@@ -344,12 +336,11 @@ async fn three_region_triangle() -> Result<()> {
 
     let b_ip = dc_b.uplink_ip().context("no b uplink ip")?;
     let r_b = SocketAddr::new(IpAddr::V4(b_ip), 20_400);
-    dc_b.spawn_reflector(r_b)?;
+    let _r = dc_b.spawn_reflector(r_b).await?;
 
     let c_ip = dc_c.uplink_ip().context("no c uplink ip")?;
     let r_c = SocketAddr::new(IpAddr::V4(c_ip), 20_401);
-    dc_c.spawn_reflector(r_c)?;
-    tokio::time::sleep(Duration::from_millis(250)).await;
+    let _r = dc_c.spawn_reflector(r_c).await?;
 
     // A↔B: 30ms one-way → RTT ≥ 50ms.
     let rtt_ab = dc_a.run_sync(move || test_utils::udp_rtt_sync(r_b))?;

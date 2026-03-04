@@ -20,8 +20,7 @@ async fn route_switch_changes_impairment() -> Result<()> {
 
     let dc_ip = dc.uplink_ip().context("no dc uplink ip")?;
     let r = SocketAddr::new(IpAddr::V4(dc_ip), 9200);
-    dc.spawn_reflector(r)?;
-    tokio::time::sleep(Duration::from_millis(250)).await;
+    let _r = dc.spawn_reflector(r).await?;
 
     let fast_rtt = dev.run_sync(move || test_utils::udp_rtt_sync(r))?;
 
@@ -62,8 +61,7 @@ async fn link_down_up() -> Result<()> {
             let dev_handle = lab.device_by_name("dev").unwrap();
             match proto {
                 Proto::Udp => {
-                    dc.spawn_reflector(r)?;
-                    tokio::time::sleep(Duration::from_millis(200)).await;
+                    let _r = dc.spawn_reflector(r).await?;
                     dev.run_sync(move || {
                         test_utils::probe_udp(r, Duration::from_millis(500), Some(bind))
                     })
@@ -217,8 +215,7 @@ async fn rate_udp_upload() -> Result<()> {
 
     let dc_ip = dc.uplink_ip().context("no dc uplink ip")?;
     let r = SocketAddr::new(IpAddr::V4(dc_ip), 17_500);
-    dc.spawn_reflector(r)?;
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    let _r = dc.spawn_reflector(r).await?;
 
     // ~300 KB at 2 Mbit/s ≈ 1.2 s.
     let start = Instant::now();
@@ -257,8 +254,7 @@ async fn rate_udp_download() -> Result<()> {
 
     let dc_ip = dc.uplink_ip().context("no dc uplink ip")?;
     let r = SocketAddr::new(IpAddr::V4(dc_ip), 17_600);
-    dc.spawn_reflector(r)?;
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    let _r = dc.spawn_reflector(r).await?;
 
     let start = Instant::now();
     dev_id
@@ -441,8 +437,7 @@ async fn loss_udp_moderate() -> Result<()> {
 
     let dc_ip = dc.uplink_ip().context("no dc uplink ip")?;
     let r = SocketAddr::new(IpAddr::V4(dc_ip), 18_000);
-    dc.spawn_reflector(r)?;
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    let _r = dc.spawn_reflector(r).await?;
 
     // tc netem loss is on the device egress, so ~50% of probes reach the
     // reflector and responses come back unlossed. Wide bounds account for
@@ -486,8 +481,7 @@ async fn loss_udp_high() -> Result<()> {
 
     let dc_ip = dc.uplink_ip().context("no dc uplink ip")?;
     let r = SocketAddr::new(IpAddr::V4(dc_ip), 18_100);
-    dc.spawn_reflector(r)?;
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    let _r = dc.spawn_reflector(r).await?;
 
     let (_, received) = dev
         .spawn(move |_| async move {
@@ -584,8 +578,7 @@ async fn loss_udp_bidirectional() -> Result<()> {
 
     let dc_ip = dc.uplink_ip().context("no dc uplink ip")?;
     let r = SocketAddr::new(IpAddr::V4(dc_ip), 18_300);
-    dc.spawn_reflector(r)?;
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    let _r = dc.spawn_reflector(r).await?;
 
     // Round-trip delivery ≈ (1-0.3)×(1-0.3) = 49 %; expect < 80.
     let (_, received) = dev
@@ -633,8 +626,7 @@ async fn latency_upload_download() -> Result<()> {
 
     let dc_ip = dc.uplink_ip().context("no dc uplink ip")?;
     let r = SocketAddr::new(IpAddr::V4(dc_ip), 18_500);
-    dc.spawn_reflector(r)?;
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    let _r = dc.spawn_reflector(r).await?;
 
     let rtt = dev.run_sync(move || test_utils::udp_rtt_sync(r))?;
     assert!(
@@ -686,8 +678,7 @@ async fn latency_multihop_chain() -> Result<()> {
 
     let dc_ip = dc.uplink_ip().context("no dc uplink ip")?;
     let r = SocketAddr::new(IpAddr::V4(dc_ip), 18_700);
-    dc.spawn_reflector(r)?;
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    let _r = dc.spawn_reflector(r).await?;
 
     let rtt = dev.run_sync(move || test_utils::udp_rtt_sync(r))?;
     assert!(
@@ -827,8 +818,7 @@ async fn latency_dynamic_add_remove() -> Result<()> {
 
     let dc_ip = dc.uplink_ip().context("no dc uplink ip")?;
     let r = SocketAddr::new(IpAddr::V4(dc_ip), 19_000);
-    dc.spawn_reflector(r)?;
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    let _r = dc.spawn_reflector(r).await?;
 
     let baseline = dev.run_sync(move || test_utils::udp_rtt_sync(r))?;
 
@@ -889,8 +879,7 @@ async fn presets_rtt_and_loss() -> Result<()> {
 
             let dc_ip = dc.uplink_ip().context("no dc uplink ip")?;
             let r = SocketAddr::new(IpAddr::V4(dc_ip), port_base);
-            dc.spawn_reflector(r)?;
-            tokio::time::sleep(Duration::from_millis(200)).await;
+            let _r = dc.spawn_reflector(r).await?;
 
             let rtt = dev.run_sync(move || test_utils::udp_rtt_sync(r))?;
             if rtt < Duration::from_millis(min_latency_ms) {
@@ -986,8 +975,7 @@ async fn downlink_builder_latency() -> Result<()> {
 
     let dc_ip = dc.uplink_ip().context("no dc uplink ip")?;
     let r = SocketAddr::new(IpAddr::V4(dc_ip), 19_200);
-    dc.spawn_reflector(r)?;
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    let _r = dc.spawn_reflector(r).await?;
 
     let rtt = dev.run_sync(move || test_utils::udp_rtt_sync(r))?;
     assert!(
@@ -1044,8 +1032,7 @@ async fn loss_dynamic_change() -> Result<()> {
 
     let dc_ip = dc.uplink_ip().context("no dc uplink ip")?;
     let r = SocketAddr::new(IpAddr::V4(dc_ip), 20_500);
-    dc.spawn_reflector(r)?;
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    let _r = dc.spawn_reflector(r).await?;
 
     // Baseline: no loss, all 50 packets should arrive.
     let (_, recv_baseline) = dev

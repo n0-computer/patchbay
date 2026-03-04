@@ -40,9 +40,26 @@ jobs:
         working-directory: ui
         run: npm run build
 
+      - name: Get Playwright version
+        id: pw-version
+        working-directory: ui
+        run: echo "version=$(node -e "console.log(require('./node_modules/@playwright/test/package.json').version)")" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/cache@v4
+        id: pw-cache
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ steps.pw-version.outputs.version }}-chromium
+
       - name: Install Playwright browser
         working-directory: ui
         run: npx playwright install --with-deps chromium
+        if: steps.pw-cache.outputs.cache-hit != 'true'
+
+      - name: Install Playwright system deps
+        working-directory: ui
+        run: npx playwright install-deps chromium
+        if: steps.pw-cache.outputs.cache-hit == 'true'
 
       - name: Install iperf3
         run: sudo apt-get update && sudo apt-get install -y iperf3

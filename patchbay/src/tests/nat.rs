@@ -23,9 +23,7 @@ async fn cgnat_reflexive_ip() -> Result<()> {
 
     let dc_ip = dc.uplink_ip().context("no dc uplink ip")?;
     let r = SocketAddr::new(IpAddr::V4(dc_ip), 5478);
-    dc.spawn_reflector(r)?;
-
-    tokio::time::sleep(Duration::from_millis(250)).await;
+    let _r = dc.spawn_reflector(r).await?;
 
     let dev1 = lab.device_by_name("dev1").unwrap();
     let o = dev1.probe_udp_mapping(r)?;
@@ -71,8 +69,7 @@ async fn cgnat_shared_reflexive_ip() -> Result<()> {
 
     let dc_ip = dc.uplink_ip().context("no dc uplink ip")?;
     let reflector = SocketAddr::new(IpAddr::V4(dc_ip), 6478);
-    dc.spawn_reflector(reflector)?;
-    tokio::time::sleep(Duration::from_millis(250)).await;
+    let _r = dc.spawn_reflector(reflector).await?;
 
     let provider = lab.device_by_name("provider").unwrap();
     let fetcher = lab.device_by_name("fetcher").unwrap();
@@ -143,7 +140,7 @@ async fn matrix_connectivity_and_reflexive_ip() -> Result<()> {
     for (mode, wiring) in cases {
         let port_base = 10000 + case_idx * 10;
         case_idx = case_idx.saturating_add(1);
-        let (lab, _dev_ns, r_dc, _r_ix, expected_ip) =
+        let (lab, _dev_ns, r_dc, _r_ix, expected_ip, _guards) =
             build_single_nat_case(mode, wiring, port_base).await?;
         let dev = lab.device_by_name("dev").unwrap();
         let r_dc_ip_str = r_dc.ip().to_string();
@@ -219,8 +216,7 @@ async fn private_isolation_public_reachable() -> Result<()> {
 
     let dc_ip = dc.uplink_ip().context("no dc uplink ip")?;
     let reflector = SocketAddr::new(IpAddr::V4(dc_ip), 12000);
-    dc.spawn_reflector(reflector)?;
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    let _r = dc.spawn_reflector(reflector).await?;
 
     let a1_map = a1.probe_udp_mapping(reflector)?;
     let a2_map = a2.probe_udp_mapping(reflector)?;
@@ -411,8 +407,7 @@ async fn same_nat_shared_ip() -> Result<()> {
 
     let dc_ip = dc.uplink_ip().context("no dc uplink ip")?;
     let r = SocketAddr::new(IpAddr::V4(dc_ip), 17_100);
-    dc.spawn_reflector(r)?;
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    let _r = dc.spawn_reflector(r).await?;
 
     let oa = dev_a.run_sync(move || test_utils::udp_roundtrip(r))?;
     let ob = dev_b.run_sync(move || test_utils::udp_roundtrip(r))?;
@@ -446,8 +441,7 @@ async fn different_nat_isolation() -> Result<()> {
 
     let dc_ip = dc.uplink_ip().context("no dc uplink ip")?;
     let r = SocketAddr::new(IpAddr::V4(dc_ip), 17_200);
-    dc.spawn_reflector(r)?;
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    let _r = dc.spawn_reflector(r).await?;
 
     let ip_a = dev_a.ip().unwrap();
     let ip_b = dev_b.ip().unwrap();
@@ -503,8 +497,7 @@ async fn v6_masquerade() -> Result<()> {
 
     let dc_ip_v6 = dc.uplink_ip_v6().expect("dc v6 uplink");
     let r_v6 = SocketAddr::new(IpAddr::V6(dc_ip_v6), 3500);
-    dc.spawn_reflector(r_v6)?;
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    let _r = dc.spawn_reflector(r_v6).await?;
 
     let o = dev.run_sync(move || test_utils::udp_roundtrip(r_v6))?;
     let home_wan_v6 = home.uplink_ip_v6().expect("home v6 uplink");
@@ -548,8 +541,7 @@ async fn v6_no_translation() -> Result<()> {
 
     let dc_ip_v6 = dc.uplink_ip_v6().expect("dc v6 uplink");
     let r_v6 = SocketAddr::new(IpAddr::V6(dc_ip_v6), 3494);
-    dc.spawn_reflector(r_v6)?;
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    let _r = dc.spawn_reflector(r_v6).await?;
 
     let o_v6 = dev.run_sync(move || test_utils::udp_roundtrip(r_v6))?;
     let dev_ip6 = dev.ip6().expect("device v6 addr");
@@ -579,8 +571,7 @@ async fn fullcone_external_reachable() -> Result<()> {
 
     let dc_ip = dc.uplink_ip().context("no dc uplink ip")?;
     let reflector = SocketAddr::new(IpAddr::V4(dc_ip), 20_000);
-    dc.spawn_reflector(reflector)?;
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    let _r = dc.spawn_reflector(reflector).await?;
 
     // Create a mapping via the reflector.
     let mapped = dev.probe_udp_mapping(reflector)?;
@@ -591,7 +582,7 @@ async fn fullcone_external_reachable() -> Result<()> {
     let dev_listen_port = mapped.port();
     let dev_ip = dev.ip().unwrap();
     let listen = SocketAddr::new(IpAddr::V4(dev_ip), dev_listen_port);
-    dev.spawn_reflector(listen)?;
+    let _r = dev.spawn_reflector(listen).await?;
 
     let reply = dc.run_sync(move || {
         let sock = std::net::UdpSocket::bind("0.0.0.0:0").context("nat fullcone dc udp bind")?;
@@ -634,8 +625,7 @@ async fn v6_masquerade_port_mapping() -> Result<()> {
 
     let dc_v6 = dc.uplink_ip_v6().context("dc v6 uplink")?;
     let r_v6 = SocketAddr::new(IpAddr::V6(dc_v6), 20_100);
-    dc.spawn_reflector(r_v6)?;
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    let _r = dc.spawn_reflector(r_v6).await?;
 
     let o = dev.run_sync(move || test_utils::udp_roundtrip(r_v6))?;
     let nat_v6 = nat.uplink_ip_v6().context("nat v6 uplink")?;

@@ -49,9 +49,7 @@ async fn udp_roundtrip() -> Result<()> {
 
     let dc_ip = dc.uplink_ip().context("no uplink ip")?;
     let r = SocketAddr::new(IpAddr::V4(dc_ip), 3478);
-    dc.spawn_reflector(r)?;
-
-    tokio::time::sleep(Duration::from_millis(250)).await;
+    let _r = dc.spawn_reflector(r).await?;
 
     let _ = dev.run_sync(move || test_utils::udp_roundtrip(r))?;
     Ok(())
@@ -218,8 +216,7 @@ async fn dual_stack_roundtrip() -> Result<()> {
 
     let dc_ip_v4 = dc.uplink_ip().expect("dc should have v4 uplink");
     let r_v4 = SocketAddr::new(IpAddr::V4(dc_ip_v4), 3480);
-    dc.spawn_reflector(r_v4)?;
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    let _r = dc.spawn_reflector(r_v4).await?;
     let o_v4 = dev.run_sync(move || test_utils::udp_roundtrip(r_v4))?;
     assert_eq!(
         o_v4.ip(),
@@ -229,8 +226,7 @@ async fn dual_stack_roundtrip() -> Result<()> {
 
     let dc_ip_v6 = dc.uplink_ip_v6().expect("dc should have v6 uplink");
     let r_v6 = SocketAddr::new(IpAddr::V6(dc_ip_v6), 3481);
-    dc.spawn_reflector(r_v6)?;
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    let _r = dc.spawn_reflector(r_v6).await?;
     let o_v6 = dev.run_sync(move || test_utils::udp_roundtrip(r_v6))?;
     assert!(o_v6.ip().is_ipv6(), "v6 reflexive should be IPv6");
 
@@ -264,8 +260,7 @@ async fn v6_only_roundtrip() -> Result<()> {
 
     let dc_ip_v6 = dc.uplink_ip_v6().expect("dc v6 uplink");
     let r_v6 = SocketAddr::new(IpAddr::V6(dc_ip_v6), 3490);
-    dc.spawn_reflector(r_v6)?;
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    let _r = dc.spawn_reflector(r_v6).await?;
     let o = dev.run_sync(move || test_utils::udp_roundtrip(r_v6))?;
     assert!(o.ip().is_ipv6(), "reflexive should be v6");
     Ok(())
@@ -288,8 +283,7 @@ async fn no_region_overhead() -> Result<()> {
 
     let dc2_ip = dc2.uplink_ip().context("no uplink ip")?;
     let r = SocketAddr::new(IpAddr::V4(dc2_ip), 9103);
-    dc2.spawn_reflector(r)?;
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    let _r = dc2.spawn_reflector(r).await?;
 
     let rtt = dev.run_sync(move || test_utils::udp_rtt_sync(r))?;
     assert!(

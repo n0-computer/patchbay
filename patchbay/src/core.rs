@@ -468,6 +468,15 @@ impl Drop for LabInner {
     }
 }
 
+/// RAII guard that aborts the reflector task when dropped.
+pub struct ReflectorGuard(tokio::task::AbortHandle);
+
+impl Drop for ReflectorGuard {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 impl LabInner {
     /// Returns a cloned tokio runtime handle for the given namespace.
     pub(crate) fn rt_handle_for(&self, ns: &str) -> Result<tokio::runtime::Handle> {
@@ -475,15 +484,26 @@ impl LabInner {
     }
 
     /// Spawns an async UDP reflector in the given namespace.
-    pub(crate) fn spawn_reflector_in(&self, ns: &str, bind: std::net::SocketAddr) -> Result<()> {
+    ///
+    /// Returns after the socket is confirmed bound. The returned
+    /// [`ReflectorGuard`] aborts the reflector task when dropped.
+    pub(crate) async fn spawn_reflector_in(
+        &self,
+        ns: &str,
+        bind: std::net::SocketAddr,
+    ) -> Result<ReflectorGuard> {
         let cancel = self.cancel.clone();
         let rt = self.rt_handle_for(ns)?;
-        rt.spawn(async move {
-            if let Err(e) = crate::test_utils::run_reflector(bind, cancel).await {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let handle = rt.spawn(async move {
+            if let Err(e) = crate::test_utils::run_reflector(bind, cancel, tx).await {
                 tracing::error!(bind = %bind, error = %e, "reflector failed");
             }
         });
-        Ok(())
+        rx.await
+            .map_err(|_| anyhow!("reflector task exited before signalling bind"))?
+            .context("reflector bind failed")?;
+        Ok(ReflectorGuard(handle.abort_handle()))
     }
 
     // ── with() helpers ──────────────────────────────────────────────────

@@ -13,12 +13,13 @@ use super::*;
 async fn switch_default_reflexive_ip() -> Result<()> {
     use strum::IntoEnumIterator;
     let DualNatLab {
-        _lab: _,
+        _lab,
         dev,
         nat_a,
         nat_b,
         reflector,
         dc: _,
+        _reflector_guard,
     } = build_dual_nat_lab(Nat::Home, Nat::Corporate, 16_200).await?;
 
     let wan_a = nat_a.uplink_ip().context("no uplink ip")?;
@@ -69,12 +70,13 @@ async fn switch_default_reflexive_ip() -> Result<()> {
 #[traced_test]
 async fn switch_default_multiple_times() -> Result<()> {
     let DualNatLab {
-        _lab: _,
+        _lab,
         dc: _,
         dev,
         nat_a,
         nat_b,
         reflector,
+        _reflector_guard,
     } = build_dual_nat_lab(Nat::Home, Nat::Home, 16_300).await?;
 
     let wan_a = nat_a.uplink_ip().context("no uplink ip")?;
@@ -106,12 +108,13 @@ async fn switch_default_multiple_times() -> Result<()> {
 #[traced_test]
 async fn switch_default_tcp_roundtrip() -> Result<()> {
     let DualNatLab {
-        _lab: _,
+        _lab,
         dc,
         dev,
         nat_a: _,
         nat_b: _,
         reflector: _,
+        _reflector_guard,
     } = build_dual_nat_lab(Nat::Home, Nat::Corporate, 16_400).await?;
 
     let dc_ip = dc.uplink_ip().context("no dc uplink ip")?;
@@ -150,8 +153,7 @@ async fn replug_iface_udp() -> Result<()> {
 
     let dc_ip = dc.uplink_ip().context("no dc uplink ip")?;
     let reflector = SocketAddr::new(IpAddr::V4(dc_ip), 17_100);
-    dc.spawn_reflector(reflector)?;
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    let _r = dc.spawn_reflector(reflector).await?;
 
     // Connectivity through nat_a works.
     dev.run_sync(move || test_utils::udp_roundtrip(reflector))
@@ -184,8 +186,7 @@ async fn replug_iface_reflexive_ip() -> Result<()> {
 
     let dc_ip = dc.uplink_ip().context("no dc uplink ip")?;
     let reflector = SocketAddr::new(IpAddr::V4(dc_ip), 17_200);
-    dc.spawn_reflector(reflector)?;
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    let _r = dc.spawn_reflector(reflector).await?;
 
     let wan_a = nat_a.uplink_ip().context("no nat_a uplink ip")?;
     let wan_b = nat_b.uplink_ip().context("no nat_b uplink ip")?;

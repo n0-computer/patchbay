@@ -38,8 +38,7 @@ async fn nat64_udp_v6_to_v4() -> Result<()> {
 
     // Start a UDP reflector on the datacenter server.
     let reflector = SocketAddr::new(IpAddr::V4(dc_ip), 9300);
-    dc.spawn_reflector(reflector)?;
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    let _r = dc.spawn_reflector(reflector).await?;
 
     // Build the NAT64 address: embed the dc's IPv4 into 64:ff9b::/96.
     let nat64_addr = crate::nat64::embed_v4_in_nat64(dc_ip);
@@ -126,8 +125,7 @@ async fn nat64_preserves_native_v6() -> Result<()> {
 
     // Regular v4 via NAT should still work.
     let reflector = SocketAddr::new(IpAddr::V4(dc_ip), 9302);
-    dc.spawn_reflector(reflector)?;
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    let _r = dc.spawn_reflector(reflector).await?;
 
     let rtt = phone.run_sync(move || test_utils::udp_rtt_sync(reflector))?;
     assert!(
