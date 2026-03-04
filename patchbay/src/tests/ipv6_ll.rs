@@ -304,6 +304,59 @@ async fn ra_disable_reconciles_only_radriven_devices() -> Result<()> {
 
 #[tokio::test(flavor = "current_thread")]
 #[traced_test]
+async fn static_override_runtime_default_route_switch_uses_global_v6() -> Result<()> {
+    check_caps()?;
+
+    let lab = Lab::with_opts(
+        LabOpts::default()
+            .ipv6_provisioning_mode(Ipv6ProvisioningMode::RaDriven)
+            .ipv6_dad_mode(Ipv6DadMode::Disabled),
+    )
+    .await?;
+    let r1 = lab
+        .add_router("r1")
+        .ip_support(IpSupport::DualStack)
+        .build()
+        .await?;
+    let r2 = lab
+        .add_router("r2")
+        .ip_support(IpSupport::DualStack)
+        .build()
+        .await?;
+
+    let dev = lab
+        .add_device("d")
+        .uplink(r1.id())
+        .ipv6_provisioning_mode(Ipv6ProvisioningMode::Static)
+        .build()
+        .await?;
+
+    dev.add_iface("eth1", r2.id(), None).await?;
+    dev.set_default_route("eth1").await?;
+
+    let route = dev.run_sync(|| {
+        let out = std::process::Command::new("ip")
+            .args(["-6", "route", "show", "default"])
+            .output()?;
+        if !out.status.success() {
+            anyhow::bail!("ip -6 route failed with status {}", out.status);
+        }
+        Ok::<_, anyhow::Error>(String::from_utf8_lossy(&out.stdout).to_string())
+    })?;
+    assert!(
+        route.contains("via 2001:db8:"),
+        "static override should keep global-v6 default route after runtime switch, got: {route:?}"
+    );
+    assert!(
+        !route.contains("via fe80:"),
+        "static override should not switch to link-local default route, got: {route:?}"
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[traced_test]
 async fn radriven_default_route_uses_scoped_ll_and_switches_iface() -> Result<()> {
     check_caps()?;
 
