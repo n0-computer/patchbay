@@ -467,7 +467,7 @@ impl Lab {
         };
         // Initialize root namespace and IX bridge eagerly — no lazy-init race.
         let cfg = lab.inner.core.lock().unwrap().cfg.clone();
-        setup_root_ns_async(&cfg, &netns)
+        setup_root_ns_async(&cfg, &netns, opts.ipv6_dad_mode)
             .await
             .context("failed to set up root namespace")?;
 

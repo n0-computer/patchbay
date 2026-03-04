@@ -120,7 +120,12 @@ You can read a device's assigned addresses through the handle:
 ```rust
 let v4: Option<Ipv4Addr> = server.ip();
 let v6: Option<Ipv6Addr> = server.ip6();
+let ll: Option<Ipv6Addr> = server.default_iface().and_then(|i| i.ll6());
 ```
+
+For router-side address inspection, use `router.interfaces()` or
+`router.iface("ix")` / `router.iface("wan")` and read `ip6()` plus `ll6()`
+from `RouterIface`.
 
 ### Multi-homed devices
 

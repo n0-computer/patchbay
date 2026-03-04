@@ -256,9 +256,13 @@ let lab = Lab::with_opts(
 ```
 
 - `Ipv6ProvisioningMode::Static`: patchbay installs routes during wiring.
-- `Ipv6ProvisioningMode::RaDriven`: enables RA-driven provisioning path.
+- `Ipv6ProvisioningMode::RaDriven`: enables patchbay's RA/RS-driven provisioning path.
 - `Ipv6DadMode::Disabled`: deterministic mode, current default.
 - `Ipv6DadMode::Enabled`: kernel DAD behavior in namespaces.
+
+In `RaDriven` mode, patchbay emits structured RA/RS events and installs
+link-local scoped default routes for default interfaces. This models host
+routing behavior while keeping tests deterministic and introspectable.
 
 ### Scoped default route behavior
 

@@ -211,6 +211,13 @@ Handle methods return `Result` or `Option` when the underlying node has
 been removed from the lab. If you hold a handle to a device that no longer
 exists, calls will return an error rather than panicking.
 
+When debugging IPv6 behavior, inspect interface snapshots instead of only
+top-level `ip6()` accessors:
+
+- `device.default_iface().and_then(|i| i.ip6())` for global/ULA IPv6.
+- `device.default_iface().and_then(|i| i.ll6())` for link-local `fe80::/10`.
+- `router.interfaces()` for `RouterIface` snapshots on `ix`/`wan` and bridge.
+
 ## Cleanup
 
 When the `Lab` is dropped, it shuts down all async and sync workers, then

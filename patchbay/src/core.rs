@@ -1952,9 +1952,10 @@ where
 pub(crate) async fn setup_root_ns_async(
     cfg: &CoreConfig,
     netns: &Arc<netns::NetnsManager>,
+    dad_mode: Ipv6DadMode,
 ) -> Result<()> {
     let root_ns = cfg.root_ns.clone();
-    create_named_netns(netns, &root_ns, None, None, Ipv6DadMode::Disabled)?;
+    create_named_netns(netns, &root_ns, None, None, dad_mode)?;
 
     netns.run_closure_in(&root_ns, || {
         set_sysctl_root("net/ipv4/ip_forward", "1")?;

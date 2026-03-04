@@ -151,9 +151,9 @@ Every IPv6-capable device/router interface now exposes a link-local address
 through the handle snapshots:
 
 - `Device::default_iface().and_then(|i| i.ll6())`
-- `Device::interfaces()[..].ll6()`
-- `Router::iface(\"wan\").and_then(|i| i.ll6())`
-- `Router::interfaces()[..].ll6()`
+- `Device::interfaces().iter().filter_map(|i| i.ll6())`
+- `router.iface("ix").or_else(|| router.iface("wan")).and_then(|i| i.ll6())`
+- `router.interfaces().iter().filter_map(|i| i.ll6())`
 
 Patchbay also supports explicit IPv6 provisioning and DAD modes via `LabOpts`:
 
@@ -166,7 +166,7 @@ let lab = Lab::with_opts(
 ```
 
 `Ipv6ProvisioningMode::Static` keeps route wiring deterministic.  
-`Ipv6ProvisioningMode::RaDriven` enables the RA-driven path.  
+`Ipv6ProvisioningMode::RaDriven` enables patchbay's RA/RS-driven path.  
 `Ipv6DadMode::Disabled` is the current default for deterministic test setup.
 
 ### Firewalls

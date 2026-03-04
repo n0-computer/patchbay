@@ -99,6 +99,23 @@ async fn reconcile_radriven_default_v6_routes(
     Ok(())
 }
 
+fn select_default_v6_gateway(
+    provisioning: Ipv6ProvisioningMode,
+    ra_default_enabled: bool,
+    gw_v6: Option<Ipv6Addr>,
+    gw_ll_v6: Option<Ipv6Addr>,
+) -> Option<Ipv6Addr> {
+    if provisioning == Ipv6ProvisioningMode::RaDriven {
+        if ra_default_enabled {
+            gw_ll_v6.or(gw_v6)
+        } else {
+            None
+        }
+    } else {
+        gw_v6.or(gw_ll_v6)
+    }
+}
+
 // ─────────────────────────────────────────────
 // Device / Router / DeviceIface handles
 // ─────────────────────────────────────────────
@@ -386,7 +403,7 @@ impl Device {
         .await?;
         if is_default_via {
             let provisioning = self.provisioning_mode()?;
-            let (gw_ip, gw_v6, gw_ll_v6, provisioning, ra_default_enabled) = {
+            let (gw_ip, gw_v6, gw_ll_v6, ra_default_enabled) = {
                 let inner = self.lab.core.lock().unwrap();
                 let gw_ip = inner.router_downlink_gw_for_switch(uplink)?;
                 let gw_v6 = inner.router_downlink_gw6_for_switch(uplink)?;
@@ -395,21 +412,13 @@ impl Device {
                     gw_ip,
                     gw_v6.global_v6,
                     gw_v6.link_local_v6,
-                    provisioning,
                     ra_default_enabled,
                 )
             };
             core::nl_run(&self.lab.netns, &ns, move |nl: Netlink| async move {
                 nl.replace_default_route_v4(&ifname_owned, gw_ip).await?;
-                let primary_v6 = if provisioning == Ipv6ProvisioningMode::RaDriven {
-                    if ra_default_enabled {
-                        gw_ll_v6.or(gw_v6)
-                    } else {
-                        None
-                    }
-                } else {
-                    gw_v6.or(gw_ll_v6)
-                };
+                let primary_v6 =
+                    select_default_v6_gateway(provisioning, ra_default_enabled, gw_v6, gw_ll_v6);
                 if let Some(gw6) = primary_v6 {
                     if gw6.is_unicast_link_local() {
                         nl.replace_default_route_v6_scoped(&ifname_owned, gw6)
@@ -417,6 +426,8 @@ impl Device {
                     } else {
                         nl.replace_default_route_v6(&ifname_owned, gw6).await?;
                     }
+                } else {
+                    nl.clear_default_route_v6().await?;
                 }
                 Ok(())
             })
@@ -456,7 +467,7 @@ impl Device {
             .ok_or_else(|| anyhow!("device removed"))?;
         let _guard = op.lock().await;
         let provisioning = self.provisioning_mode()?;
-        let (ns, impair, gw_ip, gw_v6, gw_ll_v6, provisioning, ra_default_enabled) = {
+        let (ns, impair, gw_ip, gw_v6, gw_ll_v6, ra_default_enabled) = {
             let inner = self.lab.core.lock().unwrap();
             let dev = inner
                 .device(self.id)
@@ -473,28 +484,22 @@ impl Device {
                 gw_ip,
                 gw_v6.global_v6,
                 gw_v6.link_local_v6,
-                provisioning,
                 ra_default_enabled,
             )
         };
         let to_owned = to.to_string();
         core::nl_run(&self.lab.netns, &ns, move |nl: Netlink| async move {
             nl.replace_default_route_v4(&to_owned, gw_ip).await?;
-            let primary_v6 = if provisioning == Ipv6ProvisioningMode::RaDriven {
-                if ra_default_enabled {
-                    gw_ll_v6.or(gw_v6)
-                } else {
-                    None
-                }
-            } else {
-                gw_v6.or(gw_ll_v6)
-            };
+            let primary_v6 =
+                select_default_v6_gateway(provisioning, ra_default_enabled, gw_v6, gw_ll_v6);
             if let Some(gw6) = primary_v6 {
                 if gw6.is_unicast_link_local() {
                     nl.replace_default_route_v6_scoped(&to_owned, gw6).await?;
                 } else {
                     nl.replace_default_route_v6(&to_owned, gw6).await?;
                 }
+            } else {
+                nl.clear_default_route_v6().await?;
             }
             Ok(())
         })
