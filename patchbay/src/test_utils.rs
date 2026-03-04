@@ -21,7 +21,9 @@ use crate::ObservedAddr;
 /// Spawned via `device.spawn_reflector(bind)` which uses the namespace's
 /// tokio runtime.
 pub async fn run_reflector(bind: SocketAddr, cancel: CancellationToken) -> Result<()> {
-    let sock = tokio::net::UdpSocket::bind(bind).await?;
+    let sock = tokio::net::UdpSocket::bind(bind)
+        .await
+        .context("reflector udp bind")?;
     let mut buf = [0u8; 512];
     loop {
         tokio::select! {
@@ -54,7 +56,7 @@ pub fn probe_udp(
         };
         SocketAddr::new(unspecified, 0)
     });
-    let sock = UdpSocket::bind(bind_addr)?;
+    let sock = UdpSocket::bind(bind_addr).context("probe_udp bind")?;
     sock.set_read_timeout(Some(timeout))?;
     let mut buf = [0u8; 512];
     for attempt in 1..=3 {
@@ -89,7 +91,7 @@ pub fn udp_rtt_sync(reflector: SocketAddr) -> Result<Duration> {
     } else {
         "[::]:0"
     };
-    let sock = UdpSocket::bind(bind)?;
+    let sock = UdpSocket::bind(bind).context("udp_rtt_sync bind")?;
     sock.set_read_timeout(Some(Duration::from_secs(2)))?;
     let mut buf = [0u8; 256];
     let start = Instant::now();
@@ -110,7 +112,9 @@ pub async fn udp_rtt(reflector: SocketAddr) -> Result<Duration> {
         },
         0,
     );
-    let sock = tokio::net::UdpSocket::bind(bind).await?;
+    let sock = tokio::net::UdpSocket::bind(bind)
+        .await
+        .context("udp_rtt bind")?;
     let mut buf = [0u8; 256];
     let start = Instant::now();
     sock.send_to(b"PING", reflector).await?;

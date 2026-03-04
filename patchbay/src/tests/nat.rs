@@ -594,7 +594,7 @@ async fn fullcone_external_reachable() -> Result<()> {
     dev.spawn_reflector(listen)?;
 
     let reply = dc.run_sync(move || {
-        let sock = std::net::UdpSocket::bind("0.0.0.0:0")?;
+        let sock = std::net::UdpSocket::bind("0.0.0.0:0").context("nat fullcone dc udp bind")?;
         sock.set_read_timeout(Some(Duration::from_secs(2)))?;
         sock.send_to(b"HELLO", mapped_addr)?;
         let mut buf = [0u8; 512];

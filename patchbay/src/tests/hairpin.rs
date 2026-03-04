@@ -42,7 +42,8 @@ async fn fullcone_allows() -> Result<()> {
     // B sends to A's external address (router's public IP + A's mapped port).
     // With hairpin, the router should DNAT this to A's private IP.
     let reply = b.run_sync(move || {
-        let sock = std::net::UdpSocket::bind("0.0.0.0:0")?;
+        let sock =
+            std::net::UdpSocket::bind("0.0.0.0:0").context("hairpin fullcone_allows udp bind")?;
         sock.set_read_timeout(Some(Duration::from_secs(2)))?;
         sock.send_to(b"PROBE", a_ext)?;
         let mut buf = [0u8; 512];
@@ -84,7 +85,8 @@ async fn home_nat_blocks() -> Result<()> {
 
     // B tries to reach A via the external addr — should time out.
     let result = b.run_sync(move || {
-        let sock = std::net::UdpSocket::bind("0.0.0.0:0")?;
+        let sock =
+            std::net::UdpSocket::bind("0.0.0.0:0").context("hairpin home_nat_blocks udp bind")?;
         sock.set_read_timeout(Some(Duration::from_millis(500)))?;
         sock.send_to(b"PROBE", a_ext)?;
         let mut buf = [0u8; 512];
@@ -143,7 +145,8 @@ async fn custom_allows() -> Result<()> {
     a.spawn_reflector(a_listen)?;
 
     let reply = b.run_sync(move || {
-        let sock = std::net::UdpSocket::bind("0.0.0.0:0")?;
+        let sock =
+            std::net::UdpSocket::bind("0.0.0.0:0").context("hairpin custom_allows udp bind")?;
         sock.set_read_timeout(Some(Duration::from_secs(2)))?;
         sock.send_to(b"PROBE", a_ext)?;
         let mut buf = [0u8; 512];

@@ -95,7 +95,7 @@ async fn blackhole_drops_large() -> Result<()> {
     let bind_addr: SocketAddr = SocketAddr::new(IpAddr::V4(server_ip), 18_900);
 
     let server_thread = server.spawn_thread(move || {
-        let sock = std::net::UdpSocket::bind(bind_addr)?;
+        let sock = std::net::UdpSocket::bind(bind_addr).context("mtu server udp bind")?;
         sock.set_read_timeout(Some(Duration::from_secs(3)))?;
         let mut buf = [0u8; 2048];
         match sock.recv_from(&mut buf) {
@@ -113,7 +113,7 @@ async fn blackhole_drops_large() -> Result<()> {
 
     dev.run_sync(move || {
         use std::os::unix::io::AsRawFd;
-        let sock = std::net::UdpSocket::bind("0.0.0.0:0")?;
+        let sock = std::net::UdpSocket::bind("0.0.0.0:0").context("mtu dev udp bind")?;
         // IP_PMTUDISC_DO = 2
         let val: libc::c_int = 2;
         unsafe {

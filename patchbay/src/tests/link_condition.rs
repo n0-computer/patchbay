@@ -528,7 +528,7 @@ async fn loss_tcp_integrity() -> Result<()> {
 
     let server = dc.spawn_thread(move || {
         use std::io::Write as _;
-        let listener = std::net::TcpListener::bind(addr)?;
+        let listener = std::net::TcpListener::bind(addr).context("link_condition tcp bind")?;
         let (mut stream, _) = listener.accept()?;
         let data = vec![0xABu8; BYTES];
         stream.write_all(&data)?;
@@ -538,7 +538,8 @@ async fn loss_tcp_integrity() -> Result<()> {
 
     let n = dev.run_sync(move || {
         use std::io::Read as _;
-        let mut stream = std::net::TcpStream::connect_timeout(&addr, Duration::from_secs(5))?;
+        let mut stream = std::net::TcpStream::connect_timeout(&addr, Duration::from_secs(5))
+            .context("link_condition tcp connect")?;
         stream.set_read_timeout(Some(Duration::from_secs(30)))?;
         let mut buf = Vec::with_capacity(BYTES);
         stream.read_to_end(&mut buf)?;

@@ -42,7 +42,9 @@ async fn fullcone_holepunch() -> Result<()> {
     let task1 = dev1.spawn({
         async move |_| {
             span_log_timeout("ep1", timeout, async {
-                let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).await?;
+                let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))
+                    .await
+                    .context("holepunch ep1 udp bind")?;
                 let public_addr = get_public_addr(&socket, stun_addr).await?;
                 info!("src {public_addr}");
 
@@ -60,7 +62,9 @@ async fn fullcone_holepunch() -> Result<()> {
     // spawn connector endpoint on dev2
     let task2 = dev2.spawn(async move |_| {
         span_log_timeout("ep2", timeout, async {
-            let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).await?;
+            let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))
+                .await
+                .context("holepunch ep2 udp bind")?;
             let public_addr = get_public_addr(&socket, stun_addr).await?;
             info!("src {public_addr}");
 
@@ -128,7 +132,9 @@ async fn home_nat_holepunch() -> Result<()> {
         let task1 = dev1.spawn({
             async move |_| {
                 span_log_timeout("ep1", timeout, async {
-                    let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).await?;
+                    let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))
+                        .await
+                        .context("holepunch home ep1 udp bind")?;
                     let public_addr = get_public_addr(&socket, stun_addr).await?;
                     info!("ep1 public {public_addr}");
                     addr1_tx.send(public_addr).unwrap();
@@ -144,7 +150,9 @@ async fn home_nat_holepunch() -> Result<()> {
 
         let task2 = dev2.spawn(async move |_| {
             span_log_timeout("ep2", timeout, async {
-                let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).await?;
+                let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))
+                    .await
+                    .context("holepunch home ep2 udp bind")?;
                 let public_addr = get_public_addr(&socket, stun_addr).await?;
                 info!("ep2 public {public_addr}");
                 addr2_tx.send(public_addr).unwrap();

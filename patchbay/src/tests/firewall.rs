@@ -207,14 +207,14 @@ async fn block_inbound_drops_unsolicited() -> Result<()> {
     let dev_addr = SocketAddr::new(IpAddr::V4(dev_ip), 9211);
     let send_target = dev_addr;
     let result = dc.run_sync(move || {
-        let sock = std::net::UdpSocket::bind("0.0.0.0:0")?;
+        let sock = std::net::UdpSocket::bind("0.0.0.0:0").context("firewall dc udp bind")?;
         sock.send_to(b"hello", send_target)?;
         Ok::<_, anyhow::Error>(())
     });
     // The send itself may succeed (UDP is connectionless), but the device
     // should never receive the packet. Listen on the device side with a timeout.
     let recv_result = dev.run_sync(move || {
-        let sock = std::net::UdpSocket::bind(dev_addr)?;
+        let sock = std::net::UdpSocket::bind(dev_addr).context("firewall dev udp bind")?;
         sock.set_read_timeout(Some(Duration::from_millis(500)))?;
         let mut buf = [0u8; 64];
         match sock.recv_from(&mut buf) {

@@ -1042,7 +1042,8 @@ impl Router {
             let st = tokio::process::Command::new("conntrack")
                 .arg("-F")
                 .status()
-                .await?;
+                .await
+                .context("spawn conntrack -F")?;
             if !st.success() {
                 bail!("conntrack -F failed: {st}");
             }
