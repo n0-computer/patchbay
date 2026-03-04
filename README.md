@@ -339,15 +339,15 @@ patchbay run ./sims/my-sim.toml --open
 
 The UI provides five tabs:
 
-- **Topology** — interactive graph of routers, devices, and links with a
+- **Topology**: interactive graph of routers, devices, and links with a
   detail sidebar showing NAT, firewall, IPs, and counters.
-- **Events** — table of lab lifecycle events (router added, device added,
+- **Events**: table of lab lifecycle events (router added, device added,
   NAT changed, etc.) with relative/absolute timestamps.
-- **Logs** — per-namespace tracing log viewer with JSON parsing, level
+- **Logs**: per-namespace tracing log viewer with JSON parsing, level
   badges, and target filtering. Supports jump-to-log from the timeline.
-- **Timeline** — grid of extracted `_events` per node over time, with
+- **Timeline**: grid of extracted `_events` per node over time, with
   detail pane and jump-to-log.
-- **Perf** — throughput results table (only for TOML runner sims).
+- **Perf**: throughput results table (only for TOML runner sims).
 
 Each `Lab` instance writes to a timestamped subdirectory under the outdir.
 Multiple runs accumulate in the same outdir and appear in the run selector.

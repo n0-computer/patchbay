@@ -28,8 +28,8 @@ what the concept does for routing and application behavior.
 ISPs assign a **globally routable prefix** (typically /56 or /60) via
 DHCPv6-PD (Prefix Delegation). The CE (Customer Edge) router carves /64s
 from this prefix for each LAN segment. Devices get **public GUA addresses**
-— no NAT involved. The security boundary is a **stateful firewall** on the
-CE router that blocks unsolicited inbound connections (RFC 6092).
+with no NAT involved. The security boundary is a **stateful firewall**
+on the CE router that blocks unsolicited inbound connections (RFC 6092).
 
 IPv4 access is provided in parallel via dual-stack (separate IPv4 address
 with NAT44) or via DS-Lite / MAP-E / MAP-T (IPv4-in-IPv6 tunneling to the
@@ -37,7 +37,7 @@ ISP's AFTR).
 
 **Key properties:**
 - Devices have globally routable IPv6 addresses
-- No IPv6 NAT — the prefix is public
+- No IPv6 NAT, the prefix is public
 - Stateful firewall blocks inbound, allows outbound + established
 - SLAAC for address assignment (not DHCPv6 address assignment)
 - Privacy extensions (RFC 4941) rotate source addresses
@@ -47,7 +47,7 @@ ISP's AFTR).
 ### Mobile (4G/5G)
 
 Each device typically gets a **single /64** via RA (Router Advertisement).
-The device is the only host on its /64. There is no home router — the
+The device is the only host on its /64. There is no home router, and the
 carrier's gateway acts as the first hop.
 
 For IPv4 access, carriers use either:
@@ -60,14 +60,14 @@ Some carriers (T-Mobile US, Jio) are IPv6-only with NAT64. Others
 **Key properties:**
 - One /64 per device (not shared)
 - NAT64/DNS64 for IPv4 access (no real IPv4 address)
-- No firewall — carrier relies on per-device /64 isolation
+- No firewall, carrier relies on per-device /64 isolation
 - 3GPP CGNAT for remaining IPv4 users
 
 ### Enterprise / Corporate
 
 Enterprises typically run dual-stack internally with PA (Provider
 Aggregatable) or PI (Provider Independent) space. Strict firewalls allow
-only TCP 80/443 and UDP 53 outbound. All other ports are blocked —
+only TCP 80/443 and UDP 53 outbound. All other ports are blocked,
 STUN/TURN on non-standard ports fails, must use TURN-over-TLS on 443.
 
 Some enterprises use ULA (fd00::/8) internally with NAT66 at the border,
@@ -91,10 +91,10 @@ GUA addresses with a restrictive firewall.
 RFC 4193 ULA (fd00::/8) was designed for stable internal addressing, not
 as an IPv6 equivalent of RFC 1918. In practice:
 
-- **No major ISP deploys NAT66** — it defeats the end-to-end principle
+- **No major ISP deploys NAT66**, it defeats the end-to-end principle
 - Android **does not support NAT66** (no DHCPv6 client, only SLAAC)
 - ULA is used alongside GUA for stable internal addressing, never alone
-- RFC 6296 NPTv6 (prefix translation) exists but is niche — mostly
+- RFC 6296 NPTv6 (prefix translation) exists but is niche, mostly
   for multihoming, not general NAT
 
 If you need to simulate "NATted IPv6", use NPTv6 (`NatV6Mode::Nptv6`)
@@ -143,14 +143,14 @@ blocks unsolicited inbound on both families.
 ```rust
 let home = lab.add_router("home").preset(RouterPreset::Home).build().await?;
 let laptop = lab.add_device("laptop").uplink(home.id()).build().await?;
-// laptop.ip()  → 10.0.x.x (private IPv4, NATted)
-// laptop.ip6() → fd10:0:x::2 (ULA v6, firewalled)
+// laptop.ip()  -> 10.0.x.x (private IPv4, NATted)
+// laptop.ip6() -> fd10:0:x::2 (ULA v6, firewalled)
 ```
 
 ### Scenario 2: IPv6-Only Mobile with NAT64
 
 A carrier network where devices only have IPv6. IPv4 destinations are
-reached via NAT64 — a userspace SIIT translator on the router converts
+reached via NAT64, a userspace SIIT translator on the router converts
 between IPv6 and IPv4 headers using the well-known prefix `64:ff9b::/96`.
 
 ```rust
@@ -158,13 +158,13 @@ let carrier = lab.add_router("carrier")
     .preset(RouterPreset::MobileV6)
     .build().await?;
 let phone = lab.add_device("phone").uplink(carrier.id()).build().await?;
-// phone.ip6() → 2001:db8:1:x::2 (public GUA)
-// phone.ip()  → None (no IPv4 on the device)
+// phone.ip6() -> 2001:db8:1:x::2 (public GUA)
+// phone.ip()  -> None (no IPv4 on the device)
 
 // Reach an IPv4 server via NAT64:
 use patchbay::nat64::embed_v4_in_nat64;
 let nat64_addr = embed_v4_in_nat64(server_v4_ip);
-// Connect to [64:ff9b::<server_v4>]:port — translated to IPv4 by the router
+// Connect to [64:ff9b::<server_v4>]:port, translated to IPv4 by the router
 ```
 
 The `MobileV6` preset configures: `IpSupport::V6Only` + `NatV6Mode::Nat64`
@@ -181,7 +181,7 @@ let carrier = lab.add_router("carrier")
 ### Scenario 3: Corporate Firewall (Restrictive)
 
 Enterprise network that blocks everything except web traffic. STUN/ICE
-fails — P2P apps must fall back to TURN-over-TLS on port 443.
+fails, P2P apps must fall back to TURN-over-TLS on port 443.
 
 ```rust
 let corp = lab.add_router("corp").preset(RouterPreset::Corporate).build().await?;
@@ -316,7 +316,7 @@ neighbor discovery breaks and the router becomes unreachable.
 ### IPv6 Firewall Is Not Optional
 
 On IPv4, NAT implicitly blocks inbound connections (no port mapping = no
-access). On IPv6 with public GUA addresses, there is **no NAT** — devices
+access). On IPv6 with public GUA addresses, there is **no NAT**, devices
 are directly addressable. Without `Firewall::BlockInbound`, any host on
 the IX can connect to your devices. This matches reality: every CE router
 ships with an IPv6 stateful firewall enabled by default.

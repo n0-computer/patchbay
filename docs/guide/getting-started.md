@@ -221,8 +221,8 @@ pollutes the host.
 
 ## Viewing results in the browser
 
-patchbay can write structured output to disk — topology events,
-per-namespace tracing logs, and extracted custom events — and serve them
+patchbay can write structured output to disk, including topology events,
+per-namespace tracing logs, and extracted custom events, and serve them
 in an interactive web UI. Set the `PATCHBAY_OUTDIR` environment variable
 to enable this:
 

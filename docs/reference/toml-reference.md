@@ -142,7 +142,7 @@ value before the steps execute. This substitution happens at expansion time
 # In the group step:
 content = "cert_path = \"${${group.device}-cert.cert_pem_path}\""
 # After group expansion (e.g. device="relay"):
-#   → cert_path = "${relay-cert.cert_pem_path}"
+#   -> cert_path = "${relay-cert.cert_pem_path}"
 # Then resolved at runtime as a capture reference.
 ```
 
@@ -176,10 +176,10 @@ Runs a command and waits for it to exit before moving to the next step.
 | Key        | Type    | Default  | Description |
 |------------|---------|----------|-------------|
 | `cmd`      | array   | required | Command and arguments. Supports `${binary.<n>}`, `$NETSIM_IP_<device>`, `${id.capture}`. |
-| `args`     | array   | —        | Appended to the template's `cmd`. Does not replace it. |
+| `args`     | array   | none     | Appended to the template's `cmd`. Does not replace it. |
 | `parser`   | string  | `"text"` | Output parser. See [parsers](#parsers). |
-| `captures` | table   | —        | Named captures. See [`[captures]`](#captures). |
-| `results`  | table   | —        | Normalized result fields. See [`[results]`](#results). |
+| `captures` | table   | none     | Named captures. See [`[captures]`](#captures). |
+| `results`  | table   | none     | Normalized result fields. See [`[results]`](#results). |
 
 ---
 
@@ -190,11 +190,11 @@ Starts a process in the background. A later `wait-for` step waits for it to exit
 | Key           | Type    | Default  | Description |
 |---------------|---------|----------|-------------|
 | `cmd`         | array   | required | Command and arguments. |
-| `args`        | array   | —        | Appended to the template's `cmd`. |
+| `args`        | array   | none     | Appended to the template's `cmd`. |
 | `parser`      | string  | `"text"` | Output parser. See [parsers](#parsers). |
-| `ready_after` | duration| —        | How long to wait after spawning before the next step runs. Useful when a process needs startup time but doesn't print a ready signal. |
-| `captures`    | table   | —        | Named captures. See [`[captures]`](#captures). |
-| `results`     | table   | —        | Normalized result fields. Collected when the process exits. |
+| `ready_after` | duration| none     | How long to wait after spawning before the next step runs. Useful when a process needs startup time but doesn't print a ready signal. |
+| `captures`    | table   | none     | Named captures. See [`[captures]`](#captures). |
+| `results`     | table   | none     | Normalized result fields. Collected when the process exits. |
 
 ---
 
@@ -263,7 +263,7 @@ written to `{work_dir}/certs/{id}/` and also stored as captures.
 | Key      | Type            | Default                     | Description |
 |----------|-----------------|-----------------------------|-------------|
 | `id`     | string          | required                    | Step ID, prefixes the output captures. |
-| `device` | string          | —                           | Device whose IP is automatically added to the Subject Alternative Names. |
+| `device` | string          | none                        | Device whose IP is automatically added to the Subject Alternative Names. |
 | `cn`     | string          | `"localhost"`               | Certificate Common Name. |
 | `san`    | array of strings| `[device_ip, "localhost"]`  | SANs. `$NETSIM_IP_<device>` variables are expanded. |
 
@@ -369,9 +369,9 @@ pick  = ".endpoint_id"
 | Key     | Type   | Default    | Description |
 |---------|--------|------------|-------------|
 | `pipe`  | string | `"stdout"` | Which output stream to read: `"stdout"` or `"stderr"`. |
-| `regex` | string | —          | Regex applied to the raw text line. Group 1 is captured if present, otherwise the full match. Works with all parsers. Cannot be combined with `pick`. |
-| `match` | table  | —          | Key=value guards on a parsed JSON object. All keys must match. Requires `pick`. Only valid with `"ndjson"` or `"json"` parser. |
-| `pick`  | string | —          | Dot-path into the parsed JSON value, e.g. `".endpoint_id"` or `".end.sum_received.bytes"`. Requires `"ndjson"` or `"json"` parser. Cannot be combined with `regex`. |
+| `regex` | string | none       | Regex applied to the raw text line. Group 1 is captured if present, otherwise the full match. Works with all parsers. Cannot be combined with `pick`. |
+| `match` | table  | none       | Key=value guards on a parsed JSON object. All keys must match. Requires `pick`. Only valid with `"ndjson"` or `"json"` parser. |
+| `pick`  | string | none       | Dot-path into the parsed JSON value, e.g. `".endpoint_id"` or `".end.sum_received.bytes"`. Requires `"ndjson"` or `"json"` parser. Cannot be combined with `regex`. |
 
 With `"ndjson"`, every matching line appends to the capture's history. With
 `"json"` or `regex`, the capture is set once from the final matched value.
@@ -580,7 +580,7 @@ file = "iroh-defaults.toml"
 name     = "iroh-1to1-nat"
 topology = "1to1-nat"
 
-# Expands to: gen-certs → gen-file (relay config) → spawn relay
+# Expands to: gen-certs -> gen-file (relay config) -> spawn relay
 [[step]]
 use  = "relay-setup"
 vars = { device = "relay" }
