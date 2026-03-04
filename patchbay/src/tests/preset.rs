@@ -205,6 +205,32 @@ async fn preset_override() -> Result<()> {
     Ok(())
 }
 
+/// Router presets expose sane default IPv6 deployment profile recommendations.
+#[tokio::test(flavor = "current_thread")]
+#[traced_test]
+async fn preset_recommended_ipv6_profiles() -> Result<()> {
+    check_caps()?;
+
+    assert_eq!(
+        RouterPreset::Home.recommended_ipv6_profile(),
+        Ipv6Profile::ConsumerHome
+    );
+    assert_eq!(
+        RouterPreset::Mobile.recommended_ipv6_profile(),
+        Ipv6Profile::MobileCarrier
+    );
+    assert_eq!(
+        RouterPreset::Corporate.recommended_ipv6_profile(),
+        Ipv6Profile::Enterprise
+    );
+    assert_eq!(
+        RouterPreset::Hotel.recommended_ipv6_profile(),
+        Ipv6Profile::LabDeterministic
+    );
+
+    Ok(())
+}
+
 /// Public GUA v6 pool gives addresses from 2001:db8:1::/48, not ULA fd10::/48.
 #[tokio::test(flavor = "current_thread")]
 #[traced_test]

@@ -1580,6 +1580,17 @@ impl RouterPreset {
             _ => DownstreamPool::Public,
         }
     }
+
+    /// Returns the recommended lab-level IPv6 profile for this router preset.
+    pub fn recommended_ipv6_profile(self) -> Ipv6Profile {
+        match self {
+            Self::Home => Ipv6Profile::ConsumerHome,
+            Self::Mobile | Self::MobileV6 => Ipv6Profile::MobileCarrier,
+            Self::Corporate | Self::Cloud | Self::Datacenter => Ipv6Profile::Enterprise,
+            // These presets are primarily v4-focused and do not benefit from RA-driven v6 provisioning.
+            Self::Hotel | Self::IspV4 => Ipv6Profile::LabDeterministic,
+        }
+    }
 }
 
 // ─────────────────────────────────────────────

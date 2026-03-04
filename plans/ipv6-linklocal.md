@@ -9,7 +9,8 @@
 - [x] Phase 3: Public API support for link-local and scope handling
 - [ ] Phase 4: Real-world presets for consumer and production-like IPv6
 - [x] Phase 4.1: Add lab IPv6 deployment profiles that map to DAD and provisioning defaults
-- [ ] Phase 4.2: Wire router preset defaults and docs to profile recommendations
+- [x] Phase 4.2a: Wire router preset defaults to profile recommendations
+- [ ] Phase 4.2b: Document preset-to-profile recommendations in user-facing docs
 - [ ] Phase 5: Tests and validation matrix
 - [x] Phase 5.1: Add RA worker lifecycle coverage for router namespace removal
 - [x] Phase 5.2: Add profile-behavior test for static vs RA-driven default-route semantics
