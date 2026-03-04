@@ -5,3 +5,19 @@
 # Default: 16 concurrent tests (each creates ~6-10 threads).
 [profile.default]
 test-threads = 8
+
+# CI runners (2 vCPU) hit EAGAIN under thread pressure from parallel
+# namespace-heavy tests. Reduce parallelism and isolate heavy loop tests.
+[profile.ci]
+test-threads = 4
+
+[test-groups.serial-heavy]
+max-threads = 1
+
+[[profile.default.overrides]]
+filter = 'test(presets_rtt_and_loss) | test(link_down_up)'
+test-group = 'serial-heavy'
+
+[[profile.ci.overrides]]
+filter = 'test(presets_rtt_and_loss) | test(link_down_up)'
+test-group = 'serial-heavy'
