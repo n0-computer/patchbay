@@ -5,9 +5,10 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-const THIS_FILE = fileURLToPath(import.meta.url)
-const THIS_DIR = path.dirname(THIS_FILE)
+const THIS_DIR = path.dirname(fileURLToPath(import.meta.url))
 const REPO_ROOT = path.resolve(THIS_DIR, '../..')
+const TARGET_DIR = process.env.CARGO_TARGET_DIR ?? path.join(REPO_ROOT, 'target')
+const PATCHBAY_BIN = path.join(TARGET_DIR, 'debug', 'patchbay')
 const UI_BIND = '127.0.0.1:7429'
 const UI_URL = `http://${UI_BIND}/`
 
@@ -31,20 +32,20 @@ test('ui shows iperf run results', async ({ page }) => {
   let serveProc: ChildProcess | null = null
   try {
     execFileSync(
-      'cargo',
-      ['run', '--bin', 'netsim', '--', 'run', '--work-dir', workDir, './iroh-integration/netsim/sims/iperf-1to1-public.toml'],
+      PATCHBAY_BIN,
+      ['run', '--work-dir', workDir, './iroh-integration/patchbay/sims/iperf-1to1-public.toml'],
       { cwd: REPO_ROOT, stdio: 'inherit' },
     )
 
     serveProc = spawn(
-      'cargo',
-      ['run', '--bin', 'netsim', '--', 'serve', '--work-dir', workDir, '--bind', UI_BIND],
+      PATCHBAY_BIN,
+      ['serve', workDir, '--bind', UI_BIND],
       { cwd: REPO_ROOT, stdio: 'ignore' },
     )
     await waitForHttp(UI_URL, 30_000)
 
     await page.goto(UI_URL)
-    await expect(page.getByRole('heading', { name: 'netsim' })).toBeVisible()
+    await expect(page.getByRole('heading', { name: 'patchbay' })).toBeVisible()
     const simRow = page.getByRole('row', { name: /iperf-1to1-public-baseline/ })
     await expect(
       simRow.getByRole('cell', { name: 'iperf-1to1-public-baseline', exact: true }),
