@@ -420,24 +420,33 @@ async fn rate_two_hops_stacked() -> Result<()> {
 async fn loss_udp_moderate() -> Result<()> {
     let lab = Lab::new().await?;
     let dc = lab.add_router("dc").build().await?;
+    // Build with a clean link so ARP resolves without interference from netem.
     let dev = lab
         .add_device("dev")
-        .iface(
-            "eth0",
-            dc.id(),
-            Some(LinkCondition::Manual(LinkLimits {
-                rate_kbit: 0,
-                loss_pct: 50.0,
-                latency_ms: 0,
-                ..Default::default()
-            })),
-        )
+        .iface("eth0", dc.id(), None)
         .build()
         .await?;
 
     let dc_ip = dc.uplink_ip().context("no dc uplink ip")?;
     let r = SocketAddr::new(IpAddr::V4(dc_ip), 18_000);
     let _r = dc.spawn_reflector(r).await?;
+
+    // Warmup: populate ARP cache before applying loss.
+    dev.run_sync(move || test_utils::probe_udp(r, Duration::from_secs(2), None))
+        .context("warmup probe failed")?;
+
+    // Now apply 50% loss on the device egress.
+    let dev_handle = lab.device_by_name("dev").unwrap();
+    let iface = dev_handle.default_iface().unwrap().name().to_string();
+    dev_handle
+        .set_link_condition(
+            &iface,
+            Some(LinkCondition::Manual(LinkLimits {
+                loss_pct: 50.0,
+                ..Default::default()
+            })),
+        )
+        .await?;
 
     // tc netem loss is on the device egress, so ~50% of probes reach the
     // reflector and responses come back unlossed. Wide bounds account for
@@ -464,24 +473,33 @@ async fn loss_udp_moderate() -> Result<()> {
 async fn loss_udp_high() -> Result<()> {
     let lab = Lab::new().await?;
     let dc = lab.add_router("dc").build().await?;
+    // Build with a clean link so ARP resolves without interference from netem.
     let dev = lab
         .add_device("dev")
-        .iface(
-            "eth0",
-            dc.id(),
-            Some(LinkCondition::Manual(LinkLimits {
-                rate_kbit: 0,
-                loss_pct: 90.0,
-                latency_ms: 0,
-                ..Default::default()
-            })),
-        )
+        .iface("eth0", dc.id(), None)
         .build()
         .await?;
 
     let dc_ip = dc.uplink_ip().context("no dc uplink ip")?;
     let r = SocketAddr::new(IpAddr::V4(dc_ip), 18_100);
     let _r = dc.spawn_reflector(r).await?;
+
+    // Warmup: populate ARP cache before applying loss.
+    dev.run_sync(move || test_utils::probe_udp(r, Duration::from_secs(2), None))
+        .context("warmup probe failed")?;
+
+    // Now apply 90% loss on the device egress.
+    let dev_handle = lab.device_by_name("dev").unwrap();
+    let iface = dev_handle.default_iface().unwrap().name().to_string();
+    dev_handle
+        .set_link_condition(
+            &iface,
+            Some(LinkCondition::Manual(LinkLimits {
+                loss_pct: 90.0,
+                ..Default::default()
+            })),
+        )
+        .await?;
 
     let (_, received) = dev
         .spawn(move |_| async move {
@@ -553,32 +571,39 @@ async fn loss_tcp_integrity() -> Result<()> {
 async fn loss_udp_bidirectional() -> Result<()> {
     let lab = Lab::new().await?;
     let dc = lab.add_router("dc").build().await?;
+    // Build with a clean link so ARP resolves without interference from netem.
     let dev = lab
         .add_device("dev")
-        .iface(
-            "eth0",
-            dc.id(),
-            Some(LinkCondition::Manual(LinkLimits {
-                rate_kbit: 0,
-                loss_pct: 30.0,
-                latency_ms: 0,
-                ..Default::default()
-            })),
-        )
+        .iface("eth0", dc.id(), None)
         .build()
         .await?;
-
-    dc.set_downlink_condition(Some(LinkCondition::Manual(LinkLimits {
-        rate_kbit: 0,
-        loss_pct: 30.0,
-        latency_ms: 0,
-        ..Default::default()
-    })))
-    .await?;
 
     let dc_ip = dc.uplink_ip().context("no dc uplink ip")?;
     let r = SocketAddr::new(IpAddr::V4(dc_ip), 18_300);
     let _r = dc.spawn_reflector(r).await?;
+
+    // Warmup: populate ARP cache before applying loss.
+    dev.run_sync(move || test_utils::probe_udp(r, Duration::from_secs(2), None))
+        .context("warmup probe failed")?;
+
+    // Now apply 30% loss on both upload and download.
+    let dev_handle = lab.device_by_name("dev").unwrap();
+    let iface = dev_handle.default_iface().unwrap().name().to_string();
+    dev_handle
+        .set_link_condition(
+            &iface,
+            Some(LinkCondition::Manual(LinkLimits {
+                loss_pct: 30.0,
+                ..Default::default()
+            })),
+        )
+        .await?;
+
+    dc.set_downlink_condition(Some(LinkCondition::Manual(LinkLimits {
+        loss_pct: 30.0,
+        ..Default::default()
+    })))
+    .await?;
 
     // Round-trip delivery ≈ (1-0.3)×(1-0.3) = 49 %; expect < 80.
     let (_, received) = dev

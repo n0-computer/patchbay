@@ -7,6 +7,8 @@ import { fileURLToPath } from 'node:url'
 
 const THIS_DIR = path.dirname(fileURLToPath(import.meta.url))
 const REPO_ROOT = path.resolve(THIS_DIR, '../..')
+const TARGET_DIR = process.env.CARGO_TARGET_DIR ?? path.join(REPO_ROOT, 'target')
+const PATCHBAY_BIN = path.join(TARGET_DIR, 'debug', 'patchbay')
 const DEVTOOLS_BIND = '127.0.0.1:7431'
 const DEVTOOLS_URL = `http://${DEVTOOLS_BIND}`
 
@@ -44,8 +46,8 @@ test('devtools ui shows all views', async ({ page }) => {
 
     // Step 2: Start the devtools server.
     serveProc = spawn(
-      'cargo',
-      ['run', '--bin', 'patchbay', '--', 'serve', outdir, '--bind', DEVTOOLS_BIND],
+      PATCHBAY_BIN,
+      ['serve', outdir, '--bind', DEVTOOLS_BIND],
       { cwd: REPO_ROOT, stdio: 'inherit' },
     )
     await waitForHttp(`${DEVTOOLS_URL}/api/runs`, 60_000)

@@ -26,6 +26,35 @@ jobs:
         with:
           cache-on-failure: true
 
+      - name: Install iperf3
+        run: sudo apt-get update && sudo apt-get install -y iperf3
+
+      - name: Enable unprivileged user namespaces
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+
+      - name: Build
+        run: cargo build --workspace --all-targets
+
+      - name: Test
+        run: cargo nextest run --workspace --profile ci
+
+      - name: Clippy
+        run: cargo clippy --workspace --tests -- -D warnings
+
+      - name: Format
+        run: cargo make format-check
+
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
@@ -61,23 +90,11 @@ jobs:
         run: npx playwright install-deps chromium
         if: steps.pw-cache.outputs.cache-hit == 'true'
 
-      - name: Install iperf3
-        run: sudo apt-get update && sudo apt-get install -y iperf3
-
       - name: Enable unprivileged user namespaces
         run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
 
-      - name: Build
+      - name: Build Rust (bins + test targets)
         run: cargo build --workspace --all-targets
-
-      - name: Test
-        run: cargo nextest run --workspace --profile ci
-
-      - name: Clippy
-        run: cargo clippy --workspace --tests -- -D warnings
-
-      - name: Format
-        run: cargo make format-check
 
       - name: UI E2E
         working-directory: ui
