@@ -506,7 +506,75 @@ async fn router_lifetime_zero_withdraws_default_router() -> Result<()> {
 
 #[tokio::test(flavor = "current_thread")]
 #[traced_test]
-#[ignore = "RA/RS provisioning engine follow-up"]
 async fn rio_local_routes_without_default_router() -> Result<()> {
+    check_caps()?;
+
+    let lab = Lab::with_opts(
+        LabOpts::default()
+            .ipv6_dad_mode(Ipv6DadMode::Disabled)
+            .ipv6_provisioning_mode(Ipv6ProvisioningMode::RaDriven),
+    )
+    .await?;
+    let r = lab
+        .add_router("r")
+        .ip_support(IpSupport::DualStack)
+        .ra_enabled(true)
+        .ra_lifetime_secs(0)
+        .build()
+        .await?;
+    let d1 = lab.add_device("d1").uplink(r.id()).build().await?;
+    let d2 = lab.add_device("d2").uplink(r.id()).build().await?;
+
+    let route_default = d1.run_sync(|| {
+        let out = std::process::Command::new("ip")
+            .args(["-6", "route", "show", "default"])
+            .output()?;
+        if !out.status.success() {
+            anyhow::bail!("ip -6 route failed with status {}", out.status);
+        }
+        Ok::<_, anyhow::Error>(String::from_utf8_lossy(&out.stdout).to_string())
+    })?;
+    assert!(
+        route_default.trim().is_empty(),
+        "expected no default v6 route when lifetime is zero, got: {route_default:?}"
+    );
+
+    let pfx = d1.ip6().context("missing d1 v6 address")?.segments();
+    let subnet = format!("{:x}:{:x}:{:x}:{:x}::/64", pfx[0], pfx[1], pfx[2], pfx[3]);
+    let local_route = d1.run_sync({
+        let subnet = subnet.clone();
+        move || {
+            let out = std::process::Command::new("ip")
+                .args(["-6", "route", "show", &subnet])
+                .output()?;
+            if !out.status.success() {
+                anyhow::bail!(
+                    "ip -6 route show {} failed with status {}",
+                    subnet,
+                    out.status
+                );
+            }
+            Ok::<_, anyhow::Error>(String::from_utf8_lossy(&out.stdout).to_string())
+        }
+    })?;
+    assert!(
+        local_route.contains("dev eth0"),
+        "expected local /64 route on eth0, got: {local_route:?}"
+    );
+
+    let d2_v6 = d2.ip6().context("missing d2 v6 address")?;
+    let route_get = d1.run_sync(move || {
+        let out = std::process::Command::new("ip")
+            .args(["-6", "route", "get", &d2_v6.to_string()])
+            .output()?;
+        if !out.status.success() {
+            anyhow::bail!("ip -6 route get failed with status {}", out.status);
+        }
+        Ok::<_, anyhow::Error>(String::from_utf8_lossy(&out.stdout).to_string())
+    })?;
+    assert!(
+        route_get.contains("dev eth0"),
+        "expected local route lookup on eth0, got: {route_get:?}"
+    );
     Ok(())
 }
