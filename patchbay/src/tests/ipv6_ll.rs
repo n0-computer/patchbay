@@ -578,3 +578,113 @@ async fn rio_local_routes_without_default_router() -> Result<()> {
     );
     Ok(())
 }
+
+#[tokio::test(flavor = "current_thread")]
+#[traced_test]
+async fn radriven_runtime_ra_disable_removes_default_route_on_refresh() -> Result<()> {
+    check_caps()?;
+
+    let lab = Lab::with_opts(
+        LabOpts::default()
+            .ipv6_dad_mode(Ipv6DadMode::Disabled)
+            .ipv6_provisioning_mode(Ipv6ProvisioningMode::RaDriven),
+    )
+    .await?;
+    let r = lab
+        .add_router("r")
+        .ip_support(IpSupport::DualStack)
+        .ra_enabled(true)
+        .ra_lifetime_secs(120)
+        .build()
+        .await?;
+    let dev = lab.add_device("d").uplink(r.id()).build().await?;
+
+    let before = dev.run_sync(|| {
+        let out = std::process::Command::new("ip")
+            .args(["-6", "route", "show", "default"])
+            .output()?;
+        if !out.status.success() {
+            anyhow::bail!("ip -6 route failed with status {}", out.status);
+        }
+        Ok::<_, anyhow::Error>(String::from_utf8_lossy(&out.stdout).to_string())
+    })?;
+    assert!(
+        before.contains("via fe80:"),
+        "expected initial LL default route"
+    );
+
+    r.set_ra_enabled(false).await?;
+    assert_eq!(r.ra_enabled(), Some(false));
+    dev.link_down("eth0").await?;
+    dev.link_up("eth0").await?;
+
+    let after = dev.run_sync(|| {
+        let out = std::process::Command::new("ip")
+            .args(["-6", "route", "show", "default"])
+            .output()?;
+        if !out.status.success() {
+            anyhow::bail!("ip -6 route failed with status {}", out.status);
+        }
+        Ok::<_, anyhow::Error>(String::from_utf8_lossy(&out.stdout).to_string())
+    })?;
+    assert!(
+        after.trim().is_empty(),
+        "expected no v6 default route after runtime RA disable, got: {after:?}"
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[traced_test]
+async fn radriven_runtime_ra_lifetime_zero_removes_default_route_on_refresh() -> Result<()> {
+    check_caps()?;
+
+    let lab = Lab::with_opts(
+        LabOpts::default()
+            .ipv6_dad_mode(Ipv6DadMode::Disabled)
+            .ipv6_provisioning_mode(Ipv6ProvisioningMode::RaDriven),
+    )
+    .await?;
+    let r = lab
+        .add_router("r")
+        .ip_support(IpSupport::DualStack)
+        .ra_enabled(true)
+        .ra_lifetime_secs(120)
+        .build()
+        .await?;
+    let dev = lab.add_device("d").uplink(r.id()).build().await?;
+
+    let before = dev.run_sync(|| {
+        let out = std::process::Command::new("ip")
+            .args(["-6", "route", "show", "default"])
+            .output()?;
+        if !out.status.success() {
+            anyhow::bail!("ip -6 route failed with status {}", out.status);
+        }
+        Ok::<_, anyhow::Error>(String::from_utf8_lossy(&out.stdout).to_string())
+    })?;
+    assert!(
+        before.contains("via fe80:"),
+        "expected initial LL default route"
+    );
+
+    r.set_ra_lifetime_secs(0).await?;
+    assert_eq!(r.ra_lifetime_secs(), Some(0));
+    dev.link_down("eth0").await?;
+    dev.link_up("eth0").await?;
+
+    let after = dev.run_sync(|| {
+        let out = std::process::Command::new("ip")
+            .args(["-6", "route", "show", "default"])
+            .output()?;
+        if !out.status.success() {
+            anyhow::bail!("ip -6 route failed with status {}", out.status);
+        }
+        Ok::<_, anyhow::Error>(String::from_utf8_lossy(&out.stdout).to_string())
+    })?;
+    assert!(
+        after.trim().is_empty(),
+        "expected no v6 default route after runtime lifetime=0, got: {after:?}"
+    );
+    Ok(())
+}

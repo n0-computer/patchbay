@@ -1120,7 +1120,76 @@ impl Router {
         self.lab.with_router(self.id, |r| r.cfg.nat_v6)
     }
 
+    /// Returns whether RA emission is enabled for this router, if present.
+    pub fn ra_enabled(&self) -> Option<bool> {
+        self.lab.with_router(self.id, |r| r.cfg.ra_enabled)
+    }
+
+    /// Returns RA emission interval in seconds for this router, if present.
+    pub fn ra_interval_secs(&self) -> Option<u64> {
+        self.lab.with_router(self.id, |r| r.cfg.ra_interval_secs)
+    }
+
+    /// Returns RA lifetime in seconds for this router, if present.
+    pub fn ra_lifetime_secs(&self) -> Option<u64> {
+        self.lab.with_router(self.id, |r| r.cfg.ra_lifetime_secs)
+    }
+
     // ── Dynamic operations ──────────────────────────────────────────────
+
+    /// Updates the RA enabled flag at runtime.
+    ///
+    /// This affects subsequent RA-driven route refresh operations and any
+    /// future device wiring. Existing RA worker task lifecycle is not changed.
+    pub async fn set_ra_enabled(&self, enabled: bool) -> Result<()> {
+        let op = self
+            .lab
+            .with_router(self.id, |r| Arc::clone(&r.op))
+            .ok_or_else(|| anyhow!("router removed"))?;
+        let _guard = op.lock().await;
+        let mut inner = self.lab.core.lock().unwrap();
+        let router = inner
+            .router_mut(self.id)
+            .ok_or_else(|| anyhow!("router removed"))?;
+        router.cfg.ra_enabled = enabled;
+        Ok(())
+    }
+
+    /// Updates RA interval in seconds at runtime.
+    ///
+    /// Value is clamped to at least one second.
+    /// Existing RA worker task lifecycle is not changed.
+    pub async fn set_ra_interval_secs(&self, secs: u64) -> Result<()> {
+        let op = self
+            .lab
+            .with_router(self.id, |r| Arc::clone(&r.op))
+            .ok_or_else(|| anyhow!("router removed"))?;
+        let _guard = op.lock().await;
+        let mut inner = self.lab.core.lock().unwrap();
+        let router = inner
+            .router_mut(self.id)
+            .ok_or_else(|| anyhow!("router removed"))?;
+        router.cfg.ra_interval_secs = secs.max(1);
+        Ok(())
+    }
+
+    /// Updates RA lifetime in seconds at runtime.
+    ///
+    /// A value of `0` represents default-router withdrawal semantics.
+    /// Existing RA worker task lifecycle is not changed.
+    pub async fn set_ra_lifetime_secs(&self, secs: u64) -> Result<()> {
+        let op = self
+            .lab
+            .with_router(self.id, |r| Arc::clone(&r.op))
+            .ok_or_else(|| anyhow!("router removed"))?;
+        let _guard = op.lock().await;
+        let mut inner = self.lab.core.lock().unwrap();
+        let router = inner
+            .router_mut(self.id)
+            .ok_or_else(|| anyhow!("router removed"))?;
+        router.cfg.ra_lifetime_secs = secs;
+        Ok(())
+    }
 
     /// Replaces NAT rules on this router at runtime.
     ///
