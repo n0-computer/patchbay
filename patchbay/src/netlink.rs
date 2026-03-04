@@ -276,16 +276,7 @@ impl Netlink {
         trace!(ifname = %ifname, via = %via, "replace default route v6");
         let ifindex = self.link_index(ifname).await?;
 
-        let mut routes = self
-            .handle
-            .route()
-            .get(RouteMessageBuilder::<Ipv6Addr>::new().build())
-            .execute();
-        while let Some(route) = routes.try_next().await? {
-            if route.header.destination_prefix_length == 0 {
-                let _ = self.handle.route().del(route).execute().await;
-            }
-        }
+        self.delete_default_routes_v6().await?;
 
         let msg = RouteMessageBuilder::<Ipv6Addr>::new()
             .output_interface(ifindex)
@@ -323,16 +314,7 @@ impl Netlink {
         trace!(ifname = %ifname, via = %via, "replace default route v6 scoped");
         let ifindex = self.link_index(ifname).await?;
 
-        let mut routes = self
-            .handle
-            .route()
-            .get(RouteMessageBuilder::<Ipv6Addr>::new().build())
-            .execute();
-        while let Some(route) = routes.try_next().await? {
-            if route.header.destination_prefix_length == 0 {
-                let _ = self.handle.route().del(route).execute().await;
-            }
-        }
+        self.delete_default_routes_v6().await?;
 
         let msg = RouteMessageBuilder::<Ipv6Addr>::new()
             .output_interface(ifindex)
@@ -344,6 +326,10 @@ impl Netlink {
 
     pub(crate) async fn clear_default_route_v6(&self) -> Result<()> {
         trace!("clear default route v6");
+        self.delete_default_routes_v6().await
+    }
+
+    async fn delete_default_routes_v6(&self) -> Result<()> {
         let mut routes = self
             .handle
             .route()

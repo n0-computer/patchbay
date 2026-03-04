@@ -41,7 +41,6 @@ mod hairpin;
 mod holepunch;
 mod iface;
 mod ipv6;
-mod ipv6_ll;
 mod lifecycle;
 mod link_condition;
 mod mtu;

@@ -18,6 +18,10 @@ use crate::{
     Ipv6ProvisioningMode, LinkCondition, Nat, NatConfig, NatFiltering, NatMapping, NatV6Mode,
 };
 
+pub(crate) const RA_DEFAULT_ENABLED: bool = true;
+pub(crate) const RA_DEFAULT_INTERVAL_SECS: u64 = 30;
+pub(crate) const RA_DEFAULT_LIFETIME_SECS: u64 = 1800;
+
 /// Defines static addressing and naming for one lab instance.
 #[derive(Clone, Debug)]
 pub(crate) struct CoreConfig {
@@ -138,6 +142,11 @@ pub(crate) struct DeviceDefaultV6RouteTarget {
     pub ifname: Arc<str>,
 }
 
+pub(crate) struct DownlinkV6Gateways {
+    pub global_v6: Option<Ipv6Addr>,
+    pub link_local_v6: Option<Ipv6Addr>,
+}
+
 /// One network interface on a device, connected to a router's downstream switch.
 #[derive(Clone, Debug)]
 pub(crate) struct DeviceIfaceData {
@@ -241,6 +250,20 @@ pub(crate) struct RouterData {
     pub op: Arc<tokio::sync::Mutex<()>>,
 }
 
+impl RouterData {
+    pub(crate) fn ra_default_enabled(&self) -> bool {
+        self.cfg.ra_enabled && self.cfg.ra_lifetime_secs > 0
+    }
+
+    pub(crate) fn active_downstream_ll_v6(&self) -> Option<Ipv6Addr> {
+        if self.ra_default_enabled() {
+            self.downstream_ll_v6
+        } else {
+            None
+        }
+    }
+}
+
 #[derive(Debug)]
 pub(crate) struct RaRuntimeCfg {
     enabled: AtomicBool,
@@ -253,7 +276,7 @@ impl RaRuntimeCfg {
     pub(crate) fn new(enabled: bool, interval_secs: u64, lifetime_secs: u64) -> Self {
         Self {
             enabled: AtomicBool::new(enabled),
-            interval_secs: AtomicU64::new(interval_secs.max(1)),
+            interval_secs: AtomicU64::new(interval_secs),
             lifetime_secs: AtomicU64::new(lifetime_secs),
             changed: tokio::sync::Notify::new(),
         }
@@ -262,7 +285,7 @@ impl RaRuntimeCfg {
     pub(crate) fn load(&self) -> (bool, u64, u64) {
         (
             self.enabled.load(Ordering::Relaxed),
-            self.interval_secs.load(Ordering::Relaxed).max(1),
+            self.interval_secs.load(Ordering::Relaxed),
             self.lifetime_secs.load(Ordering::Relaxed),
         )
     }
@@ -810,9 +833,9 @@ impl NetworkCore {
                     mtu: None,
                     block_icmp_frag_needed: false,
                     firewall: Firewall::None,
-                    ra_enabled: true,
-                    ra_interval_secs: 30,
-                    ra_lifetime_secs: 1800,
+                    ra_enabled: RA_DEFAULT_ENABLED,
+                    ra_interval_secs: RA_DEFAULT_INTERVAL_SECS,
+                    ra_lifetime_secs: RA_DEFAULT_LIFETIME_SECS,
                 },
                 downlink_bridge,
                 uplink: None,
@@ -825,7 +848,11 @@ impl NetworkCore {
                 downstream_cidr_v6: None,
                 downstream_gw_v6: None,
                 downstream_ll_v6: None,
-                ra_runtime: Arc::new(RaRuntimeCfg::new(true, 30, 1800)),
+                ra_runtime: Arc::new(RaRuntimeCfg::new(
+                    RA_DEFAULT_ENABLED,
+                    RA_DEFAULT_INTERVAL_SECS,
+                    RA_DEFAULT_LIFETIME_SECS,
+                )),
                 op: Arc::new(tokio::sync::Mutex::new(())),
             },
         );
@@ -952,11 +979,7 @@ impl NetworkCore {
             .ok_or_else(|| anyhow!("gateway router missing"))?;
         let gw_br = sw.bridge.clone().unwrap_or_else(|| "br-lan".into());
         let gw_ns = gw_router_data.ns.clone();
-        let gw_ll_v6 = if gw_router_data.cfg.ra_enabled && gw_router_data.cfg.ra_lifetime_secs > 0 {
-            gw_router_data.downstream_ll_v6
-        } else {
-            None
-        };
+        let gw_ll_v6 = gw_router_data.active_downstream_ll_v6();
         let iface_build = IfaceBuild {
             dev_ns,
             gw_ns,
@@ -1041,11 +1064,7 @@ impl NetworkCore {
             prefix_len,
             gw_ip_v6: sw.gw_v6,
             dev_ip_v6: new_ip_v6,
-            gw_ll_v6: if target_router.cfg.ra_enabled && target_router.cfg.ra_lifetime_secs > 0 {
-                target_router.downstream_ll_v6
-            } else {
-                None
-            },
+            gw_ll_v6: target_router.active_downstream_ll_v6(),
             dev_ll_v6: new_ip_v6.map(|_| link_local_from_seed(old_idx)),
             prefix_len_v6: sw.cidr_v6.map(|c| c.prefix_len()).unwrap_or(64),
             impair,
@@ -1110,21 +1129,19 @@ impl NetworkCore {
     }
 
     /// Returns IPv6 default-router candidates for a router downstream switch.
-    ///
-    /// The tuple is `(global_gateway, link_local_gateway)`.
-    pub(crate) fn router_downlink_gw6_for_switch(
-        &self,
-        sw: NodeId,
-    ) -> Result<(Option<Ipv6Addr>, Option<Ipv6Addr>)> {
+    pub(crate) fn router_downlink_gw6_for_switch(&self, sw: NodeId) -> Result<DownlinkV6Gateways> {
         let switch = self
             .switches
             .get(&sw)
             .ok_or_else(|| anyhow!("switch missing"))?;
-        let ll = switch
+        let link_local_v6 = switch
             .owner_router
             .and_then(|rid| self.routers.get(&rid))
             .and_then(|r| r.downstream_ll_v6);
-        Ok((switch.gw_v6, ll))
+        Ok(DownlinkV6Gateways {
+            global_v6: switch.gw_v6,
+            link_local_v6,
+        })
     }
 
     pub(crate) fn router_default_v6_targets(
@@ -1167,7 +1184,7 @@ impl NetworkCore {
             .owner_router
             .and_then(|rid| self.routers.get(&rid))
             .ok_or_else(|| anyhow!("switch missing owner router"))?;
-        Ok(router.cfg.ra_enabled && router.cfg.ra_lifetime_secs > 0)
+        Ok(router.ra_default_enabled())
     }
 
     /// Adds a switch node and returns its identifier.
@@ -1213,7 +1230,7 @@ impl NetworkCore {
         router_entry.uplink = Some(sw);
         router_entry.upstream_ip = ip;
         router_entry.upstream_ip_v6 = ip_v6;
-        router_entry.upstream_ll_v6 = ip_v6.map(|_| link_local_from_seed(router.0 ^ sw.0));
+        router_entry.upstream_ll_v6 = ip_v6.map(|_| link_local_from_seed(seed2(router.0, sw.0)));
         Ok(())
     }
 
@@ -1314,7 +1331,7 @@ impl NetworkCore {
         router_entry.downstream_cidr_v6 = cidr_v6;
         router_entry.downstream_gw_v6 = gw_v6;
         router_entry.downstream_ll_v6 =
-            cidr_v6.map(|_| link_local_from_seed(router.0 ^ sw.0 ^ 0xA5A5));
+            cidr_v6.map(|_| link_local_from_seed(seed3(router.0, sw.0, 0xA5A5)));
         Ok((cidr, gw))
     }
 
@@ -1981,10 +1998,6 @@ pub(crate) struct RouterSetupData {
     pub provisioning_mode: Ipv6ProvisioningMode,
     /// Whether RA worker should run for this router.
     pub ra_enabled: bool,
-    /// RA worker interval in seconds.
-    pub ra_interval_secs: u64,
-    /// RA lifetime in seconds.
-    pub ra_lifetime_secs: u64,
 }
 
 /// Sets up a single router's namespaces, links, and NAT. No lock held.
@@ -1993,9 +2006,6 @@ pub(crate) async fn setup_router_async(
     netns: &Arc<netns::NetnsManager>,
     data: &RouterSetupData,
 ) -> Result<()> {
-    match data.provisioning_mode {
-        Ipv6ProvisioningMode::Static | Ipv6ProvisioningMode::RaDriven => {}
-    }
     let router = &data.router;
     let id = router.id;
     debug!(name = %router.name, ns = %router.ns, "router: setup");
@@ -2333,8 +2343,6 @@ pub(crate) async fn setup_router_async(
                 router_name: router.name.to_string(),
                 iface: router.downlink_bridge.to_string(),
                 src_ll: router.downstream_ll_v6,
-                initial_interval_secs: data.ra_interval_secs.max(1),
-                initial_lifetime_secs: data.ra_lifetime_secs,
             },
         )?;
     }
@@ -2377,8 +2385,6 @@ fn spawn_ra_worker(
         let (enabled, interval_secs, lifetime_secs) = load_runtime();
         if enabled {
             emit_ra(interval_secs, lifetime_secs);
-        } else {
-            emit_ra(cfg.initial_interval_secs, cfg.initial_lifetime_secs);
         }
 
         loop {
@@ -2394,7 +2400,7 @@ fn spawn_ra_worker(
                         emit_ra(interval_secs, lifetime_secs);
                     }
                 }
-                _ = tokio::time::sleep(tokio::time::Duration::from_secs(interval_secs.max(1))) => {
+                _ = tokio::time::sleep(tokio::time::Duration::from_secs(interval_secs)) => {
                     tracing::trace!(ns = %ns, interval_secs, "ra-worker: tick");
                     let (enabled, interval_secs, lifetime_secs) = load_runtime();
                     if enabled {
@@ -2413,8 +2419,6 @@ struct RaWorkerCfg {
     router_name: String,
     iface: String,
     src_ll: Option<Ipv6Addr>,
-    initial_interval_secs: u64,
-    initial_lifetime_secs: u64,
 }
 
 /// Sets up NAT64 in the router namespace:
@@ -2594,21 +2598,31 @@ pub(crate) async fn remove_firewall(netns: &netns::NetnsManager, ns: &str) -> Re
 }
 
 /// Sets up a single device's namespace and wires all interfaces. No lock held.
-#[instrument(name = "device", skip_all, fields(id = dev.id.0))]
-#[allow(clippy::too_many_arguments)]
+pub(crate) struct DeviceSetupData {
+    pub prefix: Arc<str>,
+    pub root_ns: Arc<str>,
+    pub dev: DeviceData,
+    pub ifaces: Vec<IfaceBuild>,
+    pub dns_overlay: Option<netns::DnsOverlay>,
+    pub dad_mode: Ipv6DadMode,
+    pub provisioning_mode: Ipv6ProvisioningMode,
+}
+
+/// Sets up a single device's namespace and wires all interfaces. No lock held.
+#[instrument(name = "device", skip_all)]
 pub(crate) async fn setup_device_async(
     netns: &Arc<netns::NetnsManager>,
-    prefix: &str,
-    root_ns: &str,
-    dev: &DeviceData,
-    ifaces: Vec<IfaceBuild>,
-    dns_overlay: Option<netns::DnsOverlay>,
-    dad_mode: Ipv6DadMode,
-    provisioning_mode: Ipv6ProvisioningMode,
+    data: DeviceSetupData,
 ) -> Result<()> {
-    match provisioning_mode {
-        Ipv6ProvisioningMode::Static | Ipv6ProvisioningMode::RaDriven => {}
-    }
+    let DeviceSetupData {
+        prefix,
+        root_ns,
+        dev,
+        ifaces,
+        dns_overlay,
+        dad_mode,
+        provisioning_mode,
+    } = data;
     let rs_ifaces: Vec<(Arc<str>, Option<Ipv6Addr>)> =
         if provisioning_mode == Ipv6ProvisioningMode::RaDriven {
             ifaces
@@ -2619,12 +2633,12 @@ pub(crate) async fn setup_device_async(
         } else {
             Vec::new()
         };
-    debug!(name = %dev.name, ns = %dev.ns, "device: setup");
+    debug!(id = dev.id.0, name = %dev.name, ns = %dev.ns, "device: setup");
     let log_prefix = format!("{}.{}", crate::consts::KIND_DEVICE, dev.name);
     create_named_netns(netns, &dev.ns, dns_overlay, Some(log_prefix), dad_mode)?;
 
     for iface in ifaces {
-        wire_iface_async(netns, prefix, root_ns, iface).await?;
+        wire_iface_async(netns, &prefix, &root_ns, iface).await?;
     }
 
     for (ifname, router_ll) in rs_ifaces {
@@ -2633,28 +2647,23 @@ pub(crate) async fn setup_device_async(
         let dev_name = dev.name.to_string();
         let iface = ifname.to_string();
         nl_run(netns, &ns, move |_h: Netlink| async move {
-            match router_ll {
-                Some(router_ll) => {
-                    tracing::info!(
-                        target: "patchbay::_events::RouterSolicitation",
-                        ns = %ns_for_log,
-                        device = %dev_name,
-                        iface = %iface,
-                        dst = "ff02::2",
-                        router_ll = %router_ll,
-                        "router solicitation"
-                    );
-                }
-                None => {
-                    tracing::info!(
-                        target: "patchbay::_events::RouterSolicitation",
-                        ns = %ns_for_log,
-                        device = %dev_name,
-                        iface = %iface,
-                        dst = "ff02::2",
-                        "router solicitation"
-                    );
-                }
+            let router_ll = router_ll.map(|ll| ll.to_string());
+            tracing::info!(
+                target: "patchbay::_events::RouterSolicitation",
+                ns = %ns_for_log,
+                device = %dev_name,
+                iface = %iface,
+                dst = "ff02::2",
+                router_ll = router_ll.as_deref(),
+                "router solicitation"
+            );
+            if router_ll.is_none() {
+                tracing::trace!(
+                    ns = %ns_for_log,
+                    device = %dev_name,
+                    iface = %iface,
+                    "router solicitation emitted without router_ll"
+                );
             }
             Ok(())
         })
@@ -2766,11 +2775,29 @@ fn add_host(cidr: Ipv4Net, host: u8) -> Result<Ipv4Addr> {
     Ok(Ipv4Addr::new(octets[0], octets[1], octets[2], host))
 }
 
+fn splitmix64(mut x: u64) -> u64 {
+    x = x.wrapping_add(0x9E3779B97F4A7C15);
+    x = (x ^ (x >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
+    x = (x ^ (x >> 27)).wrapping_mul(0x94D049BB133111EB);
+    x ^ (x >> 31)
+}
+
+fn seed2(a: u64, b: u64) -> u64 {
+    splitmix64(a.rotate_left(7) ^ b.rotate_right(3) ^ 0xC2B2AE3D27D4EB4F)
+}
+
+fn seed3(a: u64, b: u64, c: u64) -> u64 {
+    splitmix64(seed2(a, b) ^ c.rotate_left(17))
+}
+
 fn link_local_from_seed(seed: u64) -> Ipv6Addr {
-    let a = ((seed >> 48) & 0xffff) as u16;
-    let b = ((seed >> 32) & 0xffff) as u16;
-    let c = ((seed >> 16) & 0xffff) as u16;
-    let d = (seed & 0xffff) as u16;
+    let mixed = splitmix64(seed);
+    let mut iid = mixed.to_be_bytes();
+    iid[0] |= 0x02;
+    let a = u16::from_be_bytes([iid[0], iid[1]]);
+    let b = u16::from_be_bytes([iid[2], iid[3]]);
+    let c = u16::from_be_bytes([iid[4], iid[5]]);
+    let d = u16::from_be_bytes([iid[6], iid[7]]);
     Ipv6Addr::new(0xfe80, 0, 0, 0, a, b, c, d)
 }
 

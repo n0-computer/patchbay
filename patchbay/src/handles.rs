@@ -385,16 +385,17 @@ impl Device {
         })
         .await?;
         if is_default_via {
+            let provisioning = self.provisioning_mode()?;
             let (gw_ip, gw_v6, gw_ll_v6, provisioning, ra_default_enabled) = {
                 let inner = self.lab.core.lock().unwrap();
                 let gw_ip = inner.router_downlink_gw_for_switch(uplink)?;
-                let (gw_v6, gw_ll_v6) = inner.router_downlink_gw6_for_switch(uplink)?;
+                let gw_v6 = inner.router_downlink_gw6_for_switch(uplink)?;
                 let ra_default_enabled = inner.ra_default_enabled_for_switch(uplink)?;
                 (
                     gw_ip,
-                    gw_v6,
-                    gw_ll_v6,
-                    self.provisioning_mode()?,
+                    gw_v6.global_v6,
+                    gw_v6.link_local_v6,
+                    provisioning,
                     ra_default_enabled,
                 )
             };
@@ -454,6 +455,7 @@ impl Device {
             .with_device(self.id, |d| Arc::clone(&d.op))
             .ok_or_else(|| anyhow!("device removed"))?;
         let _guard = op.lock().await;
+        let provisioning = self.provisioning_mode()?;
         let (ns, impair, gw_ip, gw_v6, gw_ll_v6, provisioning, ra_default_enabled) = {
             let inner = self.lab.core.lock().unwrap();
             let dev = inner
@@ -463,15 +465,15 @@ impl Device {
                 .iface(to)
                 .ok_or_else(|| anyhow!("interface '{}' not found", to))?;
             let gw_ip = inner.router_downlink_gw_for_switch(iface.uplink)?;
-            let (gw_v6, gw_ll_v6) = inner.router_downlink_gw6_for_switch(iface.uplink)?;
+            let gw_v6 = inner.router_downlink_gw6_for_switch(iface.uplink)?;
             let ra_default_enabled = inner.ra_default_enabled_for_switch(iface.uplink)?;
             (
                 dev.ns.clone(),
                 iface.impair,
                 gw_ip,
-                gw_v6,
-                gw_ll_v6,
-                self.provisioning_mode()?,
+                gw_v6.global_v6,
+                gw_v6.link_local_v6,
+                provisioning,
                 ra_default_enabled,
             )
         };

@@ -20,7 +20,8 @@ pub use crate::qdisc::LinkLimits;
 use crate::{
     core::{
         self, apply_or_remove_impair, setup_device_async, setup_root_ns_async, setup_router_async,
-        CoreConfig, DownstreamPool, IfaceBuild, LabInner, NetworkCore, NodeId, RouterSetupData,
+        CoreConfig, DeviceSetupData, DownstreamPool, IfaceBuild, LabInner, NetworkCore, NodeId,
+        RouterSetupData, RA_DEFAULT_ENABLED, RA_DEFAULT_INTERVAL_SECS, RA_DEFAULT_LIFETIME_SECS,
     },
     event::{DeviceState, LabEvent, LabEventKind, RouterState},
     netlink::Netlink,
@@ -751,9 +752,9 @@ impl Lab {
             mtu: None,
             block_icmp_frag_needed: false,
             firewall: Firewall::None,
-            ra_enabled: true,
-            ra_interval_secs: 30,
-            ra_lifetime_secs: 1800,
+            ra_enabled: RA_DEFAULT_ENABLED,
+            ra_interval_secs: RA_DEFAULT_INTERVAL_SECS,
+            ra_lifetime_secs: RA_DEFAULT_LIFETIME_SECS,
             result: Ok(()),
         }
     }
@@ -905,8 +906,6 @@ impl Lab {
                 Some((sw.gw_v6?, sw.cidr_v6?.prefix_len()))
             });
             let ra_enabled = router.cfg.ra_enabled;
-            let ra_interval_secs = router.cfg.ra_interval_secs.max(1);
-            let ra_lifetime_secs = router.cfg.ra_lifetime_secs;
 
             let setup_data = RouterSetupData {
                 router,
@@ -934,8 +933,6 @@ impl Lab {
                 dad_mode: self.inner.ipv6_dad_mode,
                 provisioning_mode: self.inner.ipv6_provisioning_mode,
                 ra_enabled,
-                ra_interval_secs,
-                ra_lifetime_secs,
             };
 
             (id, setup_data, idx)
@@ -1644,9 +1641,9 @@ impl RouterBuilder {
             mtu: None,
             block_icmp_frag_needed: false,
             firewall: Firewall::None,
-            ra_enabled: true,
-            ra_interval_secs: 30,
-            ra_lifetime_secs: 1800,
+            ra_enabled: RA_DEFAULT_ENABLED,
+            ra_interval_secs: RA_DEFAULT_INTERVAL_SECS,
+            ra_lifetime_secs: RA_DEFAULT_LIFETIME_SECS,
             result: Err(err),
         }
     }
@@ -2042,8 +2039,6 @@ impl RouterBuilder {
 
             let has_v6 = router.cfg.ip_support.has_v6();
             let ra_enabled = router.cfg.ra_enabled;
-            let ra_interval_secs = router.cfg.ra_interval_secs.max(1);
-            let ra_lifetime_secs = router.cfg.ra_lifetime_secs;
             let setup_data = RouterSetupData {
                 router,
                 root_ns: cfg.root_ns.clone(),
@@ -2074,8 +2069,6 @@ impl RouterBuilder {
                 dad_mode: self.inner.ipv6_dad_mode,
                 provisioning_mode: self.inner.ipv6_provisioning_mode,
                 ra_enabled,
-                ra_interval_secs,
-                ra_lifetime_secs,
             };
 
             (id, setup_data)
@@ -2256,11 +2249,7 @@ impl DeviceBuilder {
                 };
                 let gw_ll_v6 = inner.router(gw_router).and_then(|r| {
                     if provisioning_mode == Ipv6ProvisioningMode::RaDriven {
-                        if r.cfg.ra_enabled && r.cfg.ra_lifetime_secs > 0 {
-                            r.downstream_ll_v6
-                        } else {
-                            None
-                        }
+                        r.active_downstream_ll_v6()
                     } else {
                         r.downstream_ll_v6
                     }
@@ -2303,13 +2292,15 @@ impl DeviceBuilder {
         async {
             setup_device_async(
                 netns,
-                &prefix,
-                &root_ns,
-                &dev,
-                ifaces,
-                Some(dns_overlay),
-                self.inner.ipv6_dad_mode,
-                provisioning_mode,
+                DeviceSetupData {
+                    prefix,
+                    root_ns,
+                    dev: dev.clone(),
+                    ifaces,
+                    dns_overlay: Some(dns_overlay),
+                    dad_mode: self.inner.ipv6_dad_mode,
+                    provisioning_mode,
+                },
             )
             .await
         }
