@@ -1079,8 +1079,7 @@ impl NetworkCore {
                 .switches
                 .get(&sw)
                 .ok_or_else(|| anyhow!("unknown switch id"))?;
-            if sw_entry.cidr.is_some() {
-                let cidr = sw_entry.cidr.unwrap();
+            if let Some(cidr) = sw_entry.cidr {
                 let gw = sw_entry
                     .gw
                     .ok_or_else(|| anyhow!("switch '{}' missing gw", sw_entry.name))?;
