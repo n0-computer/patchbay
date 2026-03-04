@@ -1,0 +1,17 @@
+[sim]
+name = "ping-e2e"
+
+[[router]]
+name = "dc"
+
+[device.sender.eth0]
+gateway = "dc"
+
+[device.receiver.eth0]
+gateway = "dc"
+
+[[step]]
+action = "run"
+id     = "ping-check"
+device = "sender"
+cmd    = ["ping", "-c", "3", "$NETSIM_IP_receiver"]
