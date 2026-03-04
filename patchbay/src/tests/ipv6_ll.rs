@@ -876,3 +876,67 @@ async fn radriven_ra_worker_reflects_runtime_interval_and_lifetime() -> Result<(
 
     Ok(())
 }
+
+#[tokio::test(flavor = "current_thread")]
+#[traced_test]
+async fn radriven_ra_worker_stops_when_router_namespace_is_removed() -> Result<()> {
+    check_caps()?;
+
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let outdir = std::env::temp_dir().join(format!("patchbay-ra-lifecycle-{unique}"));
+    fs::create_dir_all(&outdir)?;
+    std::env::set_var("PATCHBAY_LOG", "trace");
+
+    let lab = Lab::with_opts(
+        LabOpts::default()
+            .outdir(&outdir)
+            .label("ra-lifecycle")
+            .ipv6_dad_mode(Ipv6DadMode::Disabled)
+            .ipv6_provisioning_mode(Ipv6ProvisioningMode::RaDriven),
+    )
+    .await?;
+    let r = lab
+        .add_router("r")
+        .ip_support(IpSupport::DualStack)
+        .ra_enabled(true)
+        .ra_interval_secs(1)
+        .ra_lifetime_secs(120)
+        .build()
+        .await?;
+    let d = lab.add_device("d").uplink(r.id()).build().await?;
+
+    let events_path = r
+        .filepath("events.jsonl")
+        .context("missing router events path")?;
+    let saw_ra = wait_for_file_contains(
+        &events_path,
+        "\"kind\":\"RouterAdvertisement\"",
+        Duration::from_secs(3),
+    )
+    .await?;
+    assert!(
+        saw_ra,
+        "expected RouterAdvertisement log before router removal"
+    );
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let before = fs::read_to_string(&events_path)?
+        .matches("\"kind\":\"RouterAdvertisement\"")
+        .count();
+
+    lab.remove_device(d.id())?;
+    lab.remove_router(r.id())?;
+
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let after = fs::read_to_string(&events_path)?
+        .matches("\"kind\":\"RouterAdvertisement\"")
+        .count();
+    assert_eq!(
+        before, after,
+        "expected no additional RouterAdvertisement events after router removal"
+    );
+
+    Ok(())
+}
