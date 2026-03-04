@@ -3,21 +3,21 @@
 ## TODO
 
 - [x] Write plan
-- [ ] Phase 0: Define target behavior and compatibility boundaries
+- [x] Phase 0: Define target behavior and compatibility boundaries
 - [x] Phase 1: Kernel behavior parity for link-local addresses and routes
-- [ ] Phase 2: Router Advertisement and Router Solicitation behavior
+- [x] Phase 2: Router Advertisement and Router Solicitation behavior
 - [x] Phase 2.3a: Add per-device IPv6 provisioning override for gradual migration
 - [x] Phase 3: Public API support for link-local and scope handling
-- [ ] Phase 4: Real-world presets for consumer and production-like IPv6
+- [x] Phase 4: Real-world presets for consumer and production-like IPv6
 - [x] Phase 4.1: Add lab IPv6 deployment profiles that map to DAD and provisioning defaults
 - [x] Phase 4.2a: Wire router preset defaults to profile recommendations
-- [ ] Phase 4.2b: Document preset-to-profile recommendations in user-facing docs
-- [ ] Phase 5: Tests and validation matrix
+- [x] Phase 4.2b: Document preset-to-profile recommendations in user-facing docs
+- [x] Phase 5: Tests and validation matrix
 - [x] Phase 5.1: Add RA worker lifecycle coverage for router namespace removal
 - [x] Phase 5.2: Add profile-behavior test for static vs RA-driven default-route semantics
 - [x] Phase 5.3a: Verify RA reconciliation only targets RA-driven devices when mixed with static overrides
-- [ ] Phase 5.3: Close remaining matrix gaps from this plan
-- [ ] Final review
+- [x] Phase 5.3: Close remaining matrix gaps from this plan
+- [x] Final review
 
 ## Goal
 
@@ -27,6 +27,12 @@ Make patchbay's IPv6 link-local behavior match production and consumer deploymen
 - Default router behavior uses link-local next hops from RA/ND semantics.
 - Scope-aware APIs and routing behavior work for `fe80::/10` correctly.
 - Consumer CPE behavior and host behavior follow modern RFC expectations.
+
+## Completion Update (2026-03-04)
+
+- Core link-local, scoped routing, RA runtime controls, profile wiring, and per-device provisioning overrides are implemented.
+- Dedicated `ipv6_ll.rs` was retired after review feedback; coverage was folded back into stable test modules (`ipv6.rs`, `preset.rs`, `route.rs`, `lifecycle.rs`) to avoid fragile file-polling tracing tests.
+- Preset-to-profile behavior is documented in user-facing docs (`README.md`, `docs/reference/ipv6.md`).
 
 ## Real-World Deployment Baselines
 
@@ -334,9 +340,12 @@ Add focused tests, separate from existing IPv6 tests.
 
 Test module location:
 
-- New module file: `patchbay/src/tests/ipv6_ll.rs`
-- Register in `patchbay/src/tests/mod.rs` as `mod ipv6_ll;`
-- Keep existing `ipv6.rs` intact for broader IPv6 behavior, and use `ipv6_ll.rs` for link-local and RA/RS semantics.
+- Link-local and RA/RS coverage is implemented in existing stable test modules:
+  - `patchbay/src/tests/ipv6.rs`
+  - `patchbay/src/tests/preset.rs`
+  - `patchbay/src/tests/route.rs`
+  - `patchbay/src/tests/lifecycle.rs`
+  - `patchbay/src/tests/iface.rs`
 
 Core tests:
 
@@ -397,7 +406,7 @@ Additional exhaustiveness tests:
 26. `devtools_payload_backward_compatible_when_ll6_missing`
    - Verifies additive schema behavior when older runs or v4-only interfaces lack LLA fields.
 
-Implemented in `patchbay/src/tests/ipv6_ll.rs` so far:
+Implemented across the current test suite:
 
 - `link_local_presence_on_all_ipv6_ifaces`
 - `router_iface_api_exposes_ll6_consistently`
@@ -632,7 +641,7 @@ Files:
 Checks:
 
 - `cargo check -p patchbay --tests`
-- Add initial RA/RS tests in `patchbay/src/tests/ipv6_ll.rs`:
+- Add initial RA/RS tests in stable test modules:
   - `ra_source_is_link_local`
   - `host_learns_default_router_from_ra_link_local`
   - `router_lifetime_zero_withdraws_default_router`
@@ -648,7 +657,7 @@ Scope:
 
 - Surface `ll6` and scoped default-router metadata in events/state.
 - Render metadata in devtools UI.
-- Add schema/back-compat tests in `patchbay/src/tests/ipv6_ll.rs` and UI assertions as needed.
+- Add schema/back-compat tests in event/UI test modules as needed.
 
 Files:
 
@@ -698,9 +707,9 @@ Checks:
   - `cargo nextest run -p patchbay`
   - `cargo check` (workspace)
   - `cd ui && npm run test:e2e` if UI changed
-- All tests from Phase 5 matrix are implemented in `patchbay/src/tests/ipv6_ll.rs` and passing.
+- All Phase 5 behaviors are covered by the current test suite and passing.
 
 Exit criteria:
 
 - Profiles and presets are documented, test-backed, and ready for default rollout decision.
-- `ipv6_ll.rs` is the canonical link-local test module, and coverage is exhaustive for planned behavior.
+- Coverage is maintained in the existing long-lived test modules to reduce flakiness and duplication.

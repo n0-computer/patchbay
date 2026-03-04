@@ -12,6 +12,7 @@
 
 ## Completed
 
+- [ipv6-linklocal.md](ipv6-linklocal.md) - priority 5; link-local/scoped routing parity, RA runtime controls, profile mapping, and docs finalized
 - [devtools-ui.md](devtools-ui.md) - priority 5; all phases complete, unified UI, per-namespace tracing, event system, axum server
 - [real-world-conditions.md](real-world-conditions.md) - priority 5; all 6 phases complete (NAT, impairment, MTU/removal/IP, hairpin, region routing, firewall)
 - [region-routing.md](region-routing.md) - priority 5; per-region router namespaces, 198.18.0.0/15 address space, inter-region veths, break/restore
