@@ -244,6 +244,66 @@ async fn per_device_provisioning_override_mixes_static_and_radriven() -> Result<
 
 #[tokio::test(flavor = "current_thread")]
 #[traced_test]
+async fn static_mode_does_not_run_ra_rs_tasks() -> Result<()> {
+    check_caps()?;
+
+    let run_name = format!(
+        "ipv6-ll-static-no-ra-rs-{}",
+        SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos()
+    );
+    let outdir = Path::new("/tmp").join(run_name);
+    fs::create_dir_all(&outdir)?;
+
+    let lab = Lab::with_opts(
+        LabOpts::default()
+            .outdir(&outdir)
+            .label("ipv6-ll-static-no-ra-rs")
+            .ipv6_provisioning_mode(Ipv6ProvisioningMode::Static)
+            .ipv6_dad_mode(Ipv6DadMode::Disabled),
+    )
+    .await?;
+
+    let r = lab
+        .add_router("r")
+        .ip_support(IpSupport::DualStack)
+        .ra_enabled(true)
+        .ra_interval_secs(1)
+        .build()
+        .await?;
+    let _dev = lab.add_device("d").uplink(r.id()).build().await?;
+
+    let run_dir = lab.run_dir().context("missing run dir")?.to_path_buf();
+    let dev_events = run_dir.join("events.device.d.jsonl");
+    let router_events = run_dir.join("events.router.r.jsonl");
+    tokio::time::sleep(Duration::from_millis(1600)).await;
+
+    let has_ra = wait_for_file_contains(
+        &router_events,
+        "\"kind\":\"RouterAdvertisement\"",
+        Duration::from_millis(100),
+    )
+    .await?;
+    let has_rs = wait_for_file_contains(
+        &dev_events,
+        "\"kind\":\"RouterSolicitation\"",
+        Duration::from_millis(100),
+    )
+    .await?;
+
+    assert!(
+        !has_ra,
+        "static mode should not emit RouterAdvertisement events"
+    );
+    assert!(
+        !has_rs,
+        "static mode should not emit RouterSolicitation events"
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[traced_test]
 async fn ra_disable_reconciles_only_radriven_devices() -> Result<()> {
     check_caps()?;
 

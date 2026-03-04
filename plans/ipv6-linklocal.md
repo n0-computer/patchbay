@@ -409,6 +409,7 @@ Implemented in `patchbay/src/tests/ipv6_ll.rs` so far:
 - `host_learns_default_router_from_ra_link_local`
 - `router_lifetime_zero_withdraws_default_router`
 - `static_override_runtime_default_route_switch_uses_global_v6`
+- `static_mode_does_not_run_ra_rs_tasks`
 
 Implemented control-plane scaffolding so far:
 
