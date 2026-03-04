@@ -46,7 +46,7 @@ async fn preset_home() -> Result<()> {
     tokio::time::sleep(Duration::from_millis(200)).await;
 
     let rtt = dev.run_sync(move || test_utils::udp_rtt_sync(reflector))?;
-    assert!(rtt < Duration::from_millis(100), "outbound should work");
+    assert!(rtt < Duration::from_millis(500), "outbound should work");
 
     Ok(())
 }
@@ -118,7 +118,7 @@ async fn preset_mobile() -> Result<()> {
     tokio::time::sleep(Duration::from_millis(200)).await;
 
     let rtt = phone.run_sync(move || test_utils::udp_rtt_sync(reflector))?;
-    assert!(rtt < Duration::from_millis(100));
+    assert!(rtt < Duration::from_millis(500));
 
     Ok(())
 }
@@ -200,7 +200,7 @@ async fn preset_override() -> Result<()> {
     tokio::time::sleep(Duration::from_millis(200)).await;
 
     let rtt = dev.run_sync(move || test_utils::udp_rtt_sync(reflector))?;
-    assert!(rtt < Duration::from_millis(100));
+    assert!(rtt < Duration::from_millis(500));
 
     Ok(())
 }

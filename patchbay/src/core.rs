@@ -479,7 +479,9 @@ impl LabInner {
         let cancel = self.cancel.clone();
         let rt = self.rt_handle_for(ns)?;
         rt.spawn(async move {
-            let _ = crate::test_utils::run_reflector(bind, cancel).await;
+            if let Err(e) = crate::test_utils::run_reflector(bind, cancel).await {
+                tracing::error!(bind = %bind, error = %e, "reflector failed");
+            }
         });
         Ok(())
     }

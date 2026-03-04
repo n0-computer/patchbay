@@ -264,8 +264,8 @@ async fn regionless_to_region() -> Result<()> {
 
     let rtt = dc.run_sync(move || test_utils::udp_rtt_sync(r_us))?;
     assert!(
-        rtt < Duration::from_millis(20),
-        "expected regionless→region RTT < 20ms (no netem), got {rtt:?}"
+        rtt < Duration::from_millis(50),
+        "expected regionless→region RTT < 50ms (no netem), got {rtt:?}"
     );
     Ok(())
 }

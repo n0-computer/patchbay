@@ -23,6 +23,8 @@ jobs:
       - uses: taiki-e/install-action@nextest
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
 
       - uses: actions/setup-node@v4
         with:

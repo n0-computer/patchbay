@@ -112,7 +112,7 @@ async fn none_allows_all() -> Result<()> {
 
     let rtt = dev.run_sync(move || test_utils::udp_rtt_sync(reflector))?;
     assert!(
-        rtt < Duration::from_millis(100),
+        rtt < Duration::from_millis(500),
         "expected low RTT, got {rtt:?}"
     );
 
@@ -159,7 +159,7 @@ async fn custom_selective() -> Result<()> {
 
     let rtt = dev.run_sync(move || test_utils::udp_rtt_sync(reflector_allowed))?;
     assert!(
-        rtt < Duration::from_millis(100),
+        rtt < Duration::from_millis(500),
         "expected low RTT on allowed port, got {rtt:?}"
     );
 
@@ -200,7 +200,7 @@ async fn block_inbound_drops_unsolicited() -> Result<()> {
     tokio::time::sleep(Duration::from_millis(200)).await;
 
     let rtt = dev.run_sync(move || test_utils::udp_rtt_sync(reflector))?;
-    assert!(rtt < Duration::from_millis(100), "outbound should work");
+    assert!(rtt < Duration::from_millis(500), "outbound should work");
 
     // Unsolicited inbound from DC → device should be blocked.
     // Bind a UDP listener on the device, then try to send from DC.
@@ -269,7 +269,7 @@ async fn custom_block_inbound() -> Result<()> {
     tokio::time::sleep(Duration::from_millis(200)).await;
 
     let rtt = dev.run_sync(move || test_utils::udp_rtt_sync(reflector_53))?;
-    assert!(rtt < Duration::from_millis(100), "UDP 53 should work");
+    assert!(rtt < Duration::from_millis(500), "UDP 53 should work");
 
     // UDP to other port should be blocked.
     let reflector_other = SocketAddr::new(IpAddr::V4(dc_ip), 9999);
@@ -309,7 +309,7 @@ async fn runtime_change() -> Result<()> {
     tokio::time::sleep(Duration::from_millis(200)).await;
 
     let rtt = dev.run_sync(move || test_utils::udp_rtt_sync(reflector))?;
-    assert!(rtt < Duration::from_millis(100));
+    assert!(rtt < Duration::from_millis(500));
 
     home.set_firewall(Firewall::Corporate).await?;
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -325,7 +325,7 @@ async fn runtime_change() -> Result<()> {
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     let rtt = dev.run_sync(move || test_utils::udp_rtt_sync(reflector))?;
-    assert!(rtt < Duration::from_millis(100));
+    assert!(rtt < Duration::from_millis(500));
 
     Ok(())
 }

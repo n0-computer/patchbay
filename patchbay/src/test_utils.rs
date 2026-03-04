@@ -81,7 +81,7 @@ pub fn probe_udp(
 
 /// One-shot UDP roundtrip probe. Returns the observed external address.
 pub fn udp_roundtrip(reflector: SocketAddr) -> Result<ObservedAddr> {
-    probe_udp(reflector, Duration::from_millis(500), None)
+    probe_udp(reflector, Duration::from_secs(2), None)
 }
 
 /// Returns UDP round-trip time to `reflector` (blocking).

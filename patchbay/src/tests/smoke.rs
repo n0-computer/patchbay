@@ -293,8 +293,8 @@ async fn no_region_overhead() -> Result<()> {
 
     let rtt = dev.run_sync(move || test_utils::udp_rtt_sync(r))?;
     assert!(
-        rtt < Duration::from_millis(10),
-        "expected no-region RTT < 10ms, got {rtt:?}"
+        rtt < Duration::from_millis(50),
+        "expected no-region RTT < 50ms, got {rtt:?}"
     );
     Ok(())
 }

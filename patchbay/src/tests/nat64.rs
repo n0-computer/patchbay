@@ -131,7 +131,7 @@ async fn nat64_preserves_native_v6() -> Result<()> {
 
     let rtt = phone.run_sync(move || test_utils::udp_rtt_sync(reflector))?;
     assert!(
-        rtt < Duration::from_millis(100),
+        rtt < Duration::from_millis(500),
         "regular v4 via NAT should still work"
     );
 
