@@ -62,8 +62,6 @@ pub struct SimMeta {
     pub name: String,
     /// If set, the topology is loaded from `../topos/<topology>.toml` relative to the sim file.
     pub topology: Option<String>,
-    /// Optional shared binary manifest file (legacy).
-    pub binaries: Option<String>,
 }
 
 /// `[[extends]]` entry.
@@ -170,6 +168,8 @@ pub struct StepResults {
     pub up_bytes: Option<String>,
     /// Capture key for bytes downloaded.
     pub down_bytes: Option<String>,
+    /// Capture key for latency in milliseconds.
+    pub latency_ms: Option<String>,
 }
 
 /// One step in the sim sequence (after template/group expansion).
@@ -224,13 +224,7 @@ pub enum Step {
         #[serde(alias = "impair")]
         condition: Option<toml::Value>,
     },
-    /// Generic route switch (replaces `SwitchRoute`).
     SetDefaultRoute {
-        device: String,
-        to: String,
-    },
-    /// Legacy alias kept during porting.
-    SwitchRoute {
         device: String,
         to: String,
     },
@@ -268,9 +262,6 @@ pub enum Parser {
     Text,
     Ndjson,
     Json,
-    /// Legacy iperf3 parser (now handled by `Json` + capture picks).
-    #[serde(alias = "iperf3-json")]
-    Iperf3Json,
 }
 
 /// Spec for a named capture from a process pipe.
@@ -281,20 +272,11 @@ pub struct CaptureSpec {
     pub pipe: String,
     /// Regex pattern; capture group 1 (or full match) becomes the value. All parsers.
     pub regex: Option<String>,
-    /// Legacy field name — treated as `regex`.
-    pub stdout_regex: Option<String>,
     /// Key=value guards on parsed JSON. `ndjson`/`json` only.
     #[serde(rename = "match", default)]
     pub match_fields: HashMap<String, String>,
     /// Dot-path into parsed JSON. `ndjson`/`json` only.
     pub pick: Option<String>,
-}
-
-impl CaptureSpec {
-    /// Return the effective regex pattern (prefers `regex` over `stdout_regex`).
-    pub fn effective_regex(&self) -> Option<&str> {
-        self.regex.as_deref().or(self.stdout_regex.as_deref())
-    }
 }
 
 fn pipe_default() -> String {

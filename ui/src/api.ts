@@ -1,5 +1,5 @@
 import type { LabEvent, LabState } from './devtools-types'
-import type { SimResults } from './types'
+import type { CombinedResults, SimResults } from './types'
 
 const API = '/api'
 
@@ -8,6 +8,7 @@ export interface RunInfo {
   name: string
   label: string | null
   status: string | null
+  invocation: string | null
 }
 
 /** A log file within a run directory. */
@@ -86,4 +87,18 @@ export async function fetchResults(run: string): Promise<SimResults | null> {
 /** Base URL for fetching files within a run directory. */
 export function runFilesBase(run: string): string {
   return `${API}/runs/${encodeURIComponent(run)}/files/`
+}
+
+export async function fetchCombinedResults(
+  invocation: string,
+): Promise<CombinedResults | null> {
+  try {
+    const res = await fetch(
+      `${API}/invocations/${encodeURIComponent(invocation)}/combined-results`,
+    )
+    if (!res.ok) return null
+    return (await res.json()) as CombinedResults
+  } catch {
+    return null
+  }
 }

@@ -92,7 +92,6 @@ gateway = "r1"
             sim: SimMeta {
                 name: "x".into(),
                 topology: Some("a".into()),
-                binaries: None,
             },
             ..Default::default()
         };
@@ -108,7 +107,6 @@ gateway = "r1"
             sim: SimMeta {
                 name: "x".into(),
                 topology: Some("a".into()),
-                binaries: None,
             },
             topology: patchbay::config::LabConfig {
                 router: vec![patchbay::config::RouterConfig {

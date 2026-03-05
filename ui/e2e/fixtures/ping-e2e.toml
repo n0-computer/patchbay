@@ -6,6 +6,7 @@ name = "dc"
 
 [device.sender.eth0]
 gateway = "dc"
+impair = { latency_ms = 100 }
 
 [device.receiver.eth0]
 gateway = "dc"
@@ -15,3 +16,11 @@ action = "run"
 id     = "ping-check"
 device = "sender"
 cmd    = ["ping", "-c", "3", "$NETSIM_IP_receiver"]
+parser = "text"
+
+[step.captures.avg_rtt]
+pipe  = "stdout"
+regex = "rtt min/avg/max/mdev = [\\d.]+/([\\d.]+)/"
+
+[step.results]
+latency_ms = "ping-check.avg_rtt"

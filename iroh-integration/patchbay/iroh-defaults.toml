@@ -22,12 +22,12 @@ bin      = "iroh-relay"
 name = "relay-setup"
 
 [[step-group.step]]
-kind   = "gen-certs"
+action = "gen-certs"
 id     = "${group.device}-cert"
 device = "${group.device}"
 
 [[step-group.step]]
-kind    = "gen-file"
+action  = "gen-file"
 id      = "${group.device}-cfg"
 content = """
 enable_relay               = true
@@ -41,7 +41,7 @@ manual_key_path  = "${${group.device}-cert.key_pem_path}"
 """
 
 [[step-group.step]]
-kind        = "spawn"
+action      = "spawn"
 id          = "${group.device}"
 device      = "${group.device}"
 cmd         = ["${binary.relay}", "--config-path", "${${group.device}-cfg.path}"]
@@ -55,7 +55,7 @@ regex = "relay: serving on"
 
 [[step-template]]
 name   = "transfer-provider"
-kind   = "spawn"
+action = "spawn"
 parser = "ndjson"
 cmd    = ["${binary.transfer}", "--output", "json", "provide", "--env", "dev"]
 env    = { RUST_LOG = "iroh=info,iroh::_events=debug" }
@@ -68,7 +68,7 @@ pick  = ".direct_addresses.0"
 
 [[step-template]]
 name   = "transfer-fetcher"
-kind   = "spawn"
+action = "spawn"
 parser = "ndjson"
 cmd    = ["${binary.transfer}", "--output", "json", "fetch", "--env", "dev"]
 env    = { RUST_LOG = "iroh=info,iroh::_events=debug" }

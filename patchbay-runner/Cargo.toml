@@ -18,9 +18,7 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 clap = { version = "4", features = ["derive"] }
 comfy-table = "7"
 ctor = "0.2"
-ctrlc = "3"
 flate2 = "1"
-glob = "0.3"
 patchbay = { path = "../patchbay" }
 patchbay-server = { path = "../patchbay-server" }
 patchbay-utils = { path = "../patchbay-utils" }
@@ -29,7 +27,6 @@ rcgen = "0.13"
 regex = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-sha2 = "0.10"
 tar = "0.4"
 tokio = { version = "1", features = ["rt", "macros", "sync", "time", "fs", "process"] }
 toml = "0.8"

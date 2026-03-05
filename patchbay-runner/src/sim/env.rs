@@ -22,11 +22,6 @@ impl SimEnv {
         }
     }
 
-    /// Retrieve a captured value by `"step_id.name"` key.
-    pub fn get_capture(&self, key: &str) -> Option<&str> {
-        self.captures.get(key).map(String::as_str)
-    }
-
     /// Return an iterator over `NETSIM_*` environment variables.
     pub fn process_env(&self) -> impl Iterator<Item = (&str, &str)> {
         self.lab_vars.iter().map(|(k, v)| (k.as_str(), v.as_str()))

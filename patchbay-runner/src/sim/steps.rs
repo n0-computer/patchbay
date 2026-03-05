@@ -25,7 +25,7 @@ pub(crate) fn step_action(step: &Step) -> &'static str {
         Step::Wait { .. } => "wait",
         Step::WaitFor { .. } => "wait-for",
         Step::SetLinkCondition { .. } => "set-link-condition",
-        Step::SetDefaultRoute { .. } | Step::SwitchRoute { .. } => "switch-route",
+        Step::SetDefaultRoute { .. } => "set-default-route",
         Step::LinkDown { .. } => "link-down",
         Step::LinkUp { .. } => "link-up",
         Step::Assert { .. } => "assert",
@@ -50,7 +50,7 @@ pub(crate) fn step_device(step: &Step) -> Option<&str> {
         Step::Run { device, .. } => Some(device),
         Step::Spawn { device, .. } => device.as_deref(),
         Step::SetLinkCondition { device, .. } => Some(device),
-        Step::SetDefaultRoute { device, .. } | Step::SwitchRoute { device, .. } => Some(device),
+        Step::SetDefaultRoute { device, .. } => Some(device),
         Step::LinkDown { device, .. } => Some(device),
         Step::LinkUp { device, .. } => Some(device),
         Step::GenCerts { device, .. } => device.as_deref(),
@@ -381,8 +381,8 @@ pub(crate) async fn execute_step(state: &mut SimState, step: &Step) -> Result<()
             dev.set_link_condition(&ifname, condition).await?;
         }
 
-        // ── switch-route / set-default-route ──────────────────────────────
-        Step::SwitchRoute { device, to } | Step::SetDefaultRoute { device, to } => {
+        // ── set-default-route ──────────────────────────────────────────────
+        Step::SetDefaultRoute { device, to } => {
             state
                 .lab
                 .device_by_name(device)
@@ -593,7 +593,7 @@ fn spawn_capture_reader(
 ) -> thread::JoinHandle<Result<()>> {
     thread::spawn(move || {
         match parser {
-            Parser::Json | Parser::Iperf3Json => {
+            Parser::Json => {
                 // Post-exit: collect all lines, parse as one JSON object.
                 let full: String = rx.into_iter().collect::<Vec<_>>().join("\n");
                 let v: serde_json::Value = match serde_json::from_str(&full) {
@@ -626,7 +626,7 @@ fn spawn_capture_reader(
 
 fn apply_line_match(line: &str, spec: &CaptureSpec, parser: &Parser) -> Option<String> {
     // Try regex first.
-    if let Some(re_str) = spec.effective_regex() {
+    if let Some(re_str) = spec.regex.as_deref() {
         let re = regex::Regex::new(re_str).ok()?;
         if let Some(caps) = re.captures(line) {
             let val = caps
@@ -692,8 +692,9 @@ fn collect_step_results(
     let duration = resolve(&results.duration);
     let up_bytes = resolve(&results.up_bytes);
     let down_bytes = resolve(&results.down_bytes);
+    let latency_ms = resolve(&results.latency_ms);
 
-    if duration.is_none() && up_bytes.is_none() && down_bytes.is_none() {
+    if duration.is_none() && up_bytes.is_none() && down_bytes.is_none() && latency_ms.is_none() {
         return None;
     }
     Some(StepResultRecord {
@@ -701,6 +702,7 @@ fn collect_step_results(
         duration,
         up_bytes,
         down_bytes,
+        latency_ms,
     })
 }
 
@@ -806,6 +808,8 @@ fn evaluate_assert(state: &SimState, check: &str) -> Result<()> {
         (check[..idx].trim(), "contains", check[idx + 10..].trim())
     } else if let Some(idx) = check.find(" matches ") {
         (check[..idx].trim(), "matches", check[idx + 9..].trim())
+    } else if let Some(idx) = check.find(" >= ") {
+        (check[..idx].trim(), ">=", check[idx + 4..].trim())
     } else {
         bail!("assert: unrecognised check expression: {:?}", check);
     };
@@ -818,6 +822,15 @@ fn evaluate_assert(state: &SimState, check: &str) -> Result<()> {
         "matches" => regex::Regex::new(rhs)
             .with_context(|| format!("assert: compile regex {:?}", rhs))?
             .is_match(&lhs_val),
+        ">=" => {
+            let l: f64 = lhs_val
+                .parse()
+                .with_context(|| format!("assert: parse lhs '{lhs_val}' as number"))?;
+            let r: f64 = rhs
+                .parse()
+                .with_context(|| format!("assert: parse rhs '{rhs}' as number"))?;
+            l >= r
+        }
         _ => unreachable!(),
     };
     if pass {
@@ -835,13 +848,8 @@ fn evaluate_assert(state: &SimState, check: &str) -> Result<()> {
 }
 
 fn resolve_assert_lhs(state: &SimState, lhs: &str) -> Result<String> {
-    // Try CaptureStore first.
     if let Some(v) = state.captures.get(lhs) {
         return Ok(v);
-    }
-    // Try legacy env captures.
-    if let Some(v) = state.env.get_capture(lhs) {
-        return Ok(v.to_string());
     }
     bail!(
         "assert: cannot resolve '{}' — not a capture or known result field",

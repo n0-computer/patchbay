@@ -3,6 +3,7 @@ export interface StepResult {
   duration?: string
   down_bytes?: string
   up_bytes?: string
+  latency_ms?: string
 }
 
 export interface SimResults {

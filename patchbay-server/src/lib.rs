@@ -60,11 +60,14 @@ pub struct RunInfo {
     /// Directory name (e.g. `"20260303_143001-my-lab"`).
     pub name: String,
     /// Full path to the run directory.
+    #[serde(skip)]
     pub path: PathBuf,
     /// Human-readable label from `state.json`, if available.
     pub label: Option<String>,
     /// Lab status from `state.json` (e.g. `"running"`, `"stopping"`).
     pub status: Option<String>,
+    /// Invocation group (first path component for nested runs, `None` for flat/direct).
+    pub invocation: Option<String>,
 }
 
 /// Maximum directory depth to scan for run directories.
@@ -88,6 +91,7 @@ pub fn discover_runs(base: &Path) -> anyhow::Result<Vec<RunInfo>> {
             path: base.to_path_buf(),
             label,
             status,
+            invocation: None,
         }]);
     }
 
@@ -129,11 +133,19 @@ fn scan_runs_recursive(
                 .to_string_lossy()
                 .into_owned();
             let (label, status) = read_run_metadata(&path);
+            // Derive invocation from the first path component (the timestamped
+            // directory) when the run is nested more than one level deep.
+            let invocation = name
+                .split('/')
+                .next()
+                .filter(|first| *first != name)
+                .map(str::to_string);
             runs.push(RunInfo {
                 name,
                 path,
                 label,
                 status,
+                invocation,
             });
         } else {
             scan_runs_recursive(root, &path, depth + 1, runs)?;
@@ -191,6 +203,10 @@ fn build_router(state: AppState) -> Router {
         .route("/api/runs/{run}/logs", get(get_run_logs))
         .route("/api/runs/{run}/logs/{*path}", get(get_run_log_file))
         .route("/api/runs/{run}/files/{*path}", get(get_run_file))
+        .route(
+            "/api/invocations/{name}/combined-results",
+            get(get_invocation_combined),
+        )
         .with_state(state)
 }
 
@@ -458,6 +474,47 @@ async fn get_run_file(
         return (StatusCode::FORBIDDEN, String::new());
     };
     serve_file(&file_path).await
+}
+
+/// Serve `combined-results.json` from an invocation directory.
+async fn get_invocation_combined(
+    AxPath(name): AxPath<String>,
+    State(state): State<AppState>,
+) -> impl IntoResponse {
+    if name.contains("..") || name.starts_with('/') {
+        return (
+            StatusCode::FORBIDDEN,
+            [("content-type", "application/json")],
+            r#"{"error":"forbidden"}"#.to_string(),
+        );
+    }
+    let inv_dir = state.base.join(&name);
+    let file = inv_dir.join("combined-results.json");
+    // Verify the resolved path stays under base.
+    let ok = file
+        .canonicalize()
+        .ok()
+        .and_then(|c| state.base.canonicalize().ok().map(|b| c.starts_with(&b)))
+        .unwrap_or(false);
+    if !ok {
+        return (
+            StatusCode::NOT_FOUND,
+            [("content-type", "application/json")],
+            r#"{"runs":[]}"#.to_string(),
+        );
+    }
+    match tokio::fs::read_to_string(&file).await {
+        Ok(contents) => (
+            StatusCode::OK,
+            [("content-type", "application/json")],
+            contents,
+        ),
+        Err(_) => (
+            StatusCode::NOT_FOUND,
+            [("content-type", "application/json")],
+            r#"{"runs":[]}"#.to_string(),
+        ),
+    }
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────

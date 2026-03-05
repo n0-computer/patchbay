@@ -10,7 +10,7 @@ import type {
   DeviceState,
   IfaceState,
 } from './devtools-types'
-import type { SimResults } from './types'
+import type { CombinedResults, SimResults } from './types'
 import {
   fetchRuns,
   fetchState,
@@ -18,6 +18,7 @@ import {
   subscribeRuns,
   fetchLogs,
   fetchResults,
+  fetchCombinedResults,
   runFilesBase,
 } from './api'
 import type { RunInfo, LogEntry } from './api'
@@ -28,6 +29,68 @@ import TopologyGraph from './components/TopologyGraph'
 import NodeDetail from './components/NodeDetail'
 
 type Tab = 'topology' | 'logs' | 'timeline' | 'perf'
+
+// ── Selection model ────────────────────────────────────────────────
+// The user can select either an individual sim run (by name) or an
+// invocation group (to see combined results).  We encode this as a
+// tagged union so the rest of the component can branch cleanly.
+
+type Selection =
+  | { kind: 'run'; name: string }
+  | { kind: 'invocation'; name: string }
+
+function selectionKey(s: Selection | null): string {
+  if (!s) return ''
+  return s.kind === 'invocation' ? `inv:${s.name}` : s.name
+}
+
+function parseSelectionKey(key: string, runs: RunInfo[]): Selection | null {
+  if (!key) return null
+  if (key.startsWith('inv:')) {
+    return { kind: 'invocation', name: key.slice(4) }
+  }
+  if (runs.some((r) => r.name === key)) {
+    return { kind: 'run', name: key }
+  }
+  return null
+}
+
+// ── Invocation grouping ────────────────────────────────────────────
+
+interface InvocationGroup {
+  invocation: string
+  runs: RunInfo[]
+}
+
+function groupByInvocation(runs: RunInfo[]): { groups: InvocationGroup[]; ungrouped: RunInfo[] } {
+  const grouped = new Map<string, RunInfo[]>()
+  const ungrouped: RunInfo[] = []
+  for (const r of runs) {
+    if (r.invocation) {
+      let list = grouped.get(r.invocation)
+      if (!list) {
+        list = []
+        grouped.set(r.invocation, list)
+      }
+      list.push(r)
+    } else {
+      ungrouped.push(r)
+    }
+  }
+  const groups: InvocationGroup[] = []
+  for (const [invocation, groupRuns] of grouped) {
+    groups.push({ invocation, runs: groupRuns })
+  }
+  return { groups, ungrouped }
+}
+
+/** Short display label for a run within an invocation group. */
+function simLabel(run: RunInfo): string {
+  if (run.invocation && run.name.startsWith(run.invocation + '/')) {
+    return run.label ?? run.name.slice(run.invocation.length + 1)
+  }
+  return run.label ?? run.name
+}
 
 // ── State reducer (from DevtoolsApp) ──────────────────────────────
 
@@ -116,7 +179,7 @@ function applyEvent(state: LabState, event: LabEvent): LabState {
 export default function App() {
   // Run selection
   const [runs, setRuns] = useState<RunInfo[]>([])
-  const [selectedRun, setSelectedRun] = useState<string | null>(null)
+  const [selection, setSelection] = useState<Selection | null>(null)
   const [tab, setTab] = useState<Tab>('topology')
 
   // Lab state (from SSE)
@@ -130,6 +193,7 @@ export default function App() {
 
   // Perf results
   const [simResults, setSimResults] = useState<SimResults | null>(null)
+  const [combinedResults, setCombinedResults] = useState<CombinedResults | null>(null)
 
   // Topology selection
   const [selectedNode, setSelectedNode] = useState<string | null>(null)
@@ -138,15 +202,23 @@ export default function App() {
   // Cross-tab log jump
   const [logJump, setLogJump] = useState<{ node: string; path: string; timeLabel: string; nonce: number } | null>(null)
 
+  // Derived selection helpers
+  const selectedRun = selection?.kind === 'run' ? selection.name : null
+  const selectedInvocation = selection?.kind === 'invocation' ? selection.name : null
+
   // ── Fetch and subscribe to runs ──
 
   const refreshRuns = useCallback(async () => {
     const r = await fetchRuns()
     setRuns(r)
-    setSelectedRun((prev) => {
+    setSelection((prev) => {
       if (r.length === 0) return null
-      if (prev && r.some((ri) => ri.name === prev)) return prev
-      return r[0].name
+      if (prev) {
+        // Keep current selection if still valid
+        if (prev.kind === 'run' && r.some((ri) => ri.name === prev.name)) return prev
+        if (prev.kind === 'invocation' && r.some((ri) => ri.invocation === prev.name)) return prev
+      }
+      return { kind: 'run', name: r[0].name }
     })
   }, [])
 
@@ -160,7 +232,7 @@ export default function App() {
     }
   }, [refreshRuns])
 
-  // ── Load run data when selection changes ──
+  // ── Load run data when an individual sim is selected ──
 
   useEffect(() => {
     if (!selectedRun) {
@@ -185,6 +257,23 @@ export default function App() {
 
     return () => { dead = true }
   }, [selectedRun])
+
+  // ── Load combined results when an invocation is selected ──
+
+  useEffect(() => {
+    if (!selectedInvocation) {
+      setCombinedResults(null)
+      return
+    }
+
+    let dead = false
+    fetchCombinedResults(selectedInvocation).then((results) => {
+      if (dead) return
+      setCombinedResults(results)
+    })
+
+    return () => { dead = true }
+  }, [selectedInvocation])
 
   // ── SSE event subscription (from opid 0 to get historical + live) ──
 
@@ -228,13 +317,28 @@ export default function App() {
 
   // ── Derived ──
 
-  const runInfo = runs.find((r) => r.name === selectedRun)
   const base = selectedRun ? runFilesBase(selectedRun) : ''
-  const availableTabs: Tab[] = ['topology', 'logs', 'timeline']
-  if (simResults) availableTabs.push('perf')
+  const isSimView = selection?.kind === 'run'
+  const isInvocationView = selection?.kind === 'invocation'
+
+  const availableTabs: Tab[] = isSimView
+    ? ['topology', 'logs', 'timeline', ...(simResults ? (['perf'] as Tab[]) : [])]
+    : isInvocationView
+      ? ['perf']
+      : []
+
+  // When available tabs change, ensure current tab is still valid.
+  useEffect(() => {
+    if (availableTabs.length > 0 && !availableTabs.includes(tab)) {
+      setTab(availableTabs[0])
+    }
+  }, [availableTabs, tab])
 
   // Map LogEntry to SimLogEntry shape for LogsTab/TimelineTab compatibility
   const logsForTabs = logList.map((l) => ({ node: l.node, kind: l.kind, path: l.path }))
+
+  // Group runs for the selector
+  const { groups, ungrouped } = groupByInvocation(runs)
 
   // ── Render ──
 
@@ -243,23 +347,40 @@ export default function App() {
       <div className="topbar">
         <h1>patchbay</h1>
         <select
-          value={selectedRun ?? ''}
+          value={selectionKey(selection)}
           onChange={(e) => {
-            setSelectedRun(e.target.value || null)
-            setLabState(null)
-            setLabEvents([])
+            const next = parseSelectionKey(e.target.value, runs)
+            setSelection(next)
+            if (next?.kind !== 'invocation') {
+              setLabState(null)
+              setLabEvents([])
+            }
           }}
         >
           <option value="">select run</option>
-          {runs.map((r) => (
+          {groups.map((g) => (
+            <optgroup key={g.invocation} label={g.invocation}>
+              {g.runs.length > 1 && (
+                <option value={`inv:${g.invocation}`}>
+                  combined ({g.runs.length} sims)
+                </option>
+              )}
+              {g.runs.map((r) => (
+                <option key={r.name} value={r.name}>
+                  {simLabel(r)}
+                </option>
+              ))}
+            </optgroup>
+          ))}
+          {ungrouped.map((r) => (
             <option key={r.name} value={r.name}>
               {r.label ?? r.name}
             </option>
           ))}
         </select>
-        {runInfo && (
+        {isSimView && runs.find((r) => r.name === selectedRun) && (
           <span style={{ color: 'var(--text-muted)', fontSize: 12 }}>
-            {runInfo.status ?? ''}
+            {runs.find((r) => r.name === selectedRun)?.status ?? ''}
           </span>
         )}
         {labState && (
@@ -302,7 +423,7 @@ export default function App() {
             )}
           </div>
         )}
-        {tab === 'topology' && !labState && (
+        {tab === 'topology' && !labState && isSimView && (
           <div className="empty">Loading lab state...</div>
         )}
 
@@ -314,7 +435,8 @@ export default function App() {
           <TimelineTab base={base} logs={logsForTabs} labEvents={labEvents} onJumpToLog={handleJumpToLog} />
         )}
 
-        {tab === 'perf' && <PerfTab results={simResults} />}
+        {tab === 'perf' && isSimView && <PerfTab results={simResults} />}
+        {tab === 'perf' && isInvocationView && <PerfTab results={null} combined={combinedResults} />}
       </div>
     </div>
   )

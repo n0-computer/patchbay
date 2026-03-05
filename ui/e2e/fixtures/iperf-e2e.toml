@@ -1,0 +1,43 @@
+[sim]
+name = "iperf-e2e"
+
+[[router]]
+name = "dc"
+
+[device.server.eth0]
+gateway = "dc"
+
+[device.client.eth0]
+gateway = "dc"
+
+# Start iperf3 server.
+[[step]]
+action = "spawn"
+id     = "iperf-server"
+device = "server"
+cmd    = ["iperf3", "-s", "-1"]
+ready_after = "500ms"
+
+# Run iperf3 client with JSON output.
+[[step]]
+action = "run"
+id     = "iperf-client"
+device = "client"
+cmd    = ["iperf3", "-c", "$NETSIM_IP_server", "-t", "2", "-J"]
+parser = "json"
+
+[step.captures.duration]
+pick = "end.sum_sent.seconds"
+
+[step.captures.down_bytes]
+pick = "end.sum_received.bytes"
+
+[step.results]
+duration   = "iperf-client.duration"
+down_bytes = "iperf-client.down_bytes"
+
+# Wait for server to finish.
+[[step]]
+action  = "wait-for"
+id      = "iperf-server"
+timeout = "30s"

@@ -498,15 +498,7 @@ async fn assemble_binaries_for_run(
             .with_context(|| format!("parse sim {}", sim_path.display()))?;
         let (_, _, extends_binaries, _) = load_extends(&sim, sim_path)
             .with_context(|| format!("resolve extends for {}", sim_path.display()))?;
-        let shared_binaries = load_shared_binaries(&sim, sim_path)
-            .with_context(|| format!("resolve shared binaries for {}", sim_path.display()))?;
-        let local_specs = merge_binary_specs(
-            extends_binaries
-                .into_iter()
-                .chain(shared_binaries)
-                .collect::<Vec<_>>(),
-            sim.binaries.clone(),
-        );
+        let local_specs = merge_binary_specs(extends_binaries, sim.binaries.clone());
 
         for (name, spec) in local_specs {
             if overrides.contains_key(&name) {
@@ -722,6 +714,7 @@ async fn execute_single_sim(
 
     // ── Load topology ────────────────────────────────────────────────────
     let topo = load_topology(&sim, sim_path).with_context(|| "step=load-topology".to_string())?;
+    let counts = device_counts(&topo);
     let setup = setup_topology_summary(&setup_base, Some(&topo));
 
     // ── Build lab ────────────────────────────────────────────────────────
@@ -755,6 +748,7 @@ async fn execute_single_sim(
     // ── Expand step templates and groups ─────────────────────────────────
     let steps = expand_steps(sim.raw_steps, &templates, &groups, sim_path)
         .with_context(|| "step=expand-steps".to_string())?;
+    let steps = expand_counted_steps(steps, &counts);
 
     // ── Execute steps ────────────────────────────────────────────────────
     for (idx, step) in steps.iter().enumerate() {
@@ -1038,44 +1032,6 @@ fn last_error_line_in_file(path: &Path) -> Option<String> {
         }
     }
     last
-}
-
-fn load_shared_binaries(sim: &SimFile, sim_path: &Path) -> Result<Vec<BinarySpec>> {
-    #[derive(serde::Deserialize, Default)]
-    struct BinaryFile {
-        #[serde(default, rename = "binary")]
-        binaries: Vec<BinarySpec>,
-    }
-
-    let Some(ref_name) = sim.sim.binaries.as_deref() else {
-        return Ok(vec![]);
-    };
-    let sim_dir = sim_path.parent().unwrap_or(Path::new("."));
-    let candidates = [
-        sim_dir.join(ref_name),
-        sim_dir.join("..").join(ref_name),
-        std::env::current_dir()
-            .unwrap_or_else(|_| PathBuf::from("."))
-            .join(ref_name),
-    ];
-
-    let chosen = candidates
-        .iter()
-        .find(|p| p.exists())
-        .cloned()
-        .ok_or_else(|| {
-            anyhow!(
-                "shared binaries file '{}' not found (checked: {}, {}, {})",
-                ref_name,
-                candidates[0].display(),
-                candidates[1].display(),
-                candidates[2].display()
-            )
-        })?;
-    let text = std::fs::read_to_string(&chosen)
-        .with_context(|| format!("read shared binaries file {}", chosen.display()))?;
-    let parsed: BinaryFile = toml::from_str(&text).context("parse shared binaries file")?;
-    Ok(parsed.binaries)
 }
 
 fn merge_binary_specs(
@@ -1368,6 +1324,88 @@ fn normalize_step_table(table: &mut toml::value::Table) {
     }
 }
 
+/// Extract device counts from the topology config.
+fn device_counts(topo: &LabConfig) -> HashMap<String, usize> {
+    let mut counts = HashMap::new();
+    for (name, val) in &topo.device {
+        let count = val
+            .as_table()
+            .and_then(|t| t.get("count"))
+            .and_then(|v| v.as_integer())
+            .unwrap_or(1) as usize;
+        if count > 1 {
+            counts.insert(name.clone(), count);
+        }
+    }
+    counts
+}
+
+/// Expand steps whose device matches a counted device name.
+///
+/// For a device `"peer"` with `count = 3`, a step targeting `"peer"` is expanded
+/// to three steps targeting `"peer-0"`, `"peer-1"`, `"peer-2"`, with id suffixed similarly.
+fn expand_counted_steps(steps: Vec<Step>, counts: &HashMap<String, usize>) -> Vec<Step> {
+    if counts.is_empty() {
+        return steps;
+    }
+    let mut out = Vec::with_capacity(steps.len());
+    for step in steps {
+        let dev = step_device(&step).map(|s| s.to_string());
+        if let Some(ref dev_name) = dev {
+            if let Some(&n) = counts.get(dev_name) {
+                for idx in 0..n {
+                    let mut cloned = step.clone();
+                    let suffix = format!("-{idx}");
+                    set_step_device(&mut cloned, format!("{dev_name}{suffix}"));
+                    if let Some(id) = step_id(&cloned).map(|s| s.to_string()) {
+                        set_step_id(&mut cloned, format!("{id}{suffix}"));
+                    }
+                    out.push(cloned);
+                }
+                continue;
+            }
+        }
+        // WaitFor: expand if the id matches a counted device (convention: id == device name).
+        if let Step::WaitFor { ref id, .. } = step {
+            if let Some(&n) = counts.get(id.as_str()) {
+                for idx in 0..n {
+                    let mut cloned = step.clone();
+                    set_step_id(&mut cloned, format!("{id}-{idx}"));
+                    out.push(cloned);
+                }
+                continue;
+            }
+        }
+        out.push(step);
+    }
+    out
+}
+
+fn set_step_device(step: &mut Step, device: String) {
+    match step {
+        Step::Run { device: d, .. } => *d = device,
+        Step::Spawn { device: d, .. } => *d = Some(device),
+        Step::SetLinkCondition { device: d, .. } => *d = device,
+        Step::SetDefaultRoute { device: d, .. } => *d = device,
+        Step::LinkDown { device: d, .. } => *d = device,
+        Step::LinkUp { device: d, .. } => *d = device,
+        Step::GenCerts { device: d, .. } => *d = Some(device),
+        Step::GenFile { device: d, .. } => *d = Some(device),
+        _ => {}
+    }
+}
+
+fn set_step_id(step: &mut Step, id: String) {
+    match step {
+        Step::Run { id: i, .. } => *i = Some(id),
+        Step::Spawn { id: i, .. } => *i = id,
+        Step::WaitFor { id: i, .. } => *i = id,
+        Step::GenCerts { id: i, .. } => *i = id,
+        Step::GenFile { id: i, .. } => *i = id,
+        _ => {}
+    }
+}
+
 /// Expand all `StepEntry` entries (groups and templates) into a flat `Vec<Step>`.
 pub(crate) fn expand_steps(
     entries: Vec<StepEntry>,
@@ -1602,6 +1640,9 @@ fn merge_use_step(use_step: UseStep, template: &StepTemplateDef) -> Result<Step>
         if let Some(d) = results.down_bytes {
             results_tbl.insert("down_bytes".to_string(), toml::Value::String(d));
         }
+        if let Some(l) = results.latency_ms {
+            results_tbl.insert("latency_ms".to_string(), toml::Value::String(l));
+        }
         table.insert("results".to_string(), toml::Value::Table(results_tbl));
     }
     // Rewrite `.capture_name` shorthand in results (requires step id).
@@ -1765,5 +1806,32 @@ mod tests {
         assert_eq!(step.action, "assert");
         assert_eq!(step.id.as_deref(), Some("check"));
         assert_eq!(step.device.as_deref(), Some("fetcher"));
+    }
+
+    #[test]
+    fn expand_counted_steps_expands_device() {
+        let steps = vec![
+            Step::Run {
+                id: Some("ping".to_string()),
+                device: "peer".to_string(),
+                cmd: vec!["ping".to_string()],
+                env: HashMap::new(),
+                parser: crate::sim::Parser::Text,
+                captures: HashMap::new(),
+                requires: vec![],
+                results: None,
+            },
+            Step::Wait {
+                duration: "1s".to_string(),
+            },
+        ];
+        let mut counts = HashMap::new();
+        counts.insert("peer".to_string(), 3);
+        let expanded = expand_counted_steps(steps, &counts);
+        assert_eq!(expanded.len(), 4); // 3 run + 1 wait
+        for (i, step) in expanded[..3].iter().enumerate() {
+            assert_eq!(step_device(step), Some(format!("peer-{i}")).as_deref());
+            assert_eq!(step_id(step), Some(format!("ping-{i}")).as_deref());
+        }
     }
 }

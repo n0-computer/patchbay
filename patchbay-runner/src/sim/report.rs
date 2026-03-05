@@ -18,6 +18,8 @@ pub struct StepResultRecord {
     pub up_bytes: Option<String>,
     /// Download bytes value from capture.
     pub down_bytes: Option<String>,
+    /// Latency in milliseconds from capture.
+    pub latency_ms: Option<String>,
 }
 
 impl StepResultRecord {
@@ -44,6 +46,11 @@ impl StepResultRecord {
         } else {
             None
         }
+    }
+
+    /// Parse latency_ms as f64.
+    pub fn latency_ms(&self) -> Option<f64> {
+        self.latency_ms.as_deref()?.parse().ok()
     }
 
     /// Compute upload MB/s from up_bytes and duration.
@@ -97,6 +104,7 @@ fn build_steps_md_table(sim_name: &str, step_results: &[StepResultRecord]) -> St
         "mb_s",
         "up_bytes",
         "up_mb_s",
+        "latency_ms",
     ];
 
     let rows: Vec<Vec<String>> = step_results
@@ -112,6 +120,9 @@ fn build_steps_md_table(sim_name: &str, step_results: &[StepResultRecord]) -> St
                 r.mb_s().map(|v| format!("{:.2}", v)).unwrap_or_default(),
                 r.up_bytes.clone().unwrap_or_default(),
                 r.up_mb_s().map(|v| format!("{:.2}", v)).unwrap_or_default(),
+                r.latency_ms()
+                    .map(|v| format!("{:.1}", v))
+                    .unwrap_or_default(),
             ]
         })
         .collect();
@@ -212,6 +223,7 @@ pub async fn write_combined_results_for_runs(work_root: &Path, run_names: &[Stri
         "mb_s",
         "up_bytes",
         "up_mb_s",
+        "latency_ms",
     ];
     let detail_rows: Vec<Vec<String>> = runs
         .iter()
@@ -228,6 +240,9 @@ pub async fn write_combined_results_for_runs(work_root: &Path, run_names: &[Stri
                     r.mb_s().map(|v| format!("{:.2}", v)).unwrap_or_default(),
                     r.up_bytes.clone().unwrap_or_default(),
                     r.up_mb_s().map(|v| format!("{:.2}", v)).unwrap_or_default(),
+                    r.latency_ms()
+                        .map(|v| format!("{:.1}", v))
+                        .unwrap_or_default(),
                 ]
             })
         })
@@ -379,6 +394,7 @@ mod tests {
             duration: Some("2000000".to_string()), // 2s in microseconds
             up_bytes: None,
             down_bytes: Some("1000000".to_string()), // 1 MB
+            latency_ms: None,
         };
         assert_eq!(r.elapsed_s(), Some(2.0));
         assert_eq!(r.size_bytes(), Some(1_000_000));
@@ -394,6 +410,7 @@ mod tests {
             duration: Some("2000000".to_string()),
             up_bytes: None,
             down_bytes: Some("1000000".to_string()),
+            latency_ms: None,
         }];
         write_results(&dir, "sim-a", &step_results).await.unwrap();
 
@@ -419,12 +436,14 @@ mod tests {
             duration: Some("1000000".to_string()),
             up_bytes: None,
             down_bytes: Some("1000000".to_string()),
+            latency_ms: None,
         }];
         let r2 = vec![StepResultRecord {
             id: "xfer-b".to_string(),
             duration: Some("2000000".to_string()),
             up_bytes: None,
             down_bytes: Some("1000000".to_string()),
+            latency_ms: None,
         }];
         write_results(&run_a, "sim-a", &r1).await.unwrap();
         write_results(&run_b, "sim-b", &r2).await.unwrap();
