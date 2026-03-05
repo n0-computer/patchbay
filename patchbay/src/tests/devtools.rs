@@ -83,7 +83,12 @@ async fn simple_lab_for_e2e() -> Result<()> {
     // Capture run_dir before dropping lab.
     let run_dir = lab.run_dir().map(|p| p.to_path_buf());
 
-    // Drop lab to flush the writer.
+    // Drop all handles so the broadcast channel closes and the writer flushes.
+    drop(dc);
+    drop(isp);
+    drop(home);
+    drop(client);
+    drop(server);
     drop(lab);
 
     // Give the writer task time to flush.

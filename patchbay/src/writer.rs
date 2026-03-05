@@ -69,10 +69,12 @@ impl LabWriter {
 /// Spawns a background task that writes events to disk.
 ///
 /// Events are buffered in memory and flushed to `events.jsonl` + `state.json`
-/// at most once per [`FLUSH_INTERVAL`], with a final flush on channel close.
+/// at most once per [`FLUSH_INTERVAL`], with a final flush when the lab is
+/// cancelled or the channel closes.
 pub(crate) fn spawn_writer(
     outdir: PathBuf,
     mut rx: tokio::sync::broadcast::Receiver<LabEvent>,
+    cancel: tokio_util::sync::CancellationToken,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut writer = match LabWriter::new(&outdir) {
@@ -102,8 +104,22 @@ pub(crate) fn spawn_writer(
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
                             tracing::warn!("LabWriter lagged {n} events");
                         }
-                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                            // Channel closed means the lab was dropped — treat as stop.
+                            writer.state.status = "stopped".into();
+                            dirty = true;
+                            break;
+                        }
                     }
+                }
+                _ = cancel.cancelled() => {
+                    // Lab is shutting down — drain remaining events, then stop.
+                    while let Ok(event) = rx.try_recv() {
+                        let _ = writer.append_event(&event);
+                    }
+                    writer.state.status = "stopped".into();
+                    dirty = true;
+                    break;
                 }
                 _ = interval.tick() => {
                     if dirty {

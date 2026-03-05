@@ -49,9 +49,6 @@ pub enum LabEventKind {
         /// Serialized [`LabState`].
         state: serde_json::Value,
     },
-    /// Emitted when the lab is shutting down.
-    LabStopping,
-
     // ── IX ──
     /// Emitted once during `Lab::new()` after IX bridge creation.
     IxCreated {
@@ -495,9 +492,6 @@ impl LabState {
                     *self = s;
                     self.opid = event.opid;
                 }
-            }
-            LabEventKind::LabStopping => {
-                self.status = "stopped".into();
             }
             LabEventKind::IxCreated {
                 bridge,

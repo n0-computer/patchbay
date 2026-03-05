@@ -490,7 +490,7 @@ impl Lab {
         // Spawn file writer if outdir is configured — subscribe before emitting
         // initial events so the writer captures LabCreated and IxCreated.
         if let Some(ref run_dir) = run_dir {
-            crate::writer::spawn_writer(run_dir.clone(), lab.inner.events_tx.subscribe());
+            crate::writer::spawn_writer(run_dir.clone(), lab.inner.events_tx.subscribe(), lab.inner.cancel.clone());
         }
 
         // Emit lifecycle events.
