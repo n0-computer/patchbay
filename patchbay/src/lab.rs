@@ -313,6 +313,7 @@ pub enum Ipv6ProvisioningMode {
     /// Install routes directly from patchbay wiring logic.
     #[default]
     Static,
+    /// RA-driven route provisioning mode.
     ///
     /// This mode follows RA and RS semantics for route installation and
     /// emits structured RA and RS events into patchbay logs. It does not

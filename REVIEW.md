@@ -8,6 +8,16 @@ Higher-level suggestions that were not applied directly.
 
 * add RegionLink::is_empty and same for link conditions to remove manual > 0 checks at callsites. break region link should be async. never use run_closure_in with Command if you can easily make the call site async, use async command then to not block calling thread on sync cmds
 
+#### IPv6 link-local / RA-driven provisioning branch (dev)
+
+**`Ipv6Profile` variants are currently redundant** — `ProductionLike`,
+`ConsumerHome`, `MobileCarrier`, `Enterprise` all map to `(Enabled, RaDriven)`.
+Either add a comment noting future divergence intent or collapse them.
+
+**`DeviceSetupData` unnecessary clone** — `dev: dev.clone()` in
+`DeviceBuilder::build()` when only a few fields are needed later for event
+emission.
+
 #### `add_host` hardcodes /24 assumption (low)
 
 `add_host(cidr, host)` replaces only the last octet, which only works for /24

@@ -205,8 +205,6 @@ async fn preset_override() -> Result<()> {
 #[tokio::test(flavor = "current_thread")]
 #[traced_test]
 async fn preset_recommended_ipv6_profiles() -> Result<()> {
-    check_caps()?;
-
     assert_eq!(
         RouterPreset::Home.recommended_ipv6_profile(),
         Ipv6Profile::ConsumerHome

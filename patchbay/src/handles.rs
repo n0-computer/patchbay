@@ -38,43 +38,6 @@ use crate::{
     netlink::Netlink,
 };
 
-async fn emit_router_solicitation(
-    netns: &Arc<crate::netns::NetnsManager>,
-    ns: String,
-    device: String,
-    iface: String,
-    router_ll: Option<Ipv6Addr>,
-) -> Result<()> {
-    let ns_for_log = ns.clone();
-    core::nl_run(netns, &ns, move |_h: Netlink| async move {
-        match router_ll {
-            Some(router_ll) => {
-                tracing::info!(
-                    target: "patchbay::_events::RouterSolicitation",
-                    ns = %ns_for_log,
-                    device = %device,
-                    iface = %iface,
-                    dst = "ff02::2",
-                    router_ll = %router_ll,
-                    "router solicitation"
-                );
-            }
-            None => {
-                tracing::info!(
-                    target: "patchbay::_events::RouterSolicitation",
-                    ns = %ns_for_log,
-                    device = %device,
-                    iface = %iface,
-                    dst = "ff02::2",
-                    "router solicitation"
-                );
-            }
-        }
-        Ok(())
-    })
-    .await
-}
-
 async fn reconcile_radriven_default_v6_routes(
     lab: &Arc<LabInner>,
     router: NodeId,
@@ -87,12 +50,7 @@ async fn reconcile_radriven_default_v6_routes(
     for t in targets {
         let ifname = t.ifname.to_string();
         core::nl_run(&lab.netns, &t.ns, move |nl: Netlink| async move {
-            if let Some(ll) = install_ll {
-                nl.replace_default_route_v6_scoped(&ifname, ll).await?;
-            } else {
-                nl.clear_default_route_v6().await?;
-            }
-            Ok(())
+            nl.set_default_route_v6(&ifname, install_ll).await
         })
         .await?;
     }
@@ -415,26 +373,16 @@ impl Device {
                     ra_default_enabled,
                 )
             };
+            let primary_v6 =
+                select_default_v6_gateway(provisioning, ra_default_enabled, gw_v6, gw_ll_v6);
             core::nl_run(&self.lab.netns, &ns, move |nl: Netlink| async move {
                 nl.replace_default_route_v4(&ifname_owned, gw_ip).await?;
-                let primary_v6 =
-                    select_default_v6_gateway(provisioning, ra_default_enabled, gw_v6, gw_ll_v6);
-                if let Some(gw6) = primary_v6 {
-                    if gw6.is_unicast_link_local() {
-                        nl.replace_default_route_v6_scoped(&ifname_owned, gw6)
-                            .await?;
-                    } else {
-                        nl.replace_default_route_v6(&ifname_owned, gw6).await?;
-                    }
-                } else {
-                    nl.clear_default_route_v6().await?;
-                }
-                Ok(())
+                nl.set_default_route_v6(&ifname_owned, primary_v6).await
             })
             .await?;
             if provisioning == Ipv6ProvisioningMode::RaDriven {
                 let rs_router_ll = if ra_default_enabled { gw_ll_v6 } else { None };
-                emit_router_solicitation(
+                core::emit_router_solicitation(
                     &self.lab.netns,
                     ns.to_string(),
                     self.name.to_string(),
@@ -488,25 +436,16 @@ impl Device {
             )
         };
         let to_owned = to.to_string();
+        let primary_v6 =
+            select_default_v6_gateway(provisioning, ra_default_enabled, gw_v6, gw_ll_v6);
         core::nl_run(&self.lab.netns, &ns, move |nl: Netlink| async move {
             nl.replace_default_route_v4(&to_owned, gw_ip).await?;
-            let primary_v6 =
-                select_default_v6_gateway(provisioning, ra_default_enabled, gw_v6, gw_ll_v6);
-            if let Some(gw6) = primary_v6 {
-                if gw6.is_unicast_link_local() {
-                    nl.replace_default_route_v6_scoped(&to_owned, gw6).await?;
-                } else {
-                    nl.replace_default_route_v6(&to_owned, gw6).await?;
-                }
-            } else {
-                nl.clear_default_route_v6().await?;
-            }
-            Ok(())
+            nl.set_default_route_v6(&to_owned, primary_v6).await
         })
         .await?;
         if provisioning == Ipv6ProvisioningMode::RaDriven {
             let rs_router_ll = if ra_default_enabled { gw_ll_v6 } else { None };
-            emit_router_solicitation(
+            core::emit_router_solicitation(
                 &self.lab.netns,
                 ns.to_string(),
                 self.name.to_string(),
@@ -1201,8 +1140,7 @@ impl Router {
             router.ra_runtime.set_enabled(enabled);
             let ll = router.downstream_ll_v6;
             if self.lab.ipv6_provisioning_mode == Ipv6ProvisioningMode::RaDriven
-                && router.cfg.ra_enabled
-                && router.cfg.ra_lifetime_secs > 0
+                && router.ra_default_enabled()
             {
                 ll
             } else {
@@ -1255,8 +1193,7 @@ impl Router {
             router.ra_runtime.set_lifetime_secs(secs);
             let ll = router.downstream_ll_v6;
             if self.lab.ipv6_provisioning_mode == Ipv6ProvisioningMode::RaDriven
-                && router.cfg.ra_enabled
-                && router.cfg.ra_lifetime_secs > 0
+                && router.ra_default_enabled()
             {
                 ll
             } else {

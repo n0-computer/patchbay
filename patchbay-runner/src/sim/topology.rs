@@ -118,6 +118,9 @@ gateway = "r1"
                     nat: patchbay::Nat::None,
                     ip_support: patchbay::IpSupport::V4Only,
                     nat_v6: patchbay::NatV6Mode::None,
+                    ra_enabled: None,
+                    ra_interval_secs: None,
+                    ra_lifetime_secs: None,
                 }],
                 ..Default::default()
             },

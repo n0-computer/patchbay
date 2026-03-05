@@ -272,20 +272,7 @@ impl Netlink {
         Ok(())
     }
 
-    pub(crate) async fn replace_default_route_v6(&self, ifname: &str, via: Ipv6Addr) -> Result<()> {
-        trace!(ifname = %ifname, via = %via, "replace default route v6");
-        let ifindex = self.link_index(ifname).await?;
-
-        self.delete_default_routes_v6().await?;
-
-        let msg = RouteMessageBuilder::<Ipv6Addr>::new()
-            .output_interface(ifindex)
-            .gateway(via)
-            .build();
-        self.handle.route().add(msg).execute().await?;
-        Ok(())
-    }
-
+    /// Adds a scoped IPv6 default route via `ifname`, ignoring EEXIST.
     pub(crate) async fn add_default_route_v6_scoped(
         &self,
         ifname: &str,
@@ -306,12 +293,9 @@ impl Netlink {
         Ok(())
     }
 
-    pub(crate) async fn replace_default_route_v6_scoped(
-        &self,
-        ifname: &str,
-        via: Ipv6Addr,
-    ) -> Result<()> {
-        trace!(ifname = %ifname, via = %via, "replace default route v6 scoped");
+    /// Replaces the IPv6 default route via `ifname` (deletes all existing defaults first).
+    pub(crate) async fn replace_default_route_v6(&self, ifname: &str, via: Ipv6Addr) -> Result<()> {
+        trace!(ifname = %ifname, via = %via, "replace default route v6");
         let ifindex = self.link_index(ifname).await?;
 
         self.delete_default_routes_v6().await?;
@@ -322,6 +306,19 @@ impl Netlink {
             .build();
         self.handle.route().add(msg).execute().await?;
         Ok(())
+    }
+
+    /// Sets the IPv6 default route for a device interface, handling link-local
+    /// vs global dispatch. Pass `None` to clear the default route.
+    pub(crate) async fn set_default_route_v6(
+        &self,
+        ifname: &str,
+        via: Option<Ipv6Addr>,
+    ) -> Result<()> {
+        match via {
+            Some(gw) => self.replace_default_route_v6(ifname, gw).await,
+            None => self.clear_default_route_v6().await,
+        }
     }
 
     pub(crate) async fn clear_default_route_v6(&self) -> Result<()> {

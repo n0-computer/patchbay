@@ -264,6 +264,10 @@ impl RouterData {
     }
 }
 
+/// Runtime-adjustable RA configuration shared between the router handle and
+/// the RA worker task. Atomics use `Relaxed` ordering because the `Notify`
+/// wakeup provides the happens-before edge that ensures the worker sees
+/// updated values after being notified.
 #[derive(Debug)]
 pub(crate) struct RaRuntimeCfg {
     enabled: AtomicBool,
@@ -2213,11 +2217,7 @@ pub(crate) async fn setup_router_async(
                     if let Some(ll6) = d.router.upstream_ll_v6 {
                         h.add_addr6(&wan_if, ll6, 64).await?;
                     }
-                    if g6.is_unicast_link_local() {
-                        h.add_default_route_v6_scoped(&wan_if, g6).await?;
-                    } else {
-                        h.add_default_route_v6(g6).await?;
-                    }
+                    h.add_default_route_v6_scoped(&wan_if, g6).await?;
                 }
                 Ok(())
             }
@@ -2370,6 +2370,30 @@ pub(crate) async fn setup_router_async(
     }
 
     Ok(())
+}
+
+pub(crate) async fn emit_router_solicitation(
+    netns: &Arc<netns::NetnsManager>,
+    ns: String,
+    device: String,
+    iface: String,
+    router_ll: Option<Ipv6Addr>,
+) -> Result<()> {
+    let ns_for_log = ns.clone();
+    nl_run(netns, &ns, move |_h: Netlink| async move {
+        let router_ll = router_ll.map(|ll| ll.to_string());
+        tracing::info!(
+            target: "patchbay::_events::RouterSolicitation",
+            ns = %ns_for_log,
+            device = %device,
+            iface = %iface,
+            dst = "ff02::2",
+            router_ll = router_ll.as_deref(),
+            "router solicitation"
+        );
+        Ok(())
+    })
+    .await
 }
 
 fn spawn_ra_worker(
@@ -2664,31 +2688,13 @@ pub(crate) async fn setup_device_async(
     }
 
     for (ifname, router_ll) in rs_ifaces {
-        let ns = dev.ns.clone();
-        let ns_for_log = ns.clone();
-        let dev_name = dev.name.to_string();
-        let iface = ifname.to_string();
-        nl_run(netns, &ns, move |_h: Netlink| async move {
-            let router_ll = router_ll.map(|ll| ll.to_string());
-            tracing::info!(
-                target: "patchbay::_events::RouterSolicitation",
-                ns = %ns_for_log,
-                device = %dev_name,
-                iface = %iface,
-                dst = "ff02::2",
-                router_ll = router_ll.as_deref(),
-                "router solicitation"
-            );
-            if router_ll.is_none() {
-                tracing::trace!(
-                    ns = %ns_for_log,
-                    device = %dev_name,
-                    iface = %iface,
-                    "router solicitation emitted without router_ll"
-                );
-            }
-            Ok(())
-        })
+        emit_router_solicitation(
+            netns,
+            dev.ns.to_string(),
+            dev.name.to_string(),
+            ifname.to_string(),
+            router_ll,
+        )
         .await?;
     }
 
@@ -2796,6 +2802,8 @@ fn add_host(cidr: Ipv4Net, host: u8) -> Result<Ipv4Addr> {
     }
     Ok(Ipv4Addr::new(octets[0], octets[1], octets[2], host))
 }
+
+// ── Link-local address generation ─────────────
 
 fn splitmix64(mut x: u64) -> u64 {
     x = x.wrapping_add(0x9E3779B97F4A7C15);
