@@ -12,6 +12,7 @@ export interface SimResults {
 
 export type LogKind =
   | 'tracing_jsonl'
+  | 'lab_events'
   | 'jsonl'
   | 'json'
   | 'qlog'

@@ -4,35 +4,19 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { REPO_ROOT, PATCHBAY_BIN, waitForHttp } from './helpers'
 
 const THIS_DIR = path.dirname(fileURLToPath(import.meta.url))
-const REPO_ROOT = path.resolve(THIS_DIR, '../..')
-const TARGET_DIR = process.env.CARGO_TARGET_DIR ?? path.join(REPO_ROOT, 'target')
-const PATCHBAY_BIN = path.join(TARGET_DIR, 'debug', 'patchbay')
 const SIM_TOML = path.join(THIS_DIR, 'fixtures', 'ping-e2e.toml')
 const UI_BIND = '127.0.0.1:7432'
 const UI_URL = `http://${UI_BIND}/`
 
-async function waitForHttp(url: string, timeoutMs: number): Promise<void> {
-  const start = Date.now()
-  while (Date.now() - start < timeoutMs) {
-    try {
-      const res = await fetch(url)
-      if (res.ok) return
-    } catch {
-      // retry
-    }
-    await new Promise((resolve) => setTimeout(resolve, 200))
-  }
-  throw new Error(`timed out waiting for ${url}`)
-}
-
 test('runner sim produces viewable UI output', async ({ page }) => {
   test.setTimeout(4 * 60 * 1000)
-  const workDir = mkdtempSync(path.join(tmpdir(), 'patchbay-runner-e2e-'))
+  const workDir = mkdtempSync(`${tmpdir()}/patchbay-runner-e2e-`)
   let serveProc: ChildProcess | null = null
   try {
-    // Step 1: Run the sim with PATCHBAY_OUTDIR so the lab writes events.jsonl.
+    // Step 1: Run the sim.
     execFileSync(
       PATCHBAY_BIN,
       ['run', '--work-dir', workDir, SIM_TOML],
@@ -44,7 +28,7 @@ test('runner sim produces viewable UI output', async ({ page }) => {
       },
     )
 
-    // Step 2: Start the devtools server pointing at the work directory.
+    // Step 2: Start the devtools server.
     serveProc = spawn(
       PATCHBAY_BIN,
       ['serve', workDir, '--bind', UI_BIND],
@@ -56,18 +40,19 @@ test('runner sim produces viewable UI output', async ({ page }) => {
     await page.goto(UI_URL)
     await expect(page.getByRole('heading', { name: 'patchbay' })).toBeVisible()
 
-    // The run selector should have the "ping-e2e" run we just produced.
     const selector = page.locator('select')
     await expect(selector).toBeVisible()
     await expect(selector.locator('option', { hasText: 'ping-e2e' })).toBeAttached()
 
-    // Topology tab should show the router and devices from our sim.
+    // Topology tab should show the router and devices.
     await expect(page.getByText('dc')).toBeVisible({ timeout: 10_000 })
     await expect(page.getByText('sender')).toBeVisible()
     await expect(page.getByText('receiver')).toBeVisible()
 
-    // Events tab should show lab setup events.
-    await page.getByRole('button', { name: 'events' }).click()
+    // Logs tab: events.jsonl should show lab events.
+    await page.getByRole('button', { name: 'logs' }).click()
+    await expect(page.getByText('events.jsonl').first()).toBeVisible({ timeout: 5_000 })
+    await page.getByText('events.jsonl').first().click()
     const eventsTable = page.locator('table tbody tr')
     await expect(eventsTable.first()).toBeVisible({ timeout: 5_000 })
     await expect(page.getByText('router_added').first()).toBeVisible()

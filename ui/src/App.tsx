@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import type {
   Firewall,
   LabEvent,
@@ -26,10 +26,8 @@ import PerfTab from './components/PerfTab'
 import TimelineTab from './components/TimelineTab'
 import TopologyGraph from './components/TopologyGraph'
 import NodeDetail from './components/NodeDetail'
-import KvPairs from './components/KvPairs'
-import { formatTimestamp, formatRelativeTime, parseIsoMs, kvPairs } from './time-format'
 
-type Tab = 'topology' | 'events' | 'logs' | 'timeline' | 'perf'
+type Tab = 'topology' | 'logs' | 'timeline' | 'perf'
 
 // ── State reducer (from DevtoolsApp) ──────────────────────────────
 
@@ -139,14 +137,6 @@ export default function App() {
   // Cross-tab log jump
   const [logJump, setLogJump] = useState<{ node: string; path: string; timeLabel: string; nonce: number } | null>(null)
 
-  // Events tab time mode
-  const [eventsTimeMode, setEventsTimeMode] = useState<'relative' | 'absolute'>('relative')
-  const eventsBaseMs = useMemo(() => {
-    if (labEvents.length === 0) return null
-    const first = parseIsoMs(labEvents[0].timestamp)
-    return first
-  }, [labEvents])
-
   // ── Fetch and subscribe to runs ──
 
   const refreshRuns = useCallback(async () => {
@@ -222,7 +212,7 @@ export default function App() {
 
   const runInfo = runs.find((r) => r.name === selectedRun)
   const base = selectedRun ? runFilesBase(selectedRun) : ''
-  const availableTabs: Tab[] = ['topology', 'events', 'logs', 'timeline']
+  const availableTabs: Tab[] = ['topology', 'logs', 'timeline']
   if (simResults) availableTabs.push('perf')
 
   // Map LogEntry to SimLogEntry shape for LogsTab/TimelineTab compatibility
@@ -296,49 +286,6 @@ export default function App() {
         )}
         {tab === 'topology' && !labState && (
           <div className="empty">Loading lab state...</div>
-        )}
-
-        {tab === 'events' && (
-          <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
-            <div className="logs-toolbar">
-              <span>events</span>
-              <button className="btn" onClick={() => setEventsTimeMode((v) => (v === 'relative' ? 'absolute' : 'relative'))}>
-                time: {eventsTimeMode}
-              </button>
-            </div>
-            <div style={{ flex: 1, overflow: 'auto', fontSize: 12 }}>
-              <table>
-                <thead>
-                  <tr>
-                    <th style={{ width: 40 }}>opid</th>
-                    <th style={{ width: 100 }}>time</th>
-                    <th style={{ width: 120 }}>kind</th>
-                    <th>details</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {labEvents.map((e) => {
-                    const ms = parseIsoMs(e.timestamp)
-                    const timeStr = eventsTimeMode === 'absolute'
-                      ? formatTimestamp(e.timestamp)
-                      : ms != null && eventsBaseMs != null
-                        ? formatRelativeTime(ms, eventsBaseMs)
-                        : e.timestamp
-                    const pairs = kvPairs(e as Record<string, unknown>, ['opid', 'timestamp', 'kind'])
-                    return (
-                      <tr key={e.opid}>
-                        <td style={{ color: 'var(--text-muted)' }}>{e.opid}</td>
-                        <td className="events-time-cell">{timeStr}</td>
-                        <td><span className="events-kind">{e.kind}</span></td>
-                        <td><KvPairs pairs={pairs} /></td>
-                      </tr>
-                    )
-                  })}
-                </tbody>
-              </table>
-              {labEvents.length === 0 && <div className="empty">No events yet</div>}
-            </div>
-          </div>
         )}
 
         {tab === 'logs' && selectedRun && (

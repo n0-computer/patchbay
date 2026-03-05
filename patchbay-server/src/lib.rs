@@ -495,6 +495,8 @@ fn looks_like_qlog_json_seq(text: &str) -> bool {
 enum LogKind {
     /// JSON lines tracing output (`*.tracing.jsonl`).
     TracingJsonl,
+    /// Lab-level event log (`events.jsonl`).
+    LabEvents,
     /// Generic JSON lines file (`*.jsonl`).
     Jsonl,
     /// Single JSON document (`*.json`).
@@ -515,6 +517,9 @@ struct LogEntry {
 }
 
 fn detect_log_kind(filename: &str, sample: &[u8]) -> Option<LogKind> {
+    if filename == EVENTS_JSONL {
+        return Some(LogKind::LabEvents);
+    }
     if filename.ends_with(&format!(".{TRACING_JSONL_EXT}")) {
         return Some(LogKind::TracingJsonl);
     }

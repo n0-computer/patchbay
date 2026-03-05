@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { SimLogEntry } from '../types'
 import KvPairs from './KvPairs'
+import JsonTree from './JsonTree'
+import JsonLinesTable from './JsonLinesTable'
 
 const ANSI_RE = /\x1b\[[0-9;]*m/g
 const TRACING_RE = /^(\d{4}-\d{2}-\d{2}T[\d:.]+Z)\s+(ERROR|WARN|INFO|DEBUG|TRACE)\s+(.+)$/
@@ -24,6 +26,12 @@ type RenderMode = 'rendered' | 'raw'
 type TimeMode = 'absolute' | 'relative'
 
 const ALL_LEVELS = ['ERROR', 'WARN', 'INFO', 'DEBUG', 'TRACE'] as const
+
+/** Kinds that get their own dedicated renderer (not the generic parseLine flow). */
+const STRUCTURED_KINDS = new Set(['lab_events', 'jsonl', 'json'])
+
+/** Kinds that should auto-load on selection. */
+const AUTO_LOAD_KINDS = new Set(['tracing_jsonl', 'jsonl', 'json', 'qlog', 'lab_events'])
 
 interface Props {
   base: string
@@ -78,7 +86,7 @@ function formatSpans(spans: unknown): string {
   return parts.join(':')
 }
 
-/** Parse a single line from a log file. Handles JSON tracing format, ANSI tracing, JSON events, and raw text. */
+/** Parse a single line from a tracing/text log. */
 function parseLine(raw: string): ParsedLine {
   const stripped = raw.replace(ANSI_RE, '')
 
@@ -89,31 +97,20 @@ function parseLine(raw: string): ParsedLine {
     // JSON event format: { kind: "...", ... }
     if (typeof v.kind === 'string') return { type: 'event', kind: v.kind, raw: stripped }
 
-    // tracing-subscriber JSON format:
-    // { timestamp, level, fields: { message, ... }, target, span: {...}, spans: [...] }
+    // tracing-subscriber JSON format
     if (typeof v.level === 'string' && typeof v.timestamp === 'string') {
       const level = (v.level as string).toUpperCase()
       const ts = v.timestamp as string
       const target = (v.target as string) ?? ''
       const fieldsObj = v.fields as Record<string, unknown> | undefined
-
-      // message lives inside fields (standard format)
       const msg = fieldsObj?.message != null ? String(fieldsObj.message) : ''
-
-      // Extra fields (everything in fields except message)
       const extras = fieldsObj ? formatObjectFields(fieldsObj, new Set(['message'])) : ''
-
-      // Spans chain: tracing-subscriber includes "spans" array
       const spans = formatSpans(v.spans)
-
       return { type: 'tracing', level, ts, target, spans, msg, fields: extras }
     }
   } catch { }
 
-  // ANSI tracing format:
-  // - timestamp LEVEL target: message
-  // - timestamp LEVEL span_chain: target message
-  //   (emitted by patchbay fmt-log output)
+  // ANSI tracing format
   const m = stripped.match(TRACING_RE)
   if (m) {
     const ts = m[1]
@@ -121,27 +118,11 @@ function parseLine(raw: string): ParsedLine {
     const rest = m[3]
     const withSpan = rest.match(TARGET_WITH_SPAN_RE)
     if (withSpan && withSpan[2].includes('::')) {
-      return {
-        type: 'tracing',
-        ts,
-        level,
-        spans: withSpan[1],
-        target: withSpan[2],
-        msg: withSpan[3]?.trim() ?? '',
-        fields: '',
-      }
+      return { type: 'tracing', ts, level, spans: withSpan[1], target: withSpan[2], msg: withSpan[3]?.trim() ?? '', fields: '' }
     }
     const basic = rest.match(TARGET_AND_MSG_RE)
     if (basic) {
-      return {
-        type: 'tracing',
-        ts,
-        level,
-        spans: '',
-        target: basic[1],
-        msg: basic[2],
-        fields: '',
-      }
+      return { type: 'tracing', ts, level, spans: '', target: basic[1], msg: basic[2], fields: '' }
     }
     return { type: 'tracing', ts, level, target: rest, spans: '', msg: '', fields: '' }
   }
@@ -209,6 +190,10 @@ export default function LogsTab({ base, logs, jumpTarget }: Props) {
   const [timeMode, setTimeMode] = useState<TimeMode>('absolute')
   const [qlogNameFilter, setQlogNameFilter] = useState('all')
 
+  const isStructured = active != null && STRUCTURED_KINDS.has(active.kind)
+  const isTracingLog = active?.kind === 'tracing_jsonl'
+  const isQlog = active?.kind === 'qlog'
+
   // Auto-select first log
   useEffect(() => {
     setActive((prev) => {
@@ -218,13 +203,12 @@ export default function LogsTab({ base, logs, jumpTarget }: Props) {
   }, [logs])
 
   // Clear content state when switching active log.
-  // Skip clearing jump state if a jump triggered the switch.
   useEffect(() => {
     if (!active) return
     setLoaded(false)
     setText('')
     setError(null)
-    setRenderMode(active.kind === 'qlog' ? 'rendered' : 'raw')
+    setRenderMode(isQlog ? 'rendered' : 'raw')
     if (!jumpingRef.current) {
       setJumpNeedle(null)
       setJumpLine(null)
@@ -241,7 +225,6 @@ export default function LogsTab({ base, logs, jumpTarget }: Props) {
     if (!jumpTarget || logs.length === 0) return
     if (jumpHandledNonce === jumpTarget.nonce) return
     const direct = logs.find((l) => l.path === jumpTarget.path)
-    // Prefer tracing jsonl log for the target node.
     const tracingLog = logs.find((l) => l.node === jumpTarget.node && l.kind === 'tracing_jsonl')
     const fallback = logs.find((l) => l.node === jumpTarget.node) ?? logs[0] ?? null
     jumpingRef.current = true
@@ -250,23 +233,19 @@ export default function LogsTab({ base, logs, jumpTarget }: Props) {
     setJumpHandledNonce(jumpTarget.nonce)
   }, [jumpTarget, logs, jumpHandledNonce])
 
-  // Load log content (fetches last 256KB via Range header, or full file)
+  // Load log content
   const loadContent = async () => {
     if (!active) return
     const url = `${base}${active.path}`
     setLoading(true)
     setError(null)
     try {
-      // Try Range request for last chunk
-      const rangeRes = await fetch(url, {
-        headers: { Range: `bytes=-${PREVIEW_BYTES}` },
-      })
+      const rangeRes = await fetch(url, { headers: { Range: `bytes=-${PREVIEW_BYTES}` } })
       if (rangeRes.ok || rangeRes.status === 206) {
         setText(await rangeRes.text())
         setLoaded(true)
         return
       }
-      // Fallback to full fetch
       const fullRes = await fetch(url)
       if (!fullRes.ok) throw new Error(`HTTP ${fullRes.status}`)
       setText(await fullRes.text())
@@ -284,17 +263,10 @@ export default function LogsTab({ base, logs, jumpTarget }: Props) {
     loadContent()
   }, [active, jumpNeedle, loaded, loading])
 
-  // Auto-load structured logs immediately (they're typically small)
+  // Auto-load structured logs immediately
   useEffect(() => {
     if (!active || loaded || loading) return
-    if (
-      active.kind === 'tracing_jsonl' ||
-      active.kind === 'jsonl' ||
-      active.kind === 'json' ||
-      active.kind === 'qlog'
-    ) {
-      loadContent()
-    }
+    if (AUTO_LOAD_KINDS.has(active.kind)) loadContent()
   }, [active, loaded, loading])
 
   const byNode = useMemo(() => {
@@ -306,18 +278,20 @@ export default function LogsTab({ base, logs, jumpTarget }: Props) {
     return [...m.entries()].sort((a, b) => a[0].localeCompare(b[0]))
   }, [logs])
 
-  const parsed = useMemo(() => text.split('\n').filter(Boolean).map(parseLine), [text])
-  const qlogEvents = useMemo(() => parseQlogEvents(text), [text])
-  const supportsRendered = active?.kind === 'qlog'
-  const isTracingLog = active?.kind === 'tracing_jsonl'
-  const qlogNames = useMemo(
-    () => [...new Set(qlogEvents.map((ev) => ev.filterName))].sort(),
-    [qlogEvents],
-  )
+  // ── Tracing/text log parsing (only for non-structured kinds) ──
+
+  const parsed = useMemo(() => {
+    if (isStructured) return []
+    return text.split('\n').filter(Boolean).map(parseLine)
+  }, [text, isStructured])
+
+  const qlogEvents = useMemo(() => isQlog ? parseQlogEvents(text) : [], [text, isQlog])
+  const qlogNames = useMemo(() => [...new Set(qlogEvents.map((ev) => ev.filterName))].sort(), [qlogEvents])
   const filteredQlogEvents = useMemo(() => {
     if (qlogNameFilter === 'all') return qlogEvents
     return qlogEvents.filter((ev) => ev.filterName === qlogNameFilter)
   }, [qlogEvents, qlogNameFilter])
+
   const traceStartMs = useMemo(() => {
     for (const line of parsed) {
       if (line.type !== 'tracing') continue
@@ -327,14 +301,13 @@ export default function LogsTab({ base, logs, jumpTarget }: Props) {
     return null
   }, [parsed])
 
-  // Apply level filter to parsed lines
   const filteredLines = useMemo(() => {
     if (!isTracingLog) return parsed.map((line, i) => ({ line, origIdx: i }))
     return parsed
       .map((line, i) => ({ line, origIdx: i }))
       .filter(({ line }) => {
         if (line.type === 'tracing') return enabledLevels.has(line.level)
-        return true // show raw/event lines always
+        return true
       })
   }, [parsed, enabledLevels, isTracingLog])
 
@@ -378,7 +351,6 @@ export default function LogsTab({ base, logs, jumpTarget }: Props) {
           nearestIdx = idx
         }
       })
-      // Accept nearest timestamp match within 2 seconds to handle format/source drift.
       if (nearestIdx >= 0 && nearestDelta <= 2000) {
         setJumpLine(nearestIdx)
         return
@@ -396,9 +368,7 @@ export default function LogsTab({ base, logs, jumpTarget }: Props) {
   useEffect(() => {
     if (jumpLine == null) return
     const el = document.querySelector(`[data-log-line="${jumpLine}"]`)
-    if (el instanceof HTMLElement) {
-      el.scrollIntoView({ block: 'center' })
-    }
+    if (el instanceof HTMLElement) el.scrollIntoView({ block: 'center' })
   }, [jumpLine])
 
   // Scroll to search match
@@ -407,9 +377,7 @@ export default function LogsTab({ base, logs, jumpTarget }: Props) {
     const targetIdx = searchMatches[searchIdx]
     if (targetIdx == null) return
     const el = document.querySelector(`[data-log-line="${targetIdx}"]`)
-    if (el instanceof HTMLElement) {
-      el.scrollIntoView({ block: 'center' })
-    }
+    if (el instanceof HTMLElement) el.scrollIntoView({ block: 'center' })
   }, [searchIdx, searchMatches])
 
   const toggleLevel = (level: string) => {
@@ -432,6 +400,34 @@ export default function LogsTab({ base, logs, jumpTarget }: Props) {
     }
     return ts.split('T')[1]?.replace('Z', '') ?? ts
   }
+
+  // ── Structured content renderers ──
+
+  const renderJson = () => {
+    try {
+      const data = JSON.parse(text)
+      return (
+        <div className="json-tree-wrap">
+          <JsonTree data={data} defaultDepth={2} />
+        </div>
+      )
+    } catch {
+      return <div className="logs-content"><div className="log-entry log-raw">{text}</div></div>
+    }
+  }
+
+  const renderJsonLines = () => {
+    const isLabEvents = active?.kind === 'lab_events'
+    return (
+      <JsonLinesTable
+        text={text}
+        kindField="kind"
+        excludeFields={isLabEvents ? ['opid'] : []}
+      />
+    )
+  }
+
+  // ── Render ──
 
   return (
     <div className="logs-layout">
@@ -461,7 +457,7 @@ export default function LogsTab({ base, logs, jumpTarget }: Props) {
           <>
             <div className="logs-toolbar">
               <span>{active.path}</span>
-              {loaded && (
+              {loaded && !isStructured && (
                 <span style={{ color: 'var(--text-muted)' }}>
                   {formatBytes(fileSize)} · {parsed.length} lines
                   {isTracingLog && filteredLines.length !== parsed.length
@@ -469,26 +465,14 @@ export default function LogsTab({ base, logs, jumpTarget }: Props) {
                     : ''}
                 </span>
               )}
-              {supportsRendered && loaded && (
+              {isQlog && loaded && (
                 <>
-                  <button
-                    className={`btn${renderMode === 'rendered' ? ' active' : ''}`}
-                    onClick={() => setRenderMode('rendered')}
-                  >
-                    preview
-                  </button>
-                  <button
-                    className={`btn${renderMode === 'raw' ? ' active' : ''}`}
-                    onClick={() => setRenderMode('raw')}
-                  >
-                    raw
-                  </button>
+                  <button className={`btn${renderMode === 'rendered' ? ' active' : ''}`} onClick={() => setRenderMode('rendered')}>preview</button>
+                  <button className={`btn${renderMode === 'raw' ? ' active' : ''}`} onClick={() => setRenderMode('raw')}>raw</button>
                 </>
               )}
               {!loaded && !loading && (
-                <button className="btn" onClick={loadContent}>
-                  load log
-                </button>
+                <button className="btn" onClick={loadContent}>load log</button>
               )}
               {loading && <span style={{ color: 'var(--text-muted)' }}>loading...</span>}
               {jumpNeedle && (
@@ -498,7 +482,7 @@ export default function LogsTab({ base, logs, jumpTarget }: Props) {
               )}
             </div>
 
-            {/* Level filter + search toolbar (for tracing logs) */}
+            {/* Tracing log toolbar */}
             {isTracingLog && loaded && (
               <div className="logs-toolbar">
                 <button className={`btn${showSpans ? ' active' : ''}`} onClick={() => setShowSpans((v) => !v)}>
@@ -531,33 +515,20 @@ export default function LogsTab({ base, logs, jumpTarget }: Props) {
                     <span style={{ color: 'var(--text-muted)', fontSize: 11 }}>
                       {searchIdx + 1}/{searchMatches.length}
                     </span>
-                    <button className="btn" onClick={() => setSearchIdx((i) => (i - 1 + searchMatches.length) % searchMatches.length)}>
-                      prev
-                    </button>
-                    <button className="btn" onClick={() => setSearchIdx((i) => (i + 1) % searchMatches.length)}>
-                      next
-                    </button>
+                    <button className="btn" onClick={() => setSearchIdx((i) => (i - 1 + searchMatches.length) % searchMatches.length)}>prev</button>
+                    <button className="btn" onClick={() => setSearchIdx((i) => (i + 1) % searchMatches.length)}>next</button>
                   </>
                 )}
               </div>
             )}
-            {active.kind === 'qlog' && loaded && renderMode === 'rendered' && (
+
+            {/* Qlog filter toolbar */}
+            {isQlog && loaded && renderMode === 'rendered' && (
               <div className="logs-toolbar">
                 <span>qlog event</span>
-                <button
-                  className={`btn${qlogNameFilter === 'all' ? ' active' : ''}`}
-                  onClick={() => setQlogNameFilter('all')}
-                >
-                  all
-                </button>
+                <button className={`btn${qlogNameFilter === 'all' ? ' active' : ''}`} onClick={() => setQlogNameFilter('all')}>all</button>
                 {qlogNames.map((name) => (
-                  <button
-                    key={name}
-                    className={`btn${qlogNameFilter === name ? ' active' : ''}`}
-                    onClick={() => setQlogNameFilter(name)}
-                  >
-                    {name}
-                  </button>
+                  <button key={name} className={`btn${qlogNameFilter === name ? ' active' : ''}`} onClick={() => setQlogNameFilter(name)}>{name}</button>
                 ))}
                 <span style={{ color: 'var(--text-muted)', marginLeft: 'auto' }}>
                   {filteredQlogEvents.length}/{qlogEvents.length} shown
@@ -565,21 +536,18 @@ export default function LogsTab({ base, logs, jumpTarget }: Props) {
               </div>
             )}
 
-            {!loaded && !loading && (
-              <div className="empty">
-                load log to view this file
-              </div>
-            )}
+            {!loaded && !loading && <div className="empty">load log to view this file</div>}
 
-            {loaded && renderMode === 'rendered' && active.kind === 'qlog' && (
+            {/* Structured kinds: json, jsonl, lab_events */}
+            {loaded && active.kind === 'json' && renderJson()}
+            {loaded && (active.kind === 'lab_events' || active.kind === 'jsonl') && renderJsonLines()}
+
+            {/* Qlog rendered view */}
+            {loaded && isQlog && renderMode === 'rendered' && (
               <div className="tbl-wrap">
                 <table>
                   <thead>
-                    <tr>
-                      <th>time</th>
-                      <th>name</th>
-                      <th>details</th>
-                    </tr>
+                    <tr><th>time</th><th>name</th><th>details</th></tr>
                   </thead>
                   <tbody>
                     {filteredQlogEvents.map((ev, i) => (
@@ -594,7 +562,8 @@ export default function LogsTab({ base, logs, jumpTarget }: Props) {
               </div>
             )}
 
-            {loaded && (!supportsRendered || renderMode === 'raw') && (
+            {/* Tracing / text / raw log view */}
+            {loaded && !isStructured && !(isQlog && renderMode === 'rendered') && (
               <div className="logs-content" ref={contentRef}>
                 {filteredLines.map(({ line, origIdx }, i) => {
                   const isSearchHit = searchMatches.includes(i)

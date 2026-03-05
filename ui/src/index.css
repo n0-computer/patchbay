@@ -641,7 +641,7 @@ tbody td {
     font-style: italic;
 }
 
-/* ── Events tab ── */
+/* ── Events / JSONL table ── */
 .events-time-cell {
     color: var(--text-muted);
     font-size: 11px;
@@ -650,6 +650,59 @@ tbody td {
 .events-kind {
     color: var(--yellow);
     font-weight: 600;
+}
+
+/* ── JSON tree ── */
+.json-tree-wrap {
+    flex: 1;
+    overflow: auto;
+    padding: 12px;
+    font-size: 12px;
+    line-height: 1.6;
+}
+.jt-indent {
+    padding-left: 20px;
+}
+.jt-row {
+    white-space: nowrap;
+}
+.jt-key {
+    color: var(--accent);
+    font-weight: 600;
+}
+.jt-colon {
+    color: var(--text-muted);
+}
+.jt-str {
+    color: var(--green);
+}
+.jt-num {
+    color: var(--blue);
+}
+.jt-bool {
+    color: var(--yellow);
+}
+.jt-null {
+    color: var(--text-muted);
+    font-style: italic;
+}
+.jt-brace {
+    color: var(--text-muted);
+}
+.jt-comma {
+    color: var(--text-muted);
+}
+.jt-toggle {
+    cursor: pointer;
+}
+.jt-toggle:hover {
+    opacity: 0.8;
+}
+.jt-ellipsis {
+    color: var(--text-muted);
+    font-style: italic;
+    margin: 0 4px;
+    font-size: 11px;
 }
 
 /* ── Misc ── */
