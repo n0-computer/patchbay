@@ -15,6 +15,9 @@ pub const STATE_JSON_TMP: &str = "state.json.tmp";
 /// Per-node full tracing log suffix.
 pub const TRACING_JSONL_EXT: &str = "tracing.jsonl";
 
+/// Per-node human-readable ANSI tracing log suffix.
+pub const TRACING_LOG_EXT: &str = "tracing.log";
+
 /// Per-node extracted events suffix.
 pub const EVENTS_JSONL_EXT: &str = "events.jsonl";
 

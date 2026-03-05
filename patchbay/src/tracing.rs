@@ -9,8 +9,9 @@
 //! but no such span exists!") that occurs when multiple `Registry` instances
 //! coexist and spans cross thread/subscriber boundaries.
 //!
-//! When a `run_dir` is provided, two files are written:
+//! When a `run_dir` is provided, three files are written:
 //! - `{prefix}.tracing.jsonl` — all events as JSON (level-filtered)
+//! - `{prefix}.tracing.log`  — same events as human-readable ANSI text
 //! - `{prefix}.events.jsonl` — only `_events::` targets as simple NDJSON
 
 use std::{
@@ -55,6 +56,112 @@ impl Write for LazyFile {
         } else {
             Ok(())
         }
+    }
+}
+
+// ── ANSI formatting (matches tracing-subscriber's default fmt output) ────────
+
+/// Format a JSON tracing log line as human-readable ANSI text.
+///
+/// Produces output matching `tracing_subscriber::fmt()` default format with ANSI:
+/// ```text
+/// 2026-03-03T14:30:00.123456Z  INFO outer{x=1}:inner{y="hi"}: my_crate::mod: hello world count=42
+/// ```
+pub(crate) fn format_json_as_ansi(line: &str, out: &mut impl Write) -> std::io::Result<()> {
+    let v: serde_json::Value = match serde_json::from_str(line) {
+        Ok(v) => v,
+        Err(_) => return writeln!(out, "{line}"),
+    };
+
+    let timestamp = v["timestamp"].as_str().unwrap_or("");
+    let level = v["level"].as_str().unwrap_or("INFO");
+    let target = v["target"].as_str().unwrap_or("");
+    let message = v["fields"]["message"].as_str().unwrap_or("");
+
+    let (level_on, level_off) = ansi_for_level(level);
+
+    // timestamp (dim)
+    write!(out, "\x1b[2m{timestamp}\x1b[0m")?;
+
+    // level (right-padded to 5, colored)
+    write!(out, " {level_on}{level:>5}{level_off}")?;
+
+    // spans — each: bold_name bold_{ italic_key dim_= value bold_} dim_:
+    if let Some(spans) = v["spans"].as_array() {
+        for (si, span) in spans.iter().enumerate() {
+            let name = span["name"].as_str().unwrap_or("?");
+            // First span gets a leading space; subsequent spans follow the dim ':'
+            if si == 0 {
+                write!(out, " ")?;
+            }
+            write!(out, "\x1b[1m{name}\x1b[0m")?;
+            if let Some(obj) = span.as_object() {
+                let fields: Vec<_> = obj.iter().filter(|(k, _)| *k != "name").collect();
+                if !fields.is_empty() {
+                    write!(out, "\x1b[1m{{\x1b[0m")?;
+                    for (i, (k, v)) in fields.iter().enumerate() {
+                        if i > 0 {
+                            write!(out, " ")?;
+                        }
+                        write!(
+                            out,
+                            "\x1b[3m{k}\x1b[0m\x1b[2m=\x1b[0m{}",
+                            format_field_value(v)
+                        )?;
+                    }
+                    write!(out, "\x1b[1m}}\x1b[0m")?;
+                }
+            }
+            write!(out, "\x1b[2m:\x1b[0m")?;
+        }
+    }
+
+    // target (dim) + colon
+    if !target.is_empty() {
+        write!(out, " \x1b[2m{target}\x1b[0m\x1b[2m:\x1b[0m")?;
+    }
+
+    // message
+    if !message.is_empty() {
+        write!(out, " {message}")?;
+    }
+
+    // extra fields — each: italic_name dim_= value
+    if let Some(obj) = v["fields"].as_object() {
+        for (k, v) in obj {
+            if k == "message" {
+                continue;
+            }
+            write!(
+                out,
+                " \x1b[3m{k}\x1b[0m\x1b[2m=\x1b[0m{}",
+                format_field_value(v)
+            )?;
+        }
+    }
+
+    writeln!(out)
+}
+
+fn ansi_for_level(level: &str) -> (&'static str, &'static str) {
+    match level.to_uppercase().as_str() {
+        "ERROR" => ("\x1b[31m", "\x1b[0m"),
+        "WARN" => ("\x1b[33m", "\x1b[0m"),
+        "INFO" => ("\x1b[32m", "\x1b[0m"),
+        "DEBUG" => ("\x1b[34m", "\x1b[0m"),
+        "TRACE" => ("\x1b[35m", "\x1b[0m"),
+        _ => ("\x1b[0m", "\x1b[0m"),
+    }
+}
+
+/// Format a JSON value for ANSI output — preserving quotes on strings.
+fn format_field_value(v: &serde_json::Value) -> String {
+    match v {
+        serde_json::Value::String(s) => format!("\"{s}\""),
+        serde_json::Value::Number(n) => n.to_string(),
+        serde_json::Value::Bool(b) => b.to_string(),
+        serde_json::Value::Null => "null".to_string(),
+        other => other.to_string(),
     }
 }
 
@@ -142,6 +249,8 @@ struct NsWriterSubscriber {
     inner: tracing::Dispatch,
     /// JSON tracing log writer (all events above file_level).
     tracing_writer: Mutex<LazyFile>,
+    /// Human-readable ANSI tracing log writer.
+    ansi_writer: Mutex<LazyFile>,
     /// Extracted `_events::` NDJSON writer.
     events_writer: Mutex<LazyFile>,
     /// Target+level filter for the tracing file (from PATCHBAY_LOG / RUST_LOG).
@@ -332,9 +441,14 @@ impl NsWriterSubscriber {
                     ),
                 );
             }
+            let json_line = serde_json::to_string(&obj).unwrap_or_default();
             if let Ok(mut w) = self.tracing_writer.lock() {
-                let _ = serde_json::to_writer(&mut *w, &obj);
+                let _ = w.write_all(json_line.as_bytes());
                 let _ = w.write_all(b"\n");
+                let _ = w.flush();
+            }
+            if let Ok(mut w) = self.ansi_writer.lock() {
+                let _ = format_json_as_ansi(&json_line, &mut *w);
                 let _ = w.flush();
             }
         }
@@ -433,6 +547,7 @@ pub(crate) fn install_namespace_subscriber(
     let _ = std::fs::create_dir_all(run_dir);
 
     let tracing_path = run_dir.join(format!("{log_prefix}.{}", consts::TRACING_JSONL_EXT));
+    let ansi_path = run_dir.join(format!("{log_prefix}.{}", consts::TRACING_LOG_EXT));
     let events_path = run_dir.join(format!("{log_prefix}.{}", consts::EVENTS_JSONL_EXT));
 
     let file_filter_str = std::env::var("PATCHBAY_LOG")
@@ -449,10 +564,116 @@ pub(crate) fn install_namespace_subscriber(
     let subscriber = NsWriterSubscriber {
         inner,
         tracing_writer: Mutex::new(LazyFile::new(tracing_path)),
+        ansi_writer: Mutex::new(LazyFile::new(ansi_path)),
         events_writer: Mutex::new(LazyFile::new(events_path)),
         file_filter,
         span_state: Mutex::new(SpanState::default()),
     };
 
     Some(tracing::subscriber::set_default(subscriber))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Mutex as StdMutex};
+
+    use tracing_subscriber::prelude::*;
+
+    use super::*;
+
+    /// Shared buffer writer for capturing tracing output.
+    #[derive(Clone)]
+    struct BufWriter(Arc<StdMutex<Vec<u8>>>);
+
+    impl BufWriter {
+        fn new() -> Self {
+            Self(Arc::new(StdMutex::new(Vec::new())))
+        }
+        fn contents(&self) -> String {
+            let buf = self.0.lock().unwrap();
+            String::from_utf8(buf.clone()).unwrap()
+        }
+    }
+
+    impl Write for BufWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for BufWriter {
+        type Writer = BufWriter;
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    /// Replace timestamp digits with 'X' for comparison.
+    fn mask_timestamp(line: &str) -> String {
+        // Timestamps look like: 2026-03-05T12:34:56.123456Z
+        // Replace all digits with X for fuzzy comparison.
+        let mut out = String::with_capacity(line.len());
+        let mut in_timestamp = true;
+        for (i, ch) in line.chars().enumerate() {
+            if in_timestamp && ch.is_ascii_digit() {
+                out.push('X');
+            } else if i > 0 && ch == 'Z' && in_timestamp {
+                out.push(ch);
+                in_timestamp = false;
+            } else {
+                out.push(ch);
+            }
+        }
+        out
+    }
+
+    /// Verify that `format_json_as_ansi` produces output matching
+    /// `tracing_subscriber::fmt()` default format for an event with
+    /// nested spans, a message, and extra fields.
+    #[test]
+    fn format_json_as_ansi_matches_tracing_subscriber_fmt() {
+        // 1. Capture tracing-subscriber's default fmt output.
+        let buf = BufWriter::new();
+        let subscriber = tracing_subscriber::registry().with(
+            tracing_subscriber::fmt::layer()
+                .with_ansi(true)
+                .with_writer(buf.clone()),
+        );
+        tracing::subscriber::with_default(subscriber, || {
+            let _outer = tracing::info_span!("outer", x = 1).entered();
+            let _inner = tracing::info_span!("inner", y = "hi").entered();
+            tracing::info!(count = 42, "hello world");
+        });
+        let reference = buf.contents();
+
+        // 2. Build the equivalent JSON (as our NsWriterSubscriber would produce).
+        let json = serde_json::json!({
+            "timestamp": "2026-03-05T12:00:00.000000Z",
+            "level": "INFO",
+            "fields": { "message": "hello world", "count": 42 },
+            "target": "patchbay::ns_tracing::tests",
+            "span": { "name": "inner", "y": "hi" },
+            "spans": [
+                { "name": "outer", "x": 1 },
+                { "name": "inner", "y": "hi" },
+            ]
+        });
+        let json_str = serde_json::to_string(&json).unwrap();
+        let mut our_output = Vec::new();
+        format_json_as_ansi(&json_str, &mut our_output).unwrap();
+        let ours = String::from_utf8(our_output).unwrap();
+
+        // 3. Mask timestamps (digits differ) and compare.
+        let ref_masked = mask_timestamp(reference.trim_end());
+        let our_masked = mask_timestamp(ours.trim_end());
+
+        assert_eq!(
+            ref_masked, our_masked,
+            "\n--- reference (tracing-subscriber fmt) ---\n{reference}\n--- ours (format_json_as_ansi) ---\n{ours}"
+        );
+    }
 }

@@ -26,7 +26,7 @@ tokio-util = "0.7"
 toml = "0.8"
 tracing = "0.1"
 tracing-core = "0.1"
-tracing-subscriber = { version = "0.3", default-features = false, features = ["env-filter"] }
+tracing-subscriber = { version = "0.3", default-features = false, features = ["env-filter", "fmt", "ansi"] }
 
 [dev-dependencies]
 ctor = "0.2"

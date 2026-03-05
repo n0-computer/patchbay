@@ -1,6 +1,5 @@
 //! Runs the `patchbay` CLI entrypoint.
 
-mod fmt_log;
 mod sim;
 
 use std::{
@@ -123,16 +122,6 @@ enum Command {
         #[arg(long, default_value = ".patchbay-work")]
         work_dir: PathBuf,
     },
-    /// Format JSON log files as human-readable ANSI output.
-    ///
-    /// Reads from stdin if no file is specified.
-    FmtLog {
-        /// Path to a JSON log file ({name}.log). Reads stdin if omitted.
-        file: Option<PathBuf>,
-        /// Follow the file for new lines (like tail -f). Ignored for stdin.
-        #[arg(short = 'f', long, default_value_t = false)]
-        follow: bool,
-    },
     /// Run a command inside a node namespace from an inspect session.
     RunIn {
         /// Device or router name from the inspected topology.
@@ -240,7 +229,6 @@ async fn tokio_main() -> Result<()> {
             }
             patchbay_server::serve(dir, &bind).await
         }
-        Command::FmtLog { file, follow } => fmt_log::run(file.as_deref(), follow),
         Command::Cleanup { prefixes } => cleanup_command(prefixes),
         Command::Inspect { input, work_dir } => inspect_command(input, work_dir).await,
         Command::RunIn {
