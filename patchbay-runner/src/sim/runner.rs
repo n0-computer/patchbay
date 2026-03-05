@@ -725,7 +725,9 @@ async fn execute_single_sim(
     let setup = setup_topology_summary(&setup_base, Some(&topo));
 
     // ── Build lab ────────────────────────────────────────────────────────
-    let opts = LabOpts::default().outdir_from_env().label(sim_name);
+    let opts = LabOpts::default()
+        .outdir(patchbay::OutDir::Exact(run_work_dir.to_path_buf()))
+        .label(sim_name);
     let lab = Lab::from_config_with_opts(topo, opts)
         .await
         .context("step=configure-lab")?;

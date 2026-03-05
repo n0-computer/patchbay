@@ -23,7 +23,7 @@ test('runner sim produces viewable UI output', async ({ page }) => {
       {
         cwd: REPO_ROOT,
         stdio: 'inherit',
-        env: { ...process.env, PATCHBAY_OUTDIR: workDir },
+        env: process.env,
         timeout: 2 * 60 * 1000,
       },
     )

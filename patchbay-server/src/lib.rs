@@ -67,30 +67,79 @@ pub struct RunInfo {
     pub status: Option<String>,
 }
 
+/// Maximum directory depth to scan for run directories.
+const MAX_SCAN_DEPTH: usize = 3;
+
 /// Lists Lab output directories under `base`, newest-first.
+///
+/// If `base` itself contains `events.jsonl`, it is served as the sole run.
+/// Otherwise, scans up to [`MAX_SCAN_DEPTH`] levels deep for directories
+/// that contain `events.jsonl`.
 pub fn discover_runs(base: &Path) -> anyhow::Result<Vec<RunInfo>> {
+    // If the base dir itself is a run, serve only that.
+    if base.join(EVENTS_JSONL).exists() {
+        let name = base
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| ".".to_string());
+        let (label, status) = read_run_metadata(base);
+        return Ok(vec![RunInfo {
+            name,
+            path: base.to_path_buf(),
+            label,
+            status,
+        }]);
+    }
+
     let mut runs = Vec::new();
-    let entries = fs::read_dir(base).map_err(|e| anyhow::anyhow!("read outdir base: {e}"))?;
+    scan_runs_recursive(base, base, 1, &mut runs)?;
+    runs.sort_by(|a, b| b.name.cmp(&a.name));
+    Ok(runs)
+}
+
+fn scan_runs_recursive(
+    root: &Path,
+    dir: &Path,
+    depth: usize,
+    runs: &mut Vec<RunInfo>,
+) -> anyhow::Result<()> {
+    if depth > MAX_SCAN_DEPTH {
+        return Ok(());
+    }
+    let entries = match fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return Ok(()),
+    };
     for entry in entries {
         let entry = entry?;
+        // Skip symlinks (e.g. runner's "latest" symlink) to avoid duplicates.
+        if entry.file_type()?.is_symlink() {
+            continue;
+        }
         let path = entry.path();
         if !path.is_dir() {
             continue;
         }
-        if !path.join(EVENTS_JSONL).exists() {
-            continue;
+        if path.join(EVENTS_JSONL).exists() {
+            // Use the relative path from root as the run name so nested
+            // runs are addressable via the API (e.g. "sim-20260305/ping-e2e").
+            let name = path
+                .strip_prefix(root)
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .into_owned();
+            let (label, status) = read_run_metadata(&path);
+            runs.push(RunInfo {
+                name,
+                path,
+                label,
+                status,
+            });
+        } else {
+            scan_runs_recursive(root, &path, depth + 1, runs)?;
         }
-        let name = entry.file_name().to_string_lossy().into_owned();
-        let (label, status) = read_run_metadata(&path);
-        runs.push(RunInfo {
-            name,
-            path,
-            label,
-            status,
-        });
     }
-    runs.sort_by(|a, b| b.name.cmp(&a.name));
-    Ok(runs)
+    Ok(())
 }
 
 /// Minimal subset of `state.json` needed for run listing.
@@ -187,9 +236,19 @@ pub async fn serve(base: PathBuf, bind: &str) -> anyhow::Result<()> {
 /// Returns `None` if the resolved path escapes `base`.
 ///
 /// Canonicalizes both paths to defeat symlink traversal.
+/// Handles both nested runs (`base/{name}`) and single-run mode where
+/// `base` itself is the run directory (name matches base's dirname).
 fn safe_run_dir(base: &Path, run: &str) -> Option<PathBuf> {
     if run.contains("..") || run.starts_with('/') {
         return None;
+    }
+    // Single-run mode: base itself contains events.jsonl and run name
+    // matches the base directory name.
+    if base.join(EVENTS_JSONL).exists() {
+        let base_name = base.file_name()?.to_string_lossy();
+        if run == base_name || run == "." {
+            return base.canonicalize().ok();
+        }
     }
     let p = base.join(run);
     let canonical = p.canonicalize().ok()?;

@@ -6,6 +6,10 @@ Higher-level suggestions that were not applied directly.
 
 ## Open
 
+* server crate: scan dir recursively. if events.jsonl found in current dir then serve only that, otherwise scan up to 3 layers deep and use all dirs. wanna run this in testdir (see testdir crate, 
+
+* workdir vs outdir, clarify relation. runner-sim e2e test sets both, this should not be needed
+
 * add RegionLink::is_empty and same for link conditions to remove manual > 0 checks at callsites. break region link should be async. never use run_closure_in with Command if you can easily make the call site async, use async command then to not block calling thread on sync cmds
 
 #### IPv6 link-local / RA-driven provisioning branch (dev)

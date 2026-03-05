@@ -280,7 +280,7 @@ pub struct Lab {
 /// # async fn main() -> anyhow::Result<()> {
 /// let lab = Lab::with_opts(
 ///     LabOpts::default()
-///         .outdir("/tmp/patchbay-out")
+///         .outdir(OutDir::Nested("/tmp/patchbay-out".into()))
 ///         .label("my-test"),
 /// )
 /// .await?;
@@ -289,10 +289,19 @@ pub struct Lab {
 /// ```
 #[derive(Default)]
 pub struct LabOpts {
-    outdir: Option<PathBuf>,
+    outdir: Option<OutDir>,
     label: Option<String>,
     ipv6_dad_mode: Ipv6DadMode,
     ipv6_provisioning_mode: Ipv6ProvisioningMode,
+}
+
+/// Where the lab writes event logs and state files.
+#[derive(Clone, Debug)]
+pub enum OutDir {
+    /// Parent directory — lab creates a timestamped subdirectory inside it.
+    Nested(PathBuf),
+    /// Exact directory — lab writes directly here, no subdirectory created.
+    Exact(PathBuf),
 }
 
 /// Controls IPv6 duplicate address detection behavior in created namespaces.
@@ -350,8 +359,8 @@ impl Ipv6Profile {
 
 impl LabOpts {
     /// Sets the output directory for event log and state files.
-    pub fn outdir(mut self, path: impl Into<PathBuf>) -> Self {
-        self.outdir = Some(path.into());
+    pub fn outdir(mut self, outdir: OutDir) -> Self {
+        self.outdir = Some(outdir);
         self
     }
 
@@ -361,11 +370,11 @@ impl LabOpts {
         self
     }
 
-    /// Reads the output directory from the `PATCHBAY_OUTDIR` environment variable,
-    /// if set. Does nothing if the variable is absent.
+    /// Reads the output directory from the `PATCHBAY_OUTDIR` environment variable
+    /// as [`OutDir::Nested`]. Does nothing if the variable is absent.
     pub fn outdir_from_env(mut self) -> Self {
         if let Ok(v) = std::env::var("PATCHBAY_OUTDIR") {
-            self.outdir = Some(v.into());
+            self.outdir = Some(OutDir::Nested(v.into()));
         }
         self
     }
@@ -437,13 +446,16 @@ impl Lab {
         .context("failed to create DNS entries directory")?;
 
         // Compute run_dir before constructing LabInner (needed for writer + tracing).
-        let run_dir = opts.outdir.as_ref().map(|base| {
-            let label_or_prefix = label
-                .as_ref()
-                .map(|s| s.to_string())
-                .unwrap_or_else(|| prefix.clone());
-            let ts = chrono::Local::now().format("%Y%m%d_%H%M%S");
-            base.join(format!("{ts}-{label_or_prefix}"))
+        let run_dir = opts.outdir.map(|od| match od {
+            OutDir::Exact(p) => p,
+            OutDir::Nested(base) => {
+                let label_or_prefix = label
+                    .as_ref()
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| prefix.clone());
+                let ts = chrono::Local::now().format("%Y%m%d_%H%M%S");
+                base.join(format!("{ts}-{label_or_prefix}"))
+            }
         });
 
         let mut netns_mgr = crate::netns::NetnsManager::new();
