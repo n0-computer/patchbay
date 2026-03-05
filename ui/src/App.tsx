@@ -123,6 +123,7 @@ export default function App() {
   const [labState, setLabState] = useState<LabState | null>(null)
   const [labEvents, setLabEvents] = useState<LabEvent[]>([])
   const esRef = useRef<EventSource | null>(null)
+  const runsEsRef = useRef<EventSource | null>(null)
 
   // Log files
   const [logList, setLogList] = useState<LogEntry[]>([])
@@ -152,7 +153,11 @@ export default function App() {
   useEffect(() => {
     refreshRuns()
     const es = subscribeRuns(() => refreshRuns())
-    return () => es.close()
+    runsEsRef.current = es
+    return () => {
+      es.close()
+      runsEsRef.current = null
+    }
   }, [refreshRuns])
 
   // ── Load run data when selection changes ──
@@ -195,6 +200,19 @@ export default function App() {
       esRef.current = null
     }
   }, [selectedRun])
+
+  // Close SSE connections on page unload/refresh.
+  // Firefox limits HTTP/1.1 to 6 connections per domain — stale SSE
+  // connections from a previous page load can exhaust the pool and block
+  // all subsequent fetch requests.
+  useEffect(() => {
+    const cleanup = () => {
+      runsEsRef.current?.close()
+      esRef.current?.close()
+    }
+    window.addEventListener('beforeunload', cleanup)
+    return () => window.removeEventListener('beforeunload', cleanup)
+  }, [])
 
   // ── Callbacks ──
 

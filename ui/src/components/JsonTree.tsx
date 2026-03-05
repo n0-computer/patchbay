@@ -68,7 +68,7 @@ function JsonObject({ obj, depth, defaultDepth }: { obj: Record<string, unknown>
       <div className="jt-indent">
         {entries.map(([key, val], i) => (
           <div key={key} className="jt-row">
-            <span className="jt-key jt-toggle" onClick={toggle}>"{key}"</span>
+            <span className="jt-key">"{key}"</span>
             <span className="jt-colon">: </span>
             <JsonValue value={val} depth={depth + 1} defaultDepth={defaultDepth} />
             {i < entries.length - 1 && <span className="jt-comma">,</span>}
