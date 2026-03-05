@@ -121,13 +121,15 @@ pub(crate) async fn execute_step(state: &mut SimState, step: &Step) -> Result<()
             ..
         } => {
             let cmd_parts = interpolate_with_captures(cmd, &state.env, &state.captures, state.deadline)?;
+            let sid = id.as_deref().unwrap_or(device);
             tracing::info!(
+                target: "patchbay::_events::CommandStarted",
                 device,
+                step_id = sid,
                 cmd = %shell_join(&cmd_parts),
-                "sim: run command"
             );
             let mut cmd = prepare_cmd(&cmd_parts, env, state)?;
-            let logs = node_stdio_log_paths(&state.work_dir, device)?;
+            let logs = node_stdio_log_paths(&state.work_dir, device, sid);
             cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
             let mut child = state
                 .lab
@@ -160,13 +162,12 @@ pub(crate) async fn execute_step(state: &mut SimState, step: &Step) -> Result<()
             drop(tx); // So the channel closes when pumps finish.
 
             // Spawn capture reader.
-            let sid = id.clone().unwrap_or_default();
             let cap_reader = if !captures.is_empty() {
                 Some(spawn_capture_reader(
                     rx,
                     parser.clone(),
                     captures.clone(),
-                    sid.clone(),
+                    sid.to_string(),
                     state.captures.clone(),
                 ))
             } else {
@@ -181,13 +182,20 @@ pub(crate) async fn execute_step(state: &mut SimState, step: &Step) -> Result<()
                 join_pump(h, "run capture reader")?;
             }
 
+            tracing::info!(
+                target: "patchbay::_events::CommandCompleted",
+                device,
+                step_id = sid,
+                exit_code = status.code().unwrap_or(-1),
+            );
+
             if !status.success() {
                 bail!("'run' on '{}' failed: {:?}", device, status);
             }
 
             // Collect results from captures.
             if let Some(step_results) = results {
-                if let Some(record) = collect_step_results(&sid, step_results, &state.captures) {
+                if let Some(record) = collect_step_results(sid, step_results, &state.captures) {
                     state.step_results.push(record);
                 }
             }
@@ -213,13 +221,13 @@ pub(crate) async fn execute_step(state: &mut SimState, step: &Step) -> Result<()
                 state.deadline,
             )?;
             tracing::info!(
-                id,
+                target: "patchbay::_events::CommandStarted",
                 device,
+                step_id = id.as_str(),
                 cmd = %shell_join(&cmd_parts_final),
-                "sim: spawn command"
             );
             let mut cmd = prepare_cmd(&cmd_parts_final, env, state)?;
-            let logs = node_stdio_log_paths(&state.work_dir, device)?;
+            let logs = node_stdio_log_paths(&state.work_dir, device, id);
 
             let needs_pipes = !captures.is_empty() || state.verbose;
             if needs_pipes {
@@ -345,6 +353,7 @@ pub(crate) async fn execute_step(state: &mut SimState, step: &Step) -> Result<()
             }
 
             if state.spawned.contains_key(id) {
+                let exit_code;
                 {
                     let sp = state
                         .spawned
@@ -354,6 +363,7 @@ pub(crate) async fn execute_step(state: &mut SimState, step: &Step) -> Result<()
                     loop {
                         match sp.child.try_wait().context("try_wait")? {
                             Some(status) => {
+                                exit_code = status.code().unwrap_or(-1);
                                 if !status.success() {
                                     tracing::warn!(id, ?status, "spawned process exited non-zero");
                                 }
@@ -368,6 +378,11 @@ pub(crate) async fn execute_step(state: &mut SimState, step: &Step) -> Result<()
                         }
                     }
                 }
+                tracing::info!(
+                    target: "patchbay::_events::CommandCompleted",
+                    step_id = id.as_str(),
+                    exit_code,
+                );
                 if let Some(sp) = state.spawned.get_mut(id) {
                     if let Some(h) = sp.stdout_pump.take() {
                         join_pump(h, "spawn stdout pump")?;
@@ -965,16 +980,13 @@ struct NodeStdioLogs {
     stderr: PathBuf,
 }
 
-fn node_stdio_log_paths(work_dir: &Path, node: &str) -> Result<NodeStdioLogs> {
-    let node_dir = work_dir
-        .join("nodes")
-        .join(patchbay::util::sanitize_for_path_component(node));
-    std::fs::create_dir_all(&node_dir)
-        .with_context(|| format!("create node logs dir {}", node_dir.display()))?;
-    Ok(NodeStdioLogs {
-        stdout: node_dir.join("stdout.log"),
-        stderr: node_dir.join("stderr.log"),
-    })
+fn node_stdio_log_paths(work_dir: &Path, device: &str, step_id: &str) -> NodeStdioLogs {
+    let safe_device = patchbay::util::sanitize_for_path_component(device);
+    let safe_id = patchbay::util::sanitize_for_path_component(step_id);
+    NodeStdioLogs {
+        stdout: work_dir.join(format!("device.{safe_device}.{safe_id}.stdout.log")),
+        stderr: work_dir.join(format!("device.{safe_device}.{safe_id}.stderr.log")),
+    }
 }
 
 #[cfg(test)]

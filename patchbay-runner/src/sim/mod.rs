@@ -282,3 +282,4 @@ pub struct CaptureSpec {
 fn pipe_default() -> String {
     "stdout".to_string()
 }
+

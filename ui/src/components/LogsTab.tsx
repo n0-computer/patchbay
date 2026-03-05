@@ -442,7 +442,7 @@ export default function LogsTab({ base, logs, jumpTarget }: Props) {
                 onClick={() => setActive(f)}
                 title={f.path}
               >
-                {f.path.split('/').pop()}
+                {f.path.split('/').pop()?.replace(/^device\.[^.]+\./, '')}
                 <span style={{ marginLeft: 6, color: 'var(--text-muted)' }}>[{f.kind}]</span>
               </div>
             ))}
@@ -457,6 +457,7 @@ export default function LogsTab({ base, logs, jumpTarget }: Props) {
           <>
             <div className="logs-toolbar">
               <span>{active.path}</span>
+              <a className="btn" href={`${base}${active.path}`} download title="download file">dl</a>
               {loaded && !isStructured && (
                 <span style={{ color: 'var(--text-muted)' }}>
                   {formatBytes(fileSize)} · {parsed.length} lines

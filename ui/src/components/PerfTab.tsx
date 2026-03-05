@@ -5,6 +5,16 @@ function fmt(v: number | undefined | null, decimals = 1, suffix = '') {
   return <>{v.toFixed(decimals)}{suffix}</>
 }
 
+function humanBytes(raw: string | undefined | null): string {
+  if (raw == null) return '—'
+  const b = parseFloat(raw)
+  if (isNaN(b)) return raw
+  if (b >= 1e9) return (b / 1e9).toFixed(2) + ' GB'
+  if (b >= 1e6) return (b / 1e6).toFixed(2) + ' MB'
+  if (b >= 1e3) return (b / 1e3).toFixed(1) + ' KB'
+  return b + ' B'
+}
+
 function elapsedS(dur: string | undefined): number | null {
   if (!dur) return null
   const trimmed = dur.trim()
@@ -26,7 +36,7 @@ function hasAny(steps: StepResult[], field: keyof StepResult): boolean {
   return steps.some((s) => s[field] != null && s[field] !== '')
 }
 
-function StepsTable({ steps, simColumn }: { steps: { sim?: string; step: StepResult }[]; simColumn: boolean }) {
+function StepsTable({ steps, simColumn, onSimSelect }: { steps: { sim?: string; step: StepResult }[]; simColumn: boolean; onSimSelect?: (sim: string) => void }) {
   const allSteps = steps.map((s) => s.step)
   const showDown = hasAny(allSteps, 'down_bytes')
   const showUp = hasAny(allSteps, 'up_bytes')
@@ -53,14 +63,14 @@ function StepsTable({ steps, simColumn }: { steps: { sim?: string; step: StepRes
         <tbody>
           {steps.map((row, i) => (
             <tr key={i}>
-              {simColumn && <td>{row.sim}</td>}
+              {simColumn && <td>{onSimSelect && row.sim ? <a href="#" onClick={(e) => { e.preventDefault(); onSimSelect(row.sim!) }}>{row.sim}</a> : row.sim}</td>}
               <td>{row.step.id}</td>
               {showDown && <td>{fmt(mbS(row.step.down_bytes, row.step.duration), 2)}</td>}
               {showUp && <td>{fmt(mbS(row.step.up_bytes, row.step.duration), 2)}</td>}
               {showLatency && <td>{fmt(row.step.latency_ms ? parseFloat(row.step.latency_ms) : null, 1, ' ms')}</td>}
               {showDuration && <td>{fmt(elapsedS(row.step.duration), 2, 's')}</td>}
-              {showDown && <td>{row.step.down_bytes ?? '—'}</td>}
-              {showUp && <td>{row.step.up_bytes ?? '—'}</td>}
+              {showDown && <td>{humanBytes(row.step.down_bytes)}</td>}
+              {showUp && <td>{humanBytes(row.step.up_bytes)}</td>}
             </tr>
           ))}
         </tbody>
@@ -69,7 +79,7 @@ function StepsTable({ steps, simColumn }: { steps: { sim?: string; step: StepRes
   )
 }
 
-function CombinedSummary({ runs }: { runs: CombinedRunResult[] }) {
+function CombinedSummary({ runs, onSimSelect }: { runs: CombinedRunResult[]; onSimSelect?: (sim: string) => void }) {
   // Group by sim name, compute summary stats per sim
   const bySim = new Map<string, CombinedRunResult[]>()
   for (const run of runs) {
@@ -125,7 +135,7 @@ function CombinedSummary({ runs }: { runs: CombinedRunResult[] }) {
           <tbody>
             {summaryRows.map((r) => (
               <tr key={r.sim}>
-                <td>{r.sim}</td>
+                <td>{onSimSelect ? <a href="#" onClick={(e) => { e.preventDefault(); onSimSelect(r.sim) }}>{r.sim}</a> : r.sim}</td>
                 <td>{r.n}</td>
                 {hasDown && <td>{fmt(r.maxDown, 2)}</td>}
                 {hasUp && <td>{fmt(r.maxUp, 2)}</td>}
@@ -142,9 +152,10 @@ function CombinedSummary({ runs }: { runs: CombinedRunResult[] }) {
 interface PerfTabProps {
   results: SimResults | null
   combined?: CombinedResults | null
+  onSimSelect?: (sim: string) => void
 }
 
-export default function PerfTab({ results, combined }: PerfTabProps) {
+export default function PerfTab({ results, combined, onSimSelect }: PerfTabProps) {
   // Combined / invocation view
   if (combined) {
     const { runs } = combined
@@ -158,10 +169,10 @@ export default function PerfTab({ results, combined }: PerfTabProps) {
 
     return (
       <div className="perf-layout">
-        <CombinedSummary runs={runs} />
+        <CombinedSummary runs={runs} onSimSelect={onSimSelect} />
         <div className="section">
           <div className="section-header">all steps</div>
-          <StepsTable steps={detailRows} simColumn={true} />
+          <StepsTable steps={detailRows} simColumn={true} onSimSelect={onSimSelect} />
         </div>
       </div>
     )

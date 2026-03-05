@@ -436,7 +436,7 @@ export default function App() {
         )}
 
         {tab === 'perf' && isSimView && <PerfTab results={simResults} />}
-        {tab === 'perf' && isInvocationView && <PerfTab results={null} combined={combinedResults} />}
+        {tab === 'perf' && isInvocationView && <PerfTab results={null} combined={combinedResults} onSimSelect={(sim) => setSelection({ kind: 'run', name: sim })} />}
       </div>
     </div>
   )
