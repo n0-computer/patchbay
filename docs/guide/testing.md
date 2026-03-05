@@ -182,6 +182,22 @@ tracing target convention:
 tracing::info!(target: "myapp::_events::ConnectionEstablished", peer = %addr);
 ```
 
+### Reading logs from the terminal
+
+The `fmt-log` command re-renders `.tracing.jsonl` files as human-readable
+ANSI output, matching the familiar `tracing_subscriber` console format:
+
+```bash
+# Print a log file.
+patchbay fmt-log target/testdir-current/tcp_through_nat/device.client.tracing.jsonl
+
+# Pipe from stdin.
+cat device.client.tracing.jsonl | patchbay fmt-log
+
+# Follow a file in real time (like tail -f).
+patchbay fmt-log -f device.client.tracing.jsonl
+```
+
 ## Controlling log output
 
 Per-namespace tracing logs are written to `{kind}.{name}.tracing.jsonl`
