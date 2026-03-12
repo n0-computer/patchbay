@@ -116,7 +116,7 @@ struct NatTestCtx {
     expected_ip: Ipv4Addr,
     r_dc: SocketAddr,
     r_ix: SocketAddr,
-    _reflectors: Vec<core::ReflectorGuard>,
+    _reflectors: Vec<ReflectorGuard>,
 }
 
 struct DualNatLab {
@@ -126,13 +126,13 @@ struct DualNatLab {
     nat_a: Router,
     nat_b: Router,
     reflector: SocketAddr,
-    _reflector_guard: core::ReflectorGuard,
+    _reflector_guard: ReflectorGuard,
 }
 
 // ── Test helper functions ────────────────────────────────────────────
 
 /// TCP probe: connects, reads "OBSERVED <addr>", parses it.
-async fn probe_tcp(target: SocketAddr) -> Result<ObservedAddr> {
+async fn probe_tcp(target: SocketAddr) -> Result<SocketAddr> {
     use tokio::io::AsyncReadExt;
     let timeout = Duration::from_millis(500);
     let mut stream = tokio::time::timeout(timeout, tokio::net::TcpStream::connect(target))
@@ -157,7 +157,7 @@ async fn probe_reflexive_addr(
     bind: BindMode,
     dev_ip: Ipv4Addr,
     reflector: SocketAddr,
-) -> Result<ObservedAddr> {
+) -> Result<SocketAddr> {
     let bind_addr = match bind {
         BindMode::Unspecified => SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0),
         BindMode::SpecificIp => SocketAddr::new(IpAddr::V4(dev_ip), 0),
@@ -178,7 +178,7 @@ async fn probe_reflexive(
     proto: Proto,
     bind: BindMode,
     ctx: &NatTestCtx,
-) -> Result<ObservedAddr> {
+) -> Result<SocketAddr> {
     probe_reflexive_addr(dev, proto, bind, ctx.dev_ip, ctx.r_dc).await
 }
 
@@ -424,7 +424,7 @@ async fn build_single_nat_case(
     SocketAddr,
     SocketAddr,
     Ipv4Addr,
-    Vec<core::ReflectorGuard>,
+    Vec<ReflectorGuard>,
 )> {
     let lab = Lab::new().await?;
     let dc = lab.add_router("dc").build().await?;

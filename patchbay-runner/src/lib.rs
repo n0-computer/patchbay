@@ -4,7 +4,7 @@ pub use patchbay as core;
 pub use patchbay::{
     check_caps,
     config::{LabConfig, RegionConfig, RouterConfig},
-    init_userns, DeviceBuilder, Lab, LinkCondition, Nat, NodeId, ObservedAddr,
+    init_userns, DeviceBuilder, Lab, LinkCondition, Nat, NodeId,
 };
 pub use patchbay_utils::assets::BinaryOverride;
 

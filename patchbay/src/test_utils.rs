@@ -14,13 +14,11 @@ use anyhow::{anyhow, Context, Result};
 use tokio_util::sync::CancellationToken;
 use tracing::debug;
 
-use crate::ObservedAddr;
-
 /// Runs an async UDP reflector. Loops until `cancel` is triggered.
 ///
 /// Binds the socket first, then signals readiness on `bound_tx` so callers
 /// can await confirmation before sending probes.
-pub async fn run_reflector(
+pub(crate) async fn run_reflector(
     bind: SocketAddr,
     cancel: CancellationToken,
     bound_tx: tokio::sync::oneshot::Sender<Result<()>>,
@@ -55,11 +53,11 @@ pub async fn run_reflector(
 /// Assumes the calling thread is already in the target namespace.
 /// Pass `bind` to specify an explicit local address; `None` uses the unspecified
 /// address matching the reflector's address family.
-pub fn probe_udp(
+pub(crate) fn probe_udp(
     reflector: SocketAddr,
     timeout: Duration,
     bind: Option<SocketAddr>,
-) -> Result<ObservedAddr> {
+) -> Result<SocketAddr> {
     let bind_addr = bind.unwrap_or_else(|| {
         let unspecified = if reflector.is_ipv4() {
             IpAddr::V4(Ipv4Addr::UNSPECIFIED)
@@ -92,12 +90,12 @@ pub fn probe_udp(
 }
 
 /// One-shot UDP roundtrip probe. Returns the observed external address.
-pub fn udp_roundtrip(reflector: SocketAddr) -> Result<ObservedAddr> {
+pub(crate) fn udp_roundtrip(reflector: SocketAddr) -> Result<SocketAddr> {
     probe_udp(reflector, Duration::from_secs(2), None)
 }
 
 /// Returns UDP round-trip time to `reflector` (blocking).
-pub fn udp_rtt_sync(reflector: SocketAddr) -> Result<Duration> {
+pub(crate) fn udp_rtt_sync(reflector: SocketAddr) -> Result<Duration> {
     let bind = if reflector.is_ipv4() {
         "0.0.0.0:0"
     } else {
@@ -115,7 +113,7 @@ pub fn udp_rtt_sync(reflector: SocketAddr) -> Result<Duration> {
 /// Async UDP round-trip time measurement.
 ///
 /// Use inside `handle.spawn(|_| async move { udp_rtt(r).await })`.
-pub async fn udp_rtt(reflector: SocketAddr) -> Result<Duration> {
+pub(crate) async fn udp_rtt(reflector: SocketAddr) -> Result<Duration> {
     let bind = SocketAddr::new(
         if reflector.is_ipv4() {
             IpAddr::V4(Ipv4Addr::UNSPECIFIED)
@@ -146,7 +144,7 @@ pub async fn udp_rtt(reflector: SocketAddr) -> Result<Duration> {
 /// Assumes the reflector is already confirmed-bound (via `spawn_reflector`).
 ///
 /// Use inside `handle.spawn(|_| async move { udp_send_recv_count(r, 1000, 64, dur).await })`.
-pub async fn udp_send_recv_count(
+pub(crate) async fn udp_send_recv_count(
     target: SocketAddr,
     total: usize,
     payload: usize,

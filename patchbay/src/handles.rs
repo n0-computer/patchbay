@@ -33,7 +33,7 @@ use crate::{
     },
     event::{IfaceSnapshot, LabEventKind},
     firewall::Firewall,
-    lab::{Ipv6ProvisioningMode, Lab, LinkCondition, ObservedAddr},
+    lab::{Ipv6ProvisioningMode, Lab, LinkCondition},
     nat::{IpSupport, Nat, NatV6Mode},
     netlink::Netlink,
 };
@@ -585,11 +585,11 @@ impl Device {
 
     /// Probes the NAT mapping seen by a reflector from this device.
     ///
-    /// Sends a UDP probe to `reflector` and returns the [`ObservedAddr`] — the
-    /// `ip:port` as seen by the reflector after NAT translation.
+    /// Sends a UDP probe to `reflector` and returns the `ip:port` as seen by
+    /// the reflector after NAT translation.
     ///
     /// The local bind port is deterministic based on the device's [`NodeId`].
-    pub fn probe_udp_mapping(&self, reflector: SocketAddr) -> Result<ObservedAddr> {
+    pub fn probe_udp_mapping(&self, reflector: SocketAddr) -> Result<SocketAddr> {
         let base = 40000u16;
         let port = base + ((self.id.0 % 20000) as u16);
         let unspec = if reflector.is_ipv4() {

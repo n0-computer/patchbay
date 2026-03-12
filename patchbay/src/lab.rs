@@ -1,8 +1,8 @@
-//! High-level lab API: [`Lab`], [`DeviceBuilder`], [`Nat`], [`LinkCondition`], [`ObservedAddr`].
+//! High-level lab API: [`Lab`], [`DeviceBuilder`], [`Nat`], [`LinkCondition`].
 
 use std::{
     collections::HashMap,
-    net::{Ipv4Addr, Ipv6Addr, SocketAddr},
+    net::{Ipv4Addr, Ipv6Addr},
     path::{Path, PathBuf},
     process::Command,
     sync::{
@@ -176,12 +176,6 @@ impl LinkCondition {
         }
     }
 }
-
-/// Observed external address as reported by a STUN-like UDP reflector.
-///
-/// This is the `ip:port` pair that the reflector sees after NAT translation.
-/// Alias for [`SocketAddr`].
-pub type ObservedAddr = SocketAddr;
 
 // ─────────────────────────────────────────────
 // Region
