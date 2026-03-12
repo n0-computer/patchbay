@@ -479,9 +479,7 @@ fn expand_sim_inputs(inputs: &[PathBuf]) -> Result<Vec<PathBuf>> {
 
 /// Recursively collect `*.toml` files from a directory.
 fn collect_toml_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
-    for ent in
-        std::fs::read_dir(dir).with_context(|| format!("read sim dir {}", dir.display()))?
-    {
+    for ent in std::fs::read_dir(dir).with_context(|| format!("read sim dir {}", dir.display()))? {
         let ent = ent?;
         let path = ent.path();
         if path.is_dir() {
@@ -713,6 +711,7 @@ fn create_unique_dir(parent: &Path, base: &str) -> Result<PathBuf> {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn execute_single_sim(
     sim_path: &Path,
     run_work_dir: &Path,
@@ -1979,7 +1978,7 @@ timeout = "3600s"
             vec![],
             false,
             None,
-            true, // no_build
+            true,                         // no_build
             Some(Duration::from_secs(3)), // 3s timeout
         )
         .await;

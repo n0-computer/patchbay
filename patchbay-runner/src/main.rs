@@ -248,8 +248,8 @@ fn resolve_sim_args(sims: Vec<PathBuf>, project_root: &Path) -> Result<Vec<PathB
         if path.is_file() {
             let text = std::fs::read_to_string(path)
                 .with_context(|| format!("read {}", path.display()))?;
-            let cfg: PatchbayConfig = toml::from_str(&text)
-                .with_context(|| format!("parse {}", path.display()))?;
+            let cfg: PatchbayConfig =
+                toml::from_str(&text).with_context(|| format!("parse {}", path.display()))?;
             let sims_dir = project_root.join(&cfg.simulations);
             if !sims_dir.exists() {
                 bail!(
@@ -262,7 +262,10 @@ fn resolve_sim_args(sims: Vec<PathBuf>, project_root: &Path) -> Result<Vec<PathB
             return Ok(vec![sims_dir]);
         }
     }
-    bail!("no sim files specified and no patchbay.toml found in {}", project_root.display())
+    bail!(
+        "no sim files specified and no patchbay.toml found in {}",
+        project_root.display()
+    )
 }
 
 #[derive(Deserialize)]

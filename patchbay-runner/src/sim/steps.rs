@@ -91,16 +91,13 @@ pub(crate) async fn execute_step(state: &mut SimState, step: &Step) -> Result<()
             capture = %key,
             "sim: waiting for required capture"
         );
-        state
-            .captures
-            .wait(key, capture_timeout)
-            .with_context(|| {
-                format!(
-                    "step '{}': requires '{}'",
-                    step_id(step).unwrap_or("?"),
-                    key
-                )
-            })?;
+        state.captures.wait(key, capture_timeout).with_context(|| {
+            format!(
+                "step '{}': requires '{}'",
+                step_id(step).unwrap_or("?"),
+                key
+            )
+        })?;
         tracing::debug!(
             step_id = ?step_id(step),
             capture = %key,
@@ -120,7 +117,8 @@ pub(crate) async fn execute_step(state: &mut SimState, step: &Step) -> Result<()
             results,
             ..
         } => {
-            let cmd_parts = interpolate_with_captures(cmd, &state.env, &state.captures, state.deadline)?;
+            let cmd_parts =
+                interpolate_with_captures(cmd, &state.env, &state.captures, state.deadline)?;
             let sid = id.as_deref().unwrap_or(device);
             tracing::info!(
                 target: "patchbay::_events::CommandStarted",
