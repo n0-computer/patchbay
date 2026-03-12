@@ -65,9 +65,12 @@ test('devtools ui shows all views', async ({ page }) => {
     await expect(page.getByText('device_added').first()).toBeVisible()
 
     // Step 6: Verify tracing log files are listed in the sidebar.
-    await expect(page.getByText('device.client.tracing.jsonl').first()).toBeVisible({ timeout: 5_000 })
-    await expect(page.getByText('device.server.tracing.jsonl').first()).toBeVisible()
-    await page.getByText('device.client.tracing.jsonl').first().click()
+    // The UI groups files by node and strips the "device.<name>." prefix.
+    const clientGroup = page.locator('.node-group', { hasText: 'client' })
+    const serverGroup = page.locator('.node-group', { hasText: 'server' })
+    await expect(clientGroup.getByText('tracing.jsonl').first()).toBeVisible({ timeout: 5_000 })
+    await expect(serverGroup.getByText('tracing.jsonl').first()).toBeVisible()
+    await clientGroup.getByText('tracing.jsonl').first().click()
 
     // Verify rendered tracing log lines have all expected parts.
     const logEntry = page.locator('.log-entry').first()
@@ -82,8 +85,8 @@ test('devtools ui shows all views', async ({ page }) => {
 
     // Step 7: Switch to the timeline tab and verify events.
     await page.getByRole('button', { name: 'timeline' }).click()
-    await expect(page.getByText('TcpRoundtripComplete')).toBeVisible({ timeout: 10_000 })
-    await expect(page.getByText('TcpEchoStarted')).toBeVisible({ timeout: 5_000 })
+    await expect(page.getByText('TcpRoundtripComplete').first()).toBeVisible({ timeout: 10_000 })
+    await expect(page.getByText('TcpEchoStarted').first()).toBeVisible({ timeout: 5_000 })
 
     // Step 8: Jump to log from timeline.
     await page.locator('.timeline-event-cell.has-event', { hasText: 'TcpEchoStarted' }).first().click()
