@@ -86,6 +86,49 @@ function formatSpans(spans: unknown): string {
   return parts.join(':')
 }
 
+/** Render a formatted spans string with distinct styling per part. */
+function renderSpans(s: string): React.ReactNode {
+  const out: React.ReactNode[] = []
+  // Split on top-level colons (not inside braces).
+  let depth = 0
+  let start = 0
+  for (let i = 0; i <= s.length; i++) {
+    const ch = s[i]
+    if (ch === '{') depth++
+    else if (ch === '}') depth--
+    else if ((ch === ':' && depth === 0) || i === s.length) {
+      if (i > start) {
+        const part = s.slice(start, i)
+        if (out.length > 0) out.push(<span key={`c${i}`} className="span-dim">:</span>)
+        const braceIdx = part.indexOf('{')
+        if (braceIdx >= 0) {
+          const name = part.slice(0, braceIdx)
+          const inner = part.slice(braceIdx + 1, part.endsWith('}') ? part.length - 1 : part.length)
+          out.push(<span key={`n${i}`} className="span-name">{name}</span>)
+          out.push(<span key={`ob${i}`} className="span-dim">{'{'}</span>)
+          // Parse key=value pairs inside braces.
+          const pairs = inner.split(',')
+          pairs.forEach((pair, pi) => {
+            if (pi > 0) out.push(<span key={`cm${i}-${pi}`} className="span-dim">,</span>)
+            const eq = pair.indexOf('=')
+            if (eq >= 0) {
+              out.push(<span key={`k${i}-${pi}`} className="span-dim">{pair.slice(0, eq)}=</span>)
+              out.push(<span key={`v${i}-${pi}`} className="span-val">{pair.slice(eq + 1)}</span>)
+            } else {
+              out.push(<span key={`p${i}-${pi}`} className="span-val">{pair}</span>)
+            }
+          })
+          out.push(<span key={`cb${i}`} className="span-dim">{'}'}</span>)
+        } else {
+          out.push(<span key={`n${i}`} className="span-name">{part}</span>)
+        }
+      }
+      start = i + 1
+    }
+  }
+  return <>{out}</>
+}
+
 /** Parse a single line from a tracing/text log. */
 function parseLine(raw: string): ParsedLine {
   const stripped = raw.replace(ANSI_RE, '')
@@ -337,6 +380,17 @@ export default function LogsTab({ base, logs, jumpTarget }: Props) {
       setJumpLine(null)
       return
     }
+    // Exact full-precision timestamp match first.
+    const exact = filteredLines.findIndex(({ line }) => {
+      if (line.type === 'tracing') return line.ts === jumpNeedle
+      if (line.type === 'event') return line.raw.includes(jumpNeedle)
+      return false
+    })
+    if (exact >= 0) {
+      setJumpLine(exact)
+      return
+    }
+    // Fall back to nearest millisecond match.
     const needleMs = Date.parse(jumpNeedle)
     let nearestIdx = -1
     let nearestDelta = Number.POSITIVE_INFINITY
@@ -357,7 +411,7 @@ export default function LogsTab({ base, logs, jumpTarget }: Props) {
       }
     }
     const idx = filteredLines.findIndex(({ line }) => {
-      if (line.type === 'tracing') return line.ts === jumpNeedle || line.ts.includes(jumpNeedle)
+      if (line.type === 'tracing') return line.ts.includes(jumpNeedle)
       if (line.type === 'event') return line.raw.includes(jumpNeedle)
       return line.raw.includes(jumpNeedle)
     })
@@ -577,7 +631,7 @@ export default function LogsTab({ base, logs, jumpTarget }: Props) {
                       <div key={origIdx} data-log-line={i} className={`log-entry${highlight}`}>
                         <span className="log-ts">{displayTs(line.ts)}</span>
                         <span className={`level-${line.level}`}>{line.level.padStart(5)}</span>
-                        {showSpans && line.spans && <span className="log-spans"> {line.spans}</span>}
+                        {showSpans && line.spans && <span className="log-spans"> {renderSpans(line.spans)}</span>}
                         {showTarget && <span className="log-target">{showSpans && line.spans ? ': ' : ' '}{line.target}:</span>}
                         {line.msg && <span className="log-msg"> {line.msg}</span>}
                         {line.fields && <span className="log-fields"> {line.fields}</span>}

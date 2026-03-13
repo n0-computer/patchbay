@@ -387,13 +387,20 @@ tbody td {
     color: var(--text-muted);
     margin-right: 8px;
 }
-.log-spans {
+.log-spans .span-name {
     color: var(--text);
     font-weight: bold;
 }
+.log-spans .span-dim {
+    color: var(--text-muted);
+    font-weight: normal;
+}
+.log-spans .span-val {
+    color: var(--text);
+    font-weight: normal;
+}
 .log-target {
     color: var(--text-muted);
-    font-size: 11px;
 }
 .log-msg {
     color: var(--text);

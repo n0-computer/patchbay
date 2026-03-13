@@ -46,7 +46,7 @@ function tryParseJsonEvent(line: string): { kind: string; fieldPairs: Array<{ ke
 function parseTracingEventKind(fragment: string): string | null {
   const match = fragment.match(/_events::([a-zA-Z0-9_:]+)/)
   if (!match) return null
-  return match[1] || 'event'
+  return (match[1] || 'event').replace(/:+$/, '')
 }
 
 /** Extract key=value pairs from a tracing line containing `_events::`. */
@@ -58,7 +58,8 @@ function parseTracingEventPairs(fragment: string): Array<{ key: string; value: s
   const re = /\b([a-zA-Z_][a-zA-Z0-9_]*)=(.*?)(?=\s+[a-zA-Z_][a-zA-Z0-9_]*=|$)/g
   let m: RegExpExecArray | null = null
   while ((m = re.exec(afterKind)) != null) {
-    out.push({ key: m[1], value: m[2].trim() })
+    const v = m[2].trim()
+    out.push({ key: m[1], value: v.startsWith('"') && v.endsWith('"') ? v.slice(1, -1) : v })
   }
   return out
 }
@@ -137,15 +138,17 @@ export default function TimelineTab({ base, logs, labEvents, onJumpToLog }: Prop
   const [selected, setSelected] = useState<EventRow | null>(null)
   const [timeMode, setTimeMode] = useState<'relative' | 'absolute'>('relative')
 
-  const candidateLogs = useMemo(
-    () =>
-      logs.filter(
-        (l) =>
-          l.node !== '_run' &&
-          (l.kind === 'jsonl' || l.kind === 'ansi_text' || l.kind === 'text'),
-      ),
-    [logs],
-  )
+  const candidateLogs = useMemo(() => {
+    const all = logs.filter(
+      (l) =>
+        l.node !== '_run' &&
+        (l.kind === 'jsonl' || l.kind === 'ansi_text' || l.kind === 'text'),
+    )
+    // If a node has a structured jsonl log, skip its text/ansi logs to avoid
+    // duplicate events (the same _events:: entries appear in both formats).
+    const nodesWithJsonl = new Set(all.filter((l) => l.kind === 'jsonl').map((l) => l.node))
+    return all.filter((l) => l.kind === 'jsonl' || !nodesWithJsonl.has(l.node))
+  }, [logs])
   const candidateKey = useMemo(() => candidateLogs.map((l) => `${l.node}:${l.path}:${l.kind}`).join('|'), [candidateLogs])
 
   useEffect(() => {
