@@ -217,9 +217,25 @@ those callsites are permanently disabled — including for the file
 writer. To get TRACE in file output, ensure the global subscriber also
 enables TRACE (e.g. `RUST_LOG=trace`).
 
-## CI: pushing results to a remote server
+## Common flags
 
-If you run a `patchbay-serve` instance (see [deployment](#deploying-patchbay-serve)
+`patchbay-vm test` supports the same flags as `cargo test`:
+
+| Flag | Short | Description |
+|------|-------|-------------|
+| `--package <name>` | `-p` | Test a specific package |
+| `--test <name>` | | Select a test target (binary) |
+| `--jobs <n>` | `-j` | Parallel compilation jobs |
+| `--features <f>` | `-F` | Activate cargo features |
+| `--release` | | Build in release mode |
+| `--lib` | | Test only the library |
+| `--no-fail-fast` | | Run all tests even if some fail |
+| `--recreate` | | Stop and recreate the VM |
+| `-- <args>` | | Extra args passed to cargo |
+
+## Running in CI
+
+If you run a `patchbay-serve` instance (see [patchbay-serve](#patchbay-serve)
 below), you can push test results from GitHub Actions and get a link
 posted as a PR comment.
 
@@ -312,15 +328,28 @@ Add this to your workflow **after** the test step:
 
 The PR comment is auto-updated on each push, so you always see the latest run.
 
-### Deploying patchbay-serve
+## patchbay-serve
 
-Install and run the standalone server:
+`patchbay-serve` is a standalone server for hosting run results. CI
+pipelines push test output to it; the devtools UI lets you browse them.
+
+### Install
 
 ```bash
 cargo install --git https://github.com/n0-computer/patchbay patchbay-server --bin patchbay-serve
 ```
 
-Minimal setup with push and ACME TLS:
+### Quick start
+
+```bash
+patchbay-serve \
+  --accept-push \
+  --api-key "$(openssl rand -hex 32)" \
+  --bind 0.0.0.0:8080 \
+  --retention 10GB
+```
+
+With automatic TLS:
 
 ```bash
 patchbay-serve \
@@ -332,23 +361,13 @@ patchbay-serve \
 ```
 
 This will:
-- Serve the runs index at `https://patchbay.example.com/runs`
+- Serve the runs index at `/runs`
 - Accept pushed runs at `POST /api/push/{project}`
-- Auto-provision TLS via Let's Encrypt
+- Auto-provision TLS via Let's Encrypt (when `--acme-domain` is set)
 - Store data in `~/.local/share/patchbay-serve/` (runs + ACME certs)
-- Delete oldest runs when total size exceeds 10 GB
+- Delete oldest runs when total size exceeds the retention limit
 
-Without ACME (e.g. behind a reverse proxy):
-
-```bash
-patchbay-serve \
-  --accept-push \
-  --api-key "$PATCHBAY_API_KEY" \
-  --bind 127.0.0.1:8080 \
-  --retention 10GB
-```
-
-Key flags:
+### Flags
 
 | Flag | Description |
 |------|-------------|
@@ -361,18 +380,30 @@ Key flags:
 | `--retention <size>` | Max total run storage (e.g. `500MB`, `10GB`) |
 | `--bind <addr>` | Listen address (default: `0.0.0.0:8080`, ignored with ACME) |
 
-## Common flags
+### systemd
 
-`patchbay-vm test` supports the same flags as `cargo test`:
+A unit file is included at `patchbay-server/patchbay-serve.service`.
+To install:
 
-| Flag | Short | Description |
-|------|-------|-------------|
-| `--package <name>` | `-p` | Test a specific package |
-| `--test <name>` | | Select a test target (binary) |
-| `--jobs <n>` | `-j` | Parallel compilation jobs |
-| `--features <f>` | `-F` | Activate cargo features |
-| `--release` | | Build in release mode |
-| `--lib` | | Test only the library |
-| `--no-fail-fast` | | Run all tests even if some fail |
-| `--recreate` | | Stop and recreate the VM |
-| `-- <args>` | | Extra args passed to cargo |
+```bash
+# Create service user and data directory
+sudo useradd -r -s /usr/sbin/nologin patchbay
+sudo mkdir -p /var/lib/patchbay-serve
+sudo chown patchbay:patchbay /var/lib/patchbay-serve
+
+# Install the binary
+cargo install --git https://github.com/n0-computer/patchbay patchbay-server --bin patchbay-serve
+sudo cp ~/.cargo/bin/patchbay-serve /usr/local/bin/
+
+# Install and configure the unit file
+sudo cp patchbay-server/patchbay-serve.service /etc/systemd/system/
+sudo systemctl edit patchbay-serve  # set PATCHBAY_API_KEY, --acme-domain, --acme-email
+sudo systemctl enable --now patchbay-serve
+```
+
+Check status:
+
+```bash
+sudo systemctl status patchbay-serve
+journalctl -u patchbay-serve -f
+```

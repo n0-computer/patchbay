@@ -1,0 +1,28 @@
+[Unit]
+Description=patchbay-serve - patchbay run results server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=patchbay
+Group=patchbay
+ExecStart=/usr/local/bin/patchbay-serve \
+    --accept-push \
+    --data-dir /var/lib/patchbay-serve \
+    --acme-domain patchbay.example.com \
+    --acme-email you@example.com \
+    --retention 10GB
+Environment=PATCHBAY_API_KEY=changeme
+Restart=on-failure
+RestartSec=5
+
+# Hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/patchbay-serve
+
+[Install]
+WantedBy=multi-user.target
