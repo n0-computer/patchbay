@@ -939,7 +939,7 @@ async fn runs_index_html(State(state): State<AppState>) -> Html<String> {
                 html.push_str(&format!(r#"<span class="date">{date}</span>"#));
             }
 
-            // Link into the devtools UI — runs appear in the sidebar automatically
+            // Link to the UI runs index — the run will be listed there
             html.push_str(r#" <a class="view-link" href="/">View &rarr;</a>"#);
 
             html.push_str("</div>\n");
@@ -1020,12 +1020,24 @@ async fn push_run(
     // Notify subscribers about new run
     let _ = state.runs_tx.send(());
 
+    // Discover runs inside the extracted directory to provide a deep link.
+    // The run_dir is {project}/{date}-{uuid} inside the base. discover_runs
+    // works relative to state.base, so the run names will include the project prefix.
+    let first_run = discover_runs(&state.base)
+        .ok()
+        .and_then(|runs| {
+            runs.into_iter()
+                .find(|r| r.name.starts_with(&format!("{project}/{run_name}")))
+                .map(|r| r.name)
+        });
+
     let view_path = format!("{project}/{run_name}");
     let result = serde_json::json!({
         "ok": true,
         "project": project,
         "run": run_name,
         "path": view_path,
+        "first_run": first_run,
     });
 
     (StatusCode::OK, serde_json::to_string(&result).unwrap())

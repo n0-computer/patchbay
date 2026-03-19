@@ -724,3 +724,56 @@ tbody td {
     color: var(--red);
     padding: 16px;
 }
+
+/* ── Runs index ── */
+.runs-index {
+    max-width: 800px;
+    margin: 0 auto;
+    padding: 2rem;
+}
+.runs-index h1 {
+    font-size: 1.25rem;
+    font-weight: 600;
+    margin-bottom: 1.5rem;
+}
+.run-group {
+    margin-bottom: 1rem;
+}
+.run-group-header {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 4px 0;
+    margin-bottom: 2px;
+}
+.run-group-name {
+    font-weight: 600;
+    color: var(--text);
+}
+.run-link.combined {
+    font-size: 0.85em;
+    color: var(--text-muted);
+}
+.run-entry {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 6px 12px;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    margin-bottom: 2px;
+    background: var(--surface);
+    color: var(--text);
+    text-decoration: none;
+}
+.run-entry:hover {
+    border-color: var(--accent);
+    text-decoration: none;
+}
+.run-entry-label {
+    flex: 1;
+}
+.run-entry-status {
+    font-size: 0.85em;
+    color: var(--text-muted);
+}

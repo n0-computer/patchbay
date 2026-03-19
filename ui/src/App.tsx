@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { useLocation, useNavigate } from 'react-router-dom'
 import type {
   Firewall,
   LabEvent,
@@ -31,9 +32,6 @@ import NodeDetail from './components/NodeDetail'
 type Tab = 'topology' | 'logs' | 'timeline' | 'perf'
 
 // ── Selection model ────────────────────────────────────────────────
-// The user can select either an individual sim run (by name) or an
-// invocation group (to see combined results).  We encode this as a
-// tagged union so the rest of the component can branch cleanly.
 
 type Selection =
   | { kind: 'run'; name: string }
@@ -44,15 +42,9 @@ function selectionKey(s: Selection | null): string {
   return s.kind === 'invocation' ? `inv:${s.name}` : s.name
 }
 
-function parseSelectionKey(key: string, runs: RunInfo[]): Selection | null {
-  if (!key) return null
-  if (key.startsWith('inv:')) {
-    return { kind: 'invocation', name: key.slice(4) }
-  }
-  if (runs.some((r) => r.name === key)) {
-    return { kind: 'run', name: key }
-  }
-  return null
+function selectionPath(s: Selection | null): string {
+  if (!s) return '/'
+  return s.kind === 'invocation' ? `/inv/${s.name}` : `/run/${s.name}`
 }
 
 // ── Invocation grouping ────────────────────────────────────────────
@@ -176,11 +168,24 @@ function applyEvent(state: LabState, event: LabEvent): LabState {
 
 // ── Unified App ────────────────────────────────────────────────────
 
-export default function App() {
-  // Run selection
-  const [runs, setRuns] = useState<RunInfo[]>([])
-  const [selection, setSelection] = useState<Selection | null>(null)
+export default function App({ mode }: { mode: 'run' | 'inv' }) {
+  const location = useLocation()
+  const navigate = useNavigate()
+
+  // Derive selection from the URL path.
+  // Route is /run/* or /inv/* so everything after the prefix is the name.
+  const nameFromUrl = location.pathname.slice(mode === 'run' ? 5 : 5) // "/run/" or "/inv/" = 5 chars
+  const selection: Selection | null = nameFromUrl
+    ? { kind: mode === 'inv' ? 'invocation' : 'run', name: nameFromUrl }
+    : null
+
+  const selectedRun = selection?.kind === 'run' ? selection.name : null
+  const selectedInvocation = selection?.kind === 'invocation' ? selection.name : null
+
   const [tab, setTab] = useState<Tab>('topology')
+
+  // Run list (for the dropdown)
+  const [runs, setRuns] = useState<RunInfo[]>([])
 
   // Lab state (from SSE)
   const [labState, setLabState] = useState<LabState | null>(null)
@@ -202,24 +207,11 @@ export default function App() {
   // Cross-tab log jump
   const [logJump, setLogJump] = useState<{ node: string; path: string; timeLabel: string; nonce: number } | null>(null)
 
-  // Derived selection helpers
-  const selectedRun = selection?.kind === 'run' ? selection.name : null
-  const selectedInvocation = selection?.kind === 'invocation' ? selection.name : null
-
   // ── Fetch and subscribe to runs ──
 
   const refreshRuns = useCallback(async () => {
     const r = await fetchRuns()
     setRuns(r)
-    setSelection((prev) => {
-      if (r.length === 0) return null
-      if (prev) {
-        // Keep current selection if still valid
-        if (prev.kind === 'run' && r.some((ri) => ri.name === prev.name)) return prev
-        if (prev.kind === 'invocation' && r.some((ri) => ri.invocation === prev.name)) return prev
-      }
-      return { kind: 'run', name: r[0].name }
-    })
   }, [])
 
   useEffect(() => {
@@ -291,9 +283,6 @@ export default function App() {
   }, [selectedRun])
 
   // Close SSE connections on page unload/refresh.
-  // Firefox limits HTTP/1.1 to 6 connections per domain — stale SSE
-  // connections from a previous page load can exhaust the pool and block
-  // all subsequent fetch requests.
   useEffect(() => {
     const cleanup = () => {
       runsEsRef.current?.close()
@@ -345,15 +334,19 @@ export default function App() {
   return (
     <div className="app">
       <div className="topbar">
-        <h1>patchbay</h1>
+        <h1><a href="#/" style={{ color: 'inherit', textDecoration: 'none' }}>patchbay</a></h1>
         <select
           value={selectionKey(selection)}
           onChange={(e) => {
-            const next = parseSelectionKey(e.target.value, runs)
-            setSelection(next)
-            if (next?.kind !== 'invocation') {
-              setLabState(null)
-              setLabEvents([])
+            const val = e.target.value
+            if (!val) {
+              navigate('/')
+              return
+            }
+            if (val.startsWith('inv:')) {
+              navigate(`/inv/${val.slice(4)}`)
+            } else {
+              navigate(`/run/${val}`)
             }
           }}
         >
@@ -436,7 +429,7 @@ export default function App() {
         )}
 
         {tab === 'perf' && isSimView && <PerfTab results={simResults} />}
-        {tab === 'perf' && isInvocationView && <PerfTab results={null} combined={combinedResults} onSimSelect={(sim) => setSelection({ kind: 'run', name: sim })} />}
+        {tab === 'perf' && isInvocationView && <PerfTab results={null} combined={combinedResults} onSimSelect={(sim) => navigate(`/run/${sim}`)} />}
       </div>
     </div>
   )
