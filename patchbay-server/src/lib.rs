@@ -876,6 +876,7 @@ async fn runs_index_html(State(state): State<AppState>) -> Html<String> {
          margin-bottom: 0.5rem; display: flex; align-items: center; gap: 1rem;
          background: #161b22; }
   .run:hover { border-color: #388bfd; }
+  .run:target { border-color: #388bfd; background: #1c2333; }
   .project { font-weight: 600; color: #58a6ff; min-width: 120px; }
   .meta { flex: 1; font-size: 0.875rem; color: #8b949e; }
   .meta a { color: #58a6ff; text-decoration: none; }
@@ -897,7 +898,10 @@ async fn runs_index_html(State(state): State<AppState>) -> Html<String> {
         html.push_str(r#"<div class="empty">No runs yet. Push results using the API.</div>"#);
     } else {
         for entry in &entries {
-            html.push_str(r#"<div class="run">"#);
+            html.push_str(&format!(
+                r#"<div class="run" id="{}">"#,
+                html_escape(&entry.path)
+            ));
             html.push_str(&format!(
                 r#"<span class="project">{}</span>"#,
                 html_escape(&entry.project)
@@ -935,11 +939,8 @@ async fn runs_index_html(State(state): State<AppState>) -> Html<String> {
                 html.push_str(&format!(r#"<span class="date">{date}</span>"#));
             }
 
-            // Link into the devtools UI — the run path is the base for discover_runs
-            html.push_str(&format!(
-                r#" <a class="view-link" href="/?run={}">View &rarr;</a>"#,
-                html_escape(&entry.path)
-            ));
+            // Link into the devtools UI — runs appear in the sidebar automatically
+            html.push_str(r#" <a class="view-link" href="/">View &rarr;</a>"#);
 
             html.push_str("</div>\n");
         }

@@ -292,7 +292,7 @@ Add this to your workflow **after** the test step:
         fi
 
         RUN_PATH=$(echo "$BODY" | jq -r .path)
-        VIEW_URL="$PATCHBAY_URL/?run=$RUN_PATH"
+        VIEW_URL="$PATCHBAY_URL/runs#$RUN_PATH"
         echo "PATCHBAY_VIEW_URL=$VIEW_URL" >> "$GITHUB_ENV"
         echo "Results uploaded: $VIEW_URL"
 
