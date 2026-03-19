@@ -217,6 +217,150 @@ those callsites are permanently disabled — including for the file
 writer. To get TRACE in file output, ensure the global subscriber also
 enables TRACE (e.g. `RUST_LOG=trace`).
 
+## CI: pushing results to a remote server
+
+If you run a `patchbay-serve` instance (see [deployment](#deploying-patchbay-serve)
+below), you can push test results from GitHub Actions and get a link
+posted as a PR comment.
+
+Set two repository secrets: `PATCHBAY_URL` (e.g. `https://patchbay.example.com`)
+and `PATCHBAY_API_KEY`.
+
+Add this to your workflow **after** the test step:
+
+```yaml
+    - name: Push patchbay results
+      if: always()
+      env:
+        PATCHBAY_URL: ${{ secrets.PATCHBAY_URL }}
+        PATCHBAY_API_KEY: ${{ secrets.PATCHBAY_API_KEY }}
+      run: |
+        set -euo pipefail
+
+        PROJECT="${{ github.event.repository.name }}"
+        TESTDIR="$(cargo metadata --format-version=1 --no-deps | jq -r .target_directory)/testdir-current"
+
+        if [ ! -d "$TESTDIR" ]; then
+          echo "No testdir output found, skipping push"
+          exit 0
+        fi
+
+        # Create run.json manifest
+        cat > "$TESTDIR/run.json" <<MANIFEST
+        {
+          "project": "$PROJECT",
+          "branch": "${{ github.head_ref || github.ref_name }}",
+          "commit": "${{ github.sha }}",
+          "pr": ${{ github.event.pull_request.number || 'null' }},
+          "pr_url": "${{ github.event.pull_request.html_url || '' }}",
+          "title": "${{ github.event.pull_request.title || github.event.head_commit.message || '' }}",
+          "created_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        }
+        MANIFEST
+
+        # Upload as tar.gz
+        RESPONSE=$(tar -czf - -C "$TESTDIR" . | \
+          curl -s -w "\n%{http_code}" \
+            -X POST \
+            -H "Authorization: Bearer $PATCHBAY_API_KEY" \
+            -H "Content-Type: application/gzip" \
+            --data-binary @- \
+            "$PATCHBAY_URL/api/push/$PROJECT")
+
+        HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+        BODY=$(echo "$RESPONSE" | head -n -1)
+
+        if [ "$HTTP_CODE" != "200" ]; then
+          echo "Push failed ($HTTP_CODE): $BODY"
+          exit 1
+        fi
+
+        RUN_PATH=$(echo "$BODY" | jq -r .path)
+        VIEW_URL="$PATCHBAY_URL/?run=$RUN_PATH"
+        echo "PATCHBAY_VIEW_URL=$VIEW_URL" >> "$GITHUB_ENV"
+        echo "Results uploaded: $VIEW_URL"
+
+    - name: Comment on PR
+      if: always() && github.event.pull_request && env.PATCHBAY_VIEW_URL
+      uses: actions/github-script@v7
+      with:
+        script: |
+          const marker = '<!-- patchbay-results -->';
+          const body = `${marker}\n**patchbay results:** ${process.env.PATCHBAY_VIEW_URL}`;
+          const { data: comments } = await github.rest.issues.listComments({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            issue_number: context.issue.number,
+          });
+          const existing = comments.find(c => c.body.includes(marker));
+          if (existing) {
+            await github.rest.issues.updateComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              comment_id: existing.id,
+              body,
+            });
+          } else {
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body,
+            });
+          }
+```
+
+The PR comment is auto-updated on each push, so you always see the latest run.
+
+### Deploying patchbay-serve
+
+Install and run the standalone server:
+
+```bash
+cargo install --git https://github.com/n0-computer/patchbay patchbay-server --bin patchbay-serve
+```
+
+Minimal setup with push and ACME TLS:
+
+```bash
+patchbay-serve \
+  --accept-push \
+  --api-key "$(openssl rand -hex 32)" \
+  --acme-domain patchbay.example.com \
+  --acme-email you@example.com \
+  --retention 10GB
+```
+
+This will:
+- Serve the runs index at `https://patchbay.example.com/runs`
+- Accept pushed runs at `POST /api/push/{project}`
+- Auto-provision TLS via Let's Encrypt
+- Store data in `~/.local/share/patchbay-serve/` (runs + ACME certs)
+- Delete oldest runs when total size exceeds 10 GB
+
+Without ACME (e.g. behind a reverse proxy):
+
+```bash
+patchbay-serve \
+  --accept-push \
+  --api-key "$PATCHBAY_API_KEY" \
+  --bind 127.0.0.1:8080 \
+  --retention 10GB
+```
+
+Key flags:
+
+| Flag | Description |
+|------|-------------|
+| `--run-dir <path>` | Override run storage location |
+| `--data-dir <path>` | Override data directory (default: `~/.local/share/patchbay-serve`) |
+| `--accept-push` | Enable the push API |
+| `--api-key <key>` | Required with `--accept-push`; also reads `PATCHBAY_API_KEY` env |
+| `--acme-domain <d>` | Enable automatic TLS for domain |
+| `--acme-email <e>` | Contact email for Let's Encrypt (required with `--acme-domain`) |
+| `--retention <size>` | Max total run storage (e.g. `500MB`, `10GB`) |
+| `--bind <addr>` | Listen address (default: `0.0.0.0:8080`, ignored with ACME) |
+
 ## Common flags
 
 `patchbay-vm test` supports the same flags as `cargo test`:

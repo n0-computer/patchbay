@@ -7,17 +7,19 @@ use std::{
     convert::Infallible,
     fs,
     path::{Path, PathBuf},
+    sync::Arc,
     time::Duration,
 };
 
 use axum::{
+    body::Bytes,
     extract::{Path as AxPath, Query, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::{
         sse::{Event, KeepAlive, Sse},
         Html, IntoResponse,
     },
-    routing::get,
+    routing::{get, post},
     Router,
 };
 use serde::{Deserialize, Serialize};
@@ -183,19 +185,32 @@ struct EventRecord {
     rest: serde_json::Value,
 }
 
+// ── Push configuration ──────────────────────────────────────────────
+
+/// Configuration for the push endpoint.
+#[derive(Clone)]
+pub struct PushConfig {
+    /// API key required in Authorization header.
+    pub api_key: String,
+    /// Directory where pushed runs are stored.
+    pub run_dir: PathBuf,
+}
+
 // ── Shared state ────────────────────────────────────────────────────
 
 #[derive(Clone)]
 struct AppState {
     base: PathBuf,
     runs_tx: broadcast::Sender<()>,
+    push: Option<Arc<PushConfig>>,
 }
 
 // ── Router construction ─────────────────────────────────────────────
 
 fn build_router(state: AppState) -> Router {
-    Router::new()
+    let mut r = Router::new()
         .route("/", get(index_html))
+        .route("/runs", get(runs_index_html))
         .route("/api/runs", get(get_runs))
         .route("/api/runs/subscribe", get(runs_sse))
         .route("/api/runs/{run}/state", get(get_run_state))
@@ -206,16 +221,25 @@ fn build_router(state: AppState) -> Router {
         .route(
             "/api/invocations/{name}/combined-results",
             get(get_invocation_combined),
-        )
-        .with_state(state)
+        );
+    if state.push.is_some() {
+        r = r.route("/api/push/{project}", post(push_run));
+    }
+    r.with_state(state)
 }
 
 /// Creates an axum [`Router`] for serving a lab output directory.
 pub fn router(base: PathBuf) -> Router {
+    build_app(base, None)
+}
+
+/// Creates an axum [`Router`] with optional push support.
+pub fn build_app(base: PathBuf, push: Option<PushConfig>) -> Router {
     let (runs_tx, _) = broadcast::channel(16);
     let state = AppState {
         base: base.clone(),
         runs_tx: runs_tx.clone(),
+        push: push.map(Arc::new),
     };
 
     // Background run scanner: notifies SSE subscribers when new runs appear.
@@ -745,4 +769,348 @@ async fn scan_log_files(run_dir: &Path) -> Vec<LogEntry> {
             .then(a.path.cmp(&b.path))
     });
     logs
+}
+
+// ── Run manifest (run.json) ─────────────────────────────────────────
+
+/// Manifest included with pushed runs, providing CI context.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct RunManifest {
+    /// Project name (from URL path).
+    #[serde(default)]
+    pub project: String,
+    /// Git branch name.
+    #[serde(default)]
+    pub branch: Option<String>,
+    /// Git commit SHA.
+    #[serde(default)]
+    pub commit: Option<String>,
+    /// PR number.
+    #[serde(default)]
+    pub pr: Option<u64>,
+    /// PR URL.
+    #[serde(default)]
+    pub pr_url: Option<String>,
+    /// When this run was created.
+    #[serde(default)]
+    pub created_at: Option<String>,
+    /// Human-readable run title/label.
+    #[serde(default)]
+    pub title: Option<String>,
+}
+
+const RUN_JSON: &str = "run.json";
+
+fn read_run_json(dir: &Path) -> Option<RunManifest> {
+    let text = fs::read_to_string(dir.join(RUN_JSON)).ok()?;
+    serde_json::from_str(&text).ok()
+}
+
+// ── Runs index page ─────────────────────────────────────────────────
+
+/// Metadata for a run entry on the index page.
+#[derive(Serialize)]
+struct RunIndexEntry {
+    /// Relative path within run_dir.
+    path: String,
+    /// Project name (first path component).
+    project: String,
+    /// run.json manifest if present.
+    manifest: Option<RunManifest>,
+    /// Timestamp from directory name.
+    date: Option<String>,
+}
+
+/// Discover pushed runs for the index page.
+/// Structure: run_dir/{project}/{date}-{uuid}/...
+fn discover_pushed_runs(run_dir: &Path) -> Vec<RunIndexEntry> {
+    let mut entries = Vec::new();
+    let Ok(projects) = fs::read_dir(run_dir) else {
+        return entries;
+    };
+    for project_entry in projects.flatten() {
+        if !project_entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+            continue;
+        }
+        let project = project_entry.file_name().to_string_lossy().to_string();
+        let Ok(runs) = fs::read_dir(project_entry.path()) else {
+            continue;
+        };
+        for run_entry in runs.flatten() {
+            if !run_entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                continue;
+            }
+            let run_name = run_entry.file_name().to_string_lossy().to_string();
+            let path = format!("{project}/{run_name}");
+            let manifest = read_run_json(&run_entry.path());
+            // Extract date from dirname: YYYYMMDD_HHMMSS-uuid
+            let date = run_name.get(..15).map(|s| s.to_string());
+            entries.push(RunIndexEntry {
+                path,
+                project: project.clone(),
+                manifest,
+                date,
+            });
+        }
+    }
+    entries.sort_by(|a, b| b.path.cmp(&a.path));
+    entries
+}
+
+async fn runs_index_html(State(state): State<AppState>) -> Html<String> {
+    let entries = discover_pushed_runs(&state.base);
+
+    let mut html = String::from(
+        r#"<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>patchbay runs</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+         background: #0d1117; color: #c9d1d9; padding: 2rem; max-width: 1000px; margin: 0 auto; }
+  h1 { margin-bottom: 1.5rem; color: #f0f6fc; font-size: 1.5rem; }
+  .run { padding: 0.75rem 1rem; border: 1px solid #21262d; border-radius: 6px;
+         margin-bottom: 0.5rem; display: flex; align-items: center; gap: 1rem;
+         background: #161b22; }
+  .run:hover { border-color: #388bfd; }
+  .project { font-weight: 600; color: #58a6ff; min-width: 120px; }
+  .meta { flex: 1; font-size: 0.875rem; color: #8b949e; }
+  .meta a { color: #58a6ff; text-decoration: none; }
+  .meta a:hover { text-decoration: underline; }
+  .date { font-size: 0.8rem; color: #484f58; }
+  .view-link { color: #58a6ff; text-decoration: none; font-size: 0.875rem; white-space: nowrap; }
+  .view-link:hover { text-decoration: underline; }
+  .empty { color: #484f58; padding: 2rem; text-align: center; }
+  .badge { display: inline-block; padding: 0.1rem 0.5rem; border-radius: 3px;
+           font-size: 0.75rem; background: #1f6feb33; color: #58a6ff; }
+</style>
+</head>
+<body>
+<h1>patchbay runs</h1>
+"#,
+    );
+
+    if entries.is_empty() {
+        html.push_str(r#"<div class="empty">No runs yet. Push results using the API.</div>"#);
+    } else {
+        for entry in &entries {
+            html.push_str(r#"<div class="run">"#);
+            html.push_str(&format!(
+                r#"<span class="project">{}</span>"#,
+                html_escape(&entry.project)
+            ));
+
+            html.push_str(r#"<div class="meta">"#);
+            if let Some(m) = &entry.manifest {
+                if let Some(branch) = &m.branch {
+                    html.push_str(&format!(
+                        r#"<span class="badge">{}</span> "#,
+                        html_escape(branch)
+                    ));
+                }
+                if let Some(commit) = &m.commit {
+                    let short = &commit[..commit.len().min(7)];
+                    html.push_str(&format!("<code>{short}</code> "));
+                }
+                if let Some(pr) = m.pr {
+                    if let Some(url) = &m.pr_url {
+                        html.push_str(&format!(
+                            r#"<a href="{}">PR #{pr}</a> "#,
+                            html_escape(url)
+                        ));
+                    } else {
+                        html.push_str(&format!("PR #{pr} "));
+                    }
+                }
+                if let Some(title) = &m.title {
+                    html.push_str(&html_escape(title));
+                }
+            }
+            html.push_str("</div>");
+
+            if let Some(date) = &entry.date {
+                html.push_str(&format!(r#"<span class="date">{date}</span>"#));
+            }
+
+            // Link into the devtools UI — the run path is the base for discover_runs
+            html.push_str(&format!(
+                r#" <a class="view-link" href="/?run={}">View &rarr;</a>"#,
+                html_escape(&entry.path)
+            ));
+
+            html.push_str("</div>\n");
+        }
+    }
+
+    html.push_str("</body></html>");
+    Html(html)
+}
+
+fn html_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
+// ── Push endpoint ───────────────────────────────────────────────────
+
+async fn push_run(
+    AxPath(project): AxPath<String>,
+    headers: HeaderMap,
+    State(state): State<AppState>,
+    body: Bytes,
+) -> impl IntoResponse {
+    let Some(push) = &state.push else {
+        return (StatusCode::NOT_FOUND, "push not enabled".to_string());
+    };
+
+    // Validate API key
+    let auth = headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let expected = format!("Bearer {}", push.api_key);
+    if auth != expected {
+        return (StatusCode::UNAUTHORIZED, "invalid api key".to_string());
+    }
+
+    // Validate project name (alphanumeric, hyphens, underscores)
+    if project.is_empty()
+        || !project
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            "invalid project name".to_string(),
+        );
+    }
+
+    // Create run directory: {run_dir}/{project}/{date}-{uuid}
+    let now = chrono::Utc::now();
+    let date = now.format("%Y%m%d_%H%M%S").to_string();
+    let uuid = uuid::Uuid::new_v4();
+    let run_name = format!("{date}-{uuid}");
+    let run_dir = push.run_dir.join(&project).join(&run_name);
+
+    if let Err(e) = std::fs::create_dir_all(&run_dir) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("failed to create run dir: {e}"),
+        );
+    }
+
+    // Extract tar.gz
+    let decoder = flate2::read::GzDecoder::new(&body[..]);
+    let mut archive = tar::Archive::new(decoder);
+    if let Err(e) = archive.unpack(&run_dir) {
+        // Clean up on failure
+        let _ = std::fs::remove_dir_all(&run_dir);
+        return (
+            StatusCode::BAD_REQUEST,
+            format!("failed to extract archive: {e}"),
+        );
+    }
+
+    // Notify subscribers about new run
+    let _ = state.runs_tx.send(());
+
+    let view_path = format!("{project}/{run_name}");
+    let result = serde_json::json!({
+        "ok": true,
+        "project": project,
+        "run": run_name,
+        "path": view_path,
+    });
+
+    (StatusCode::OK, serde_json::to_string(&result).unwrap())
+}
+
+// ── Retention watcher ───────────────────────────────────────────────
+
+/// Background task that enforces a total size limit on the runs directory.
+/// Deletes oldest runs (by directory name sort) when total exceeds `max_bytes`.
+pub async fn retention_watcher(run_dir: PathBuf, max_bytes: u64) {
+    let mut interval = tokio::time::interval(Duration::from_secs(60));
+    loop {
+        interval.tick().await;
+        if let Err(e) = enforce_retention(&run_dir, max_bytes) {
+            tracing::warn!("retention check failed: {e}");
+        }
+    }
+}
+
+fn enforce_retention(run_dir: &Path, max_bytes: u64) -> anyhow::Result<()> {
+    // Collect all run dirs with their sizes, sorted oldest first
+    let mut runs: Vec<(PathBuf, u64)> = Vec::new();
+
+    let projects = fs::read_dir(run_dir)?;
+    for project_entry in projects.flatten() {
+        if !project_entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+            continue;
+        }
+        let Ok(run_entries) = fs::read_dir(project_entry.path()) else {
+            continue;
+        };
+        for run_entry in run_entries.flatten() {
+            if !run_entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                continue;
+            }
+            let size = dir_size(&run_entry.path());
+            runs.push((run_entry.path(), size));
+        }
+    }
+
+    // Sort oldest first (by path, which includes date)
+    runs.sort_by(|a, b| a.0.cmp(&b.0));
+
+    let total: u64 = runs.iter().map(|(_, s)| s).sum();
+    if total <= max_bytes {
+        return Ok(());
+    }
+
+    let mut to_free = total - max_bytes;
+    for (path, size) in &runs {
+        if to_free == 0 {
+            break;
+        }
+        tracing::info!("retention: removing {}", path.display());
+        let _ = fs::remove_dir_all(path);
+        to_free = to_free.saturating_sub(*size);
+    }
+
+    // Clean up empty project directories
+    if let Ok(projects) = fs::read_dir(run_dir) {
+        for entry in projects.flatten() {
+            if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                let Ok(mut contents) = fs::read_dir(entry.path()) else {
+                    continue;
+                };
+                if contents.next().is_none() {
+                    let _ = fs::remove_dir(entry.path());
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn dir_size(path: &Path) -> u64 {
+    let mut total = 0;
+    if let Ok(entries) = fs::read_dir(path) {
+        for entry in entries.flatten() {
+            let ft = entry.file_type().unwrap_or_else(|_| unreachable!());
+            if ft.is_file() {
+                total += entry.metadata().map(|m| m.len()).unwrap_or(0);
+            } else if ft.is_dir() {
+                total += dir_size(&entry.path());
+            }
+        }
+    }
+    total
 }
