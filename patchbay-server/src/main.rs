@@ -3,7 +3,6 @@
 //! Serves the devtools UI and optionally accepts pushed run results via HTTP.
 //! Supports automatic TLS via ACME (Let's Encrypt).
 
-use std::net::Ipv6Addr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -181,7 +180,7 @@ async fn serve_acme(
         }
     });
 
-    tracing::info!("listening on [::]:443 with ACME TLS for {domain}");
+    tracing::info!("listening on 0.0.0.0:443 with ACME TLS for {domain}");
 
     // HTTP redirect on port 80
     let redirect_domain = domain.to_string();
@@ -196,12 +195,12 @@ async fn serve_acme(
                 }
             },
         ));
-        let listener = tokio::net::TcpListener::bind("[::]:80").await.unwrap();
+        let listener = tokio::net::TcpListener::bind("0.0.0.0:80").await.unwrap();
         let _ = axum::serve(listener, redirect).await;
     });
 
     // Serve HTTPS with axum-server and ACME acceptor
-    let addr = std::net::SocketAddr::from((Ipv6Addr::UNSPECIFIED, 443));
+    let addr: std::net::SocketAddr = "0.0.0.0:443".parse()?;
     axum_server::bind(addr)
         .acceptor(acceptor)
         .serve(app.into_make_service())
