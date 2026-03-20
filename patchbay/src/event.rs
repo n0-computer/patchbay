@@ -250,6 +250,13 @@ pub enum LabEventKind {
         /// Per-interface counters.
         counters: Vec<IfaceCounters>,
     },
+
+    // ── Test lifecycle ──
+    /// Test completed with a result.
+    TestCompleted {
+        /// Whether the test passed.
+        passed: bool,
+    },
 }
 
 /// Snapshot of a device interface at the time of an event.
@@ -704,6 +711,9 @@ impl LabState {
                 for c in counters {
                     map.insert(c.iface.clone(), c.clone());
                 }
+            }
+            LabEventKind::TestCompleted { passed } => {
+                self.status = if *passed { "success" } else { "failed" }.into();
             }
         }
     }

@@ -188,7 +188,12 @@ export default function TimelineTab({ base, logs, labEvents, onJumpToLog }: Prop
     }
   }, [base, candidateKey, labEvents])
 
-  const nodes = useMemo(() => [...new Set(events.map((e) => e.node))].sort(), [events])
+  const nodes = useMemo(() => [...new Set(events.map((e) => e.node))].sort((a, b) => {
+    // _lab always first
+    if (a === '_lab') return -1
+    if (b === '_lab') return 1
+    return a.localeCompare(b)
+  }), [events])
   const firstTimeMs = useMemo(() => {
     return events.length ? Math.min(...events.map((e) => e.timeMs)) : null
   }, [events])

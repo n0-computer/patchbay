@@ -545,7 +545,7 @@ impl Lab {
     /// false positives.
     pub fn test_guard(&self) -> TestGuard {
         TestGuard {
-            status: Arc::clone(&self.inner.test_status),
+            inner: Arc::clone(&self.inner),
             marked: false,
         }
     }
@@ -2416,8 +2416,11 @@ impl DeviceBuilder {
 /// [`.ok()`](TestGuard::ok) was called. This means the only way to get
 /// "success" is to explicitly call `.ok()`, avoiding false positives from
 /// early `?` returns or panics.
+///
+/// Both `.ok()` and the failure path emit a [`LabEventKind::TestCompleted`]
+/// event so the result is visible in the timeline.
 pub struct TestGuard {
-    status: Arc<AtomicU8>,
+    inner: Arc<LabInner>,
     marked: bool,
 }
 
@@ -2427,8 +2430,11 @@ impl TestGuard {
     /// Call this at the end of a passing test, typically just before `Ok(())`.
     pub fn ok(mut self) {
         use std::sync::atomic::Ordering;
-        self.status
+        self.inner
+            .test_status
             .store(crate::writer::STATUS_SUCCESS, Ordering::Release);
+        self.inner
+            .emit(LabEventKind::TestCompleted { passed: true });
         self.marked = true;
     }
 }
@@ -2437,9 +2443,11 @@ impl Drop for TestGuard {
     fn drop(&mut self) {
         use std::sync::atomic::Ordering;
         if !self.marked {
-            // Panic or early error return -- both count as failure.
-            self.status
+            self.inner
+                .test_status
                 .store(crate::writer::STATUS_FAILED, Ordering::Release);
+            self.inner
+                .emit(LabEventKind::TestCompleted { passed: false });
         }
     }
 }
