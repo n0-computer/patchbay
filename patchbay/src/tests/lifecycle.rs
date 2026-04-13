@@ -5,6 +5,8 @@
 //! remove_router APIs including the guard that blocks removing a router that
 //! still has connected devices.
 
+use std::time::Duration;
+
 use super::*;
 
 /// Loading a lab from a TOML file produces the expected devices and routers.
@@ -221,5 +223,62 @@ async fn add_device_after_build() -> Result<()> {
     let dev1_ip_str = dev1.ip().unwrap().to_string();
     dev2.run_sync(move || ping(&dev1_ip_str))?;
 
+    Ok(())
+}
+
+/// LabDropGuard writes final state.json and flushes events even when
+/// Device handles outlive the Lab.
+#[tokio::test(flavor = "current_thread")]
+async fn drop_guard_flushes_with_outstanding_handles() -> Result<()> {
+    let outdir = testdir::testdir!();
+    let lab = Lab::with_opts(LabOpts::default().outdir(OutDir::Exact(outdir.clone()))).await?;
+    let guard = lab.test_guard();
+    let dc = lab.add_router("dc").build().await?;
+    let dev = lab.add_device("dev").iface("eth0", dc.id()).build().await?;
+
+    guard.ok();
+    drop(lab);
+
+    // Lab dropped, guard fired. Device handle still alive.
+    let state: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(outdir.join("state.json"))?)?;
+    assert_eq!(state["status"].as_str(), Some("success"));
+
+    let events = std::fs::read_to_string(outdir.join("events.jsonl"))?;
+    assert!(!events.is_empty(), "events.jsonl should be flushed");
+
+    drop(dev);
+    drop(dc);
+    Ok(())
+}
+
+/// Dropping the lab aborts tasks spawned on device runtimes.
+#[tokio::test(flavor = "current_thread")]
+#[traced_test]
+async fn drop_lab_aborts_spawned_tasks() -> Result<()> {
+    check_caps()?;
+    let lab = Lab::new().await?;
+    let dc = lab.add_router("dc").build().await?;
+    let dev = lab.add_device("dev").iface("eth0", dc.id()).build().await?;
+
+    // Spawn a long-running task on the device runtime.
+    let handle = dev.spawn(|_dev| async {
+        // This should never complete; it will be aborted when the lab drops.
+        tokio::time::sleep(Duration::from_secs(3600)).await;
+        42u32
+    })?;
+
+    // Drop the lab. This cancels all worker tokens, aborting the task.
+    drop(lab);
+
+    // The JoinHandle should resolve to a cancelled error.
+    let result = handle.await;
+    assert!(
+        result.is_err(),
+        "spawned task should be aborted when the lab drops"
+    );
+
+    drop(dev);
+    drop(dc);
     Ok(())
 }

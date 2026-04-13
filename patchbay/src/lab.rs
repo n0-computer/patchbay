@@ -305,19 +305,68 @@ pub(crate) struct LabInner {
     pub test_status: Arc<AtomicU8>,
     /// Accumulated lab state, shared with the background writer. Updated on
     /// every event so that `Drop` can always write a complete `state.json`
-    /// synchronously — even if the async writer task never ran its shutdown path.
+    /// synchronously, even if the async writer task never ran its shutdown path.
     pub shared_state: Arc<std::sync::Mutex<crate::event::LabState>>,
+    /// Registry for flushing all buffered writers during lab shutdown.
+    pub flush_registry: Arc<crate::writer::FlushRegistry>,
 }
 
 impl Drop for LabInner {
     fn drop(&mut self) {
+        // Fallback cancellation in case the drop guard was bypassed.
         self.cancel.cancel();
         if let Some(dns) = self.dns_server.get_mut().unwrap().take() {
             dns.shutdown();
         }
+    }
+}
+
+/// Shutdown guard that fires when the last [`Lab`] clone drops.
+///
+/// Holds `Arc<LabInner>` and derefs to it, so `Lab` methods access
+/// LabInner fields transparently through the double deref chain
+/// `Arc<LabDropGuard> -> LabDropGuard -> Arc<LabInner> -> LabInner`.
+///
+/// Device, Router, and Iface handles hold `Arc<LabInner>` directly,
+/// bypassing this guard. This means the guard drops when the last Lab
+/// drops, not when the last handle drops. The shutdown sequence:
+///
+/// 1. Cancel the lab-wide `CancellationToken`. This wakes the writer
+///    task (for graceful event drain), RA workers, and NAT64 loops.
+/// 2. Cancel all namespace workers (async and sync). Async worker
+///    runtimes shut down, aborting all spawned tasks including user
+///    tasks from `device.spawn()`. Sync workers exit after completing
+///    any in-flight `run_sync` closure.
+///    This synchronously flushes events.jsonl and per-namespace tracing
+///    logs (`.tracing.jsonl`, `.ansi`, `.events.jsonl`, `.metrics`).
+/// 4. Write the final `state.json` with the test outcome status.
+///
+/// After this, handles remain functional (LabInner is still alive) but
+/// the lab is logically shut down: the cancel token is fired, files are
+/// flushed, and no new events will be written.
+pub(crate) struct LabDropGuard(pub(crate) Arc<LabInner>);
+
+impl std::ops::Deref for LabDropGuard {
+    type Target = LabInner;
+    fn deref(&self) -> &LabInner {
+        &self.0
+    }
+}
+
+impl Drop for LabDropGuard {
+    fn drop(&mut self) {
+        // Cancel the lab-wide token (wakes internal tasks like the
+        // writer, RA workers, NAT64 loops).
+        self.0.cancel.cancel();
+        // Cancel all namespace worker tokens. This causes each worker's
+        // tokio runtime to shut down, aborting all spawned tasks
+        // (including user tasks from device.spawn()).
+        self.0.netns.cancel_all_workers();
+        // Flush all buffered file writers to disk.
+        self.0.flush_registry.flush_all();
 
         // Determine final status from the test guard.
-        let status = match self.test_status.load(Ordering::Acquire) {
+        let status = match self.0.test_status.load(Ordering::Acquire) {
             crate::writer::STATUS_SUCCESS => "success",
             crate::writer::STATUS_FAILED => "failed",
             _ => "stopped",
@@ -326,8 +375,8 @@ impl Drop for LabInner {
         // Write the final state.json synchronously. The shared_state mutex
         // holds the fully accumulated LabState (updated by the writer on every
         // event), so this works even if the async task never flushed.
-        if let Some(ref run_dir) = self.run_dir {
-            crate::writer::write_final_state(run_dir, &self.shared_state, status);
+        if let Some(ref run_dir) = self.0.run_dir {
+            crate::writer::write_final_state(run_dir, &self.0.shared_state, status);
         }
     }
 }
@@ -378,13 +427,48 @@ impl LabInner {
 // Lab
 // ─────────────────────────────────────────────
 
-/// High-level lab API built on top of `NetworkCore`.
+/// A virtual network lab running in Linux network namespaces.
 ///
-/// `Lab` wraps `Arc<LabInner>` and is cheaply cloneable. All methods
-/// take `&self` and use interior mutability through the mutex.
+/// `Lab` is cheaply cloneable. All methods take `&self` and use interior
+/// mutability. Use [`Lab::new`] or [`Lab::with_opts`] to create a lab,
+/// then build routers and devices with [`Lab::add_router`] and
+/// [`Lab::add_device`].
+///
+/// # Shutdown
+///
+/// When the last `Lab` clone is dropped, the lab shuts down:
+///
+/// - All namespace async runtimes are cancelled, aborting every task
+///   spawned via [`Device::spawn`](crate::Device::spawn) or
+///   [`Router::spawn`](crate::Router::spawn), as well as internal
+///   tasks (RA workers, NAT64 translators). The `JoinHandle` returned
+///   by `spawn` will resolve to a cancelled `JoinError`.
+/// - All namespace sync workers are stopped. Any in-flight
+///   [`Device::run_sync`](crate::Device::run_sync) closure completes
+///   before the worker exits.
+/// - The event writer task is cancelled.
+/// - All buffered log files are flushed to disk: `events.jsonl` and
+///   per-namespace tracing logs.
+/// - The final `state.json` is written with the test outcome
+///   (`success`, `failed`, or `stopped`).
+///
+/// [`Device`](crate::Device), [`Router`](crate::Router), and
+/// [`Iface`](crate::Iface) handles do not prevent shutdown. They
+/// remain usable for reading cached data after the lab drops, but
+/// operations that require the namespace runtime will fail.
+///
+/// OS threads spawned via
+/// [`Device::spawn_thread`](crate::Device::spawn_thread) are not
+/// cancelled. They run until the closure returns. The caller is
+/// responsible for arranging termination (e.g. via a shared flag).
+///
+/// Child processes spawned via
+/// [`Device::spawn_command`](crate::Device::spawn_command) are not
+/// killed. They continue running until they exit or the namespace is
+/// reclaimed by the kernel when all file descriptors to it close.
 #[derive(Clone)]
 pub struct Lab {
-    pub(crate) inner: Arc<LabInner>,
+    pub(crate) inner: Arc<LabDropGuard>,
 }
 
 /// Options for constructing a [`Lab`].
@@ -622,10 +706,12 @@ impl Lab {
             }
         });
 
+        let flush_registry = Arc::new(crate::writer::FlushRegistry::new());
         let mut netns_mgr = crate::netns::NetnsManager::new();
         if let Some(ref rd) = run_dir {
             netns_mgr.set_run_dir(rd.clone());
         }
+        netns_mgr.set_flush_registry(Arc::clone(&flush_registry));
         let netns = Arc::new(netns_mgr);
         let cancel = CancellationToken::new();
         let (events_tx, _rx) = tokio::sync::broadcast::channel::<LabEvent>(256);
@@ -633,23 +719,25 @@ impl Lab {
         let test_status = Arc::new(AtomicU8::new(crate::writer::STATUS_UNKNOWN));
         let shared_state = Arc::new(std::sync::Mutex::new(crate::event::LabState::default()));
 
+        let lab_inner = Arc::new(LabInner {
+            core: std::sync::Mutex::new(core),
+            netns: Arc::clone(&netns),
+            cancel,
+            opid: AtomicU64::new(0),
+            events_tx,
+            label: label.clone(),
+            ns_to_name: std::sync::Mutex::new(HashMap::new()),
+            run_dir: run_dir.clone(),
+            ipv6_dad_mode: opts.ipv6_dad_mode,
+            ipv6_provisioning_mode: opts.ipv6_provisioning_mode,
+            dns_server: std::sync::Mutex::new(None),
+            writer_handle: std::sync::Mutex::new(None),
+            test_status: test_status.clone(),
+            shared_state: shared_state.clone(),
+            flush_registry,
+        });
         let lab = Self {
-            inner: Arc::new(LabInner {
-                core: std::sync::Mutex::new(core),
-                netns: Arc::clone(&netns),
-                cancel,
-                opid: AtomicU64::new(0),
-                events_tx,
-                label: label.clone(),
-                ns_to_name: std::sync::Mutex::new(HashMap::new()),
-                run_dir: run_dir.clone(),
-                ipv6_dad_mode: opts.ipv6_dad_mode,
-                ipv6_provisioning_mode: opts.ipv6_provisioning_mode,
-                dns_server: std::sync::Mutex::new(None),
-                writer_handle: std::sync::Mutex::new(None),
-                test_status: test_status.clone(),
-                shared_state: shared_state.clone(),
-            }),
+            inner: Arc::new(LabDropGuard(lab_inner)),
         };
         // Initialize root namespace and IX bridge eagerly — no lazy-init race.
         let cfg = lab.inner.core.lock().unwrap().cfg.clone();
@@ -660,11 +748,17 @@ impl Lab {
         // Spawn file writer if outdir is configured -- subscribe before emitting
         // initial events so the writer captures LabCreated and IxCreated.
         if let Some(ref run_dir) = run_dir {
+            let events_file = Arc::new(
+                crate::writer::SharedEventsFile::new(run_dir)
+                    .context("failed to create events file")?,
+            );
+            lab.inner.flush_registry.register(events_file.clone());
             let handle = crate::writer::spawn_writer(
                 run_dir.clone(),
                 lab.inner.events_tx.subscribe(),
                 lab.inner.cancel.clone(),
                 shared_state,
+                events_file,
             );
             *lab.inner.writer_handle.lock().unwrap() = Some(handle);
         }
@@ -718,7 +812,7 @@ impl Lab {
     /// false positives.
     pub fn test_guard(&self) -> TestGuard {
         TestGuard {
-            inner: Arc::clone(&self.inner),
+            inner: Arc::clone(&self.inner.0),
             marked: false,
         }
     }
@@ -936,7 +1030,7 @@ impl Lab {
         let lab_span = inner.cfg.span.clone();
         if name.starts_with("region_") {
             return RouterBuilder::error(
-                Arc::clone(&self.inner),
+                Arc::clone(&self.inner.0),
                 lab_span,
                 name,
                 anyhow!("router names starting with 'region_' are reserved"),
@@ -944,14 +1038,14 @@ impl Lab {
         }
         if inner.router_id_by_name(name).is_some() {
             return RouterBuilder::error(
-                Arc::clone(&self.inner),
+                Arc::clone(&self.inner.0),
                 lab_span,
                 name,
                 anyhow!("router '{}' already exists", name),
             );
         }
         RouterBuilder {
-            inner: Arc::clone(&self.inner),
+            inner: Arc::clone(&self.inner.0),
             lab_span,
             name: name.to_string(),
             region: None,
@@ -981,7 +1075,7 @@ impl Lab {
         let lab_span = inner.cfg.span.clone();
         if inner.device_id_by_name(name).is_some() {
             return DeviceBuilder {
-                inner: Arc::clone(&self.inner),
+                inner: Arc::clone(&self.inner.0),
                 lab_span,
                 id: NodeId(u64::MAX),
                 mtu: None,
@@ -991,7 +1085,7 @@ impl Lab {
         }
         let id = inner.add_device(name);
         DeviceBuilder {
-            inner: Arc::clone(&self.inner),
+            inner: Arc::clone(&self.inner.0),
             lab_span,
             id,
             mtu: None,
@@ -1466,7 +1560,7 @@ impl Lab {
 
     /// Returns a handle to the IX (Internet Exchange) root namespace.
     pub fn ix(&self) -> Ix {
-        Ix::new(Arc::clone(&self.inner))
+        Ix::new(Arc::clone(&self.inner.0))
     }
 
     /// Safety-net cleanup: drops fd-registry entries for this lab's prefix.
@@ -1560,7 +1654,7 @@ impl Lab {
             id,
             d.name.clone(),
             d.ns.clone(),
-            Arc::clone(&self.inner),
+            Arc::clone(&self.inner.0),
         ))
     }
 
@@ -1572,7 +1666,7 @@ impl Lab {
             id,
             r.name.clone(),
             r.ns.clone(),
-            Arc::clone(&self.inner),
+            Arc::clone(&self.inner.0),
         ))
     }
 
@@ -1585,7 +1679,7 @@ impl Lab {
             id,
             d.name.clone(),
             d.ns.clone(),
-            Arc::clone(&self.inner),
+            Arc::clone(&self.inner.0),
         ))
     }
 
@@ -1598,7 +1692,7 @@ impl Lab {
             id,
             r.name.clone(),
             r.ns.clone(),
-            Arc::clone(&self.inner),
+            Arc::clone(&self.inner.0),
         ))
     }
 
@@ -1614,7 +1708,7 @@ impl Lab {
                     id,
                     d.name.clone(),
                     d.ns.clone(),
-                    Arc::clone(&self.inner),
+                    Arc::clone(&self.inner.0),
                 ))
             })
             .collect()
@@ -1632,7 +1726,7 @@ impl Lab {
                     id,
                     r.name.clone(),
                     r.ns.clone(),
-                    Arc::clone(&self.inner),
+                    Arc::clone(&self.inner.0),
                 ))
             })
             .collect()
