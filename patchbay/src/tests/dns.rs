@@ -343,7 +343,7 @@ async fn hickory_resolver() -> Result<()> {
     dns.set_host("hickorytest.patchbay.", IpAddr::V4(dc_ip))?;
 
     let jh = dev.spawn(move |_dev| async move {
-        let resolver = TokioResolver::builder_tokio().ok()?.build();
+        let resolver = TokioResolver::builder_tokio().ok()?.build().ok()?;
         let lookup = resolver.lookup_ip("hickorytest.patchbay").await.ok()?;
         lookup.iter().next()
     });
@@ -376,13 +376,16 @@ async fn hickory_ipv4_lookup() -> Result<()> {
             hickory_resolver::system_conf::read_system_conf().expect("system conf");
         let mut builder = TokioResolver::builder_with_config(
             config,
-            hickory_resolver::name_server::TokioConnectionProvider::default(),
+            hickory_resolver::net::runtime::TokioRuntimeProvider::default(),
         );
         *builder.options_mut() = options;
-        let resolver = builder.build();
+        let resolver = builder.build().unwrap();
 
-        match resolver.ipv4_lookup("ipv4test.patchbay").await {
-            Ok(lookup) => lookup.iter().next().copied().map(Ipv4Addr::from),
+        match resolver.lookup_ip("ipv4test.patchbay").await {
+            Ok(lookup) => lookup.iter().find_map(|ip| match ip {
+                std::net::IpAddr::V4(v4) => Some(v4),
+                _ => None,
+            }),
             Err(e) => {
                 tracing::error!("ipv4_lookup failed: {e}");
                 None
@@ -432,13 +435,16 @@ async fn hickory_resolve_stress() -> Result<()> {
                     hickory_resolver::system_conf::read_system_conf().expect("system conf");
                 let mut builder = TokioResolver::builder_with_config(
                     config,
-                    hickory_resolver::name_server::TokioConnectionProvider::default(),
+                    hickory_resolver::net::runtime::TokioRuntimeProvider::default(),
                 );
                 *builder.options_mut() = options;
-                let resolver = builder.build();
+                let resolver = builder.build().unwrap();
 
-                match resolver.ipv4_lookup(&hostname).await {
-                    Ok(lookup) => lookup.iter().next().copied().map(Ipv4Addr::from),
+                match resolver.lookup_ip(&hostname).await {
+                    Ok(lookup) => lookup.iter().find_map(|ip| match ip {
+                        std::net::IpAddr::V4(v4) => Some(v4),
+                        _ => None,
+                    }),
                     Err(e) => {
                         tracing::error!("ipv4_lookup failed: {e}");
                         None
@@ -497,14 +503,17 @@ async fn hickory_resolve_relay_setup() -> Result<()> {
                 hickory_resolver::system_conf::read_system_conf().expect("system conf");
             let mut builder = TokioResolver::builder_with_config(
                 config,
-                hickory_resolver::name_server::TokioConnectionProvider::default(),
+                hickory_resolver::net::runtime::TokioRuntimeProvider::default(),
             );
             *builder.options_mut() = options;
-            let resolver = builder.build();
+            let resolver = builder.build().unwrap();
 
-            match resolver.ipv4_lookup("relay.test").await {
+            match resolver.lookup_ip("relay.test").await {
                 Ok(lookup) => {
-                    let first = lookup.iter().next().copied().map(Ipv4Addr::from);
+                    let first = lookup.iter().find_map(|ip| match ip {
+                        std::net::IpAddr::V4(v4) => Some(v4),
+                        _ => None,
+                    });
                     info!(%label, ?first, "resolved relay.test");
                     first
                 }

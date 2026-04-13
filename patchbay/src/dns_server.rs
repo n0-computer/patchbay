@@ -194,24 +194,21 @@ async fn serve(records: Arc<RwLock<RecordStore>>, socket: tokio::net::UdpSocket)
 
 fn handle_query(records: &RwLock<RecordStore>, buf: &[u8]) -> Option<Vec<u8>> {
     let query = Message::from_bytes(buf).ok()?;
-    if query.message_type() != MessageType::Query {
+    if query.message_type != MessageType::Query {
         return None;
     }
 
-    let mut response = Message::new();
-    response.set_id(query.id());
-    response.set_message_type(MessageType::Response);
-    response.set_op_code(query.op_code());
-    response.set_recursion_desired(query.recursion_desired());
-    response.set_recursion_available(false);
-    response.set_authoritative(true);
-    response.add_queries(query.queries().iter().cloned());
+    let mut response = Message::response(query.id, query.op_code);
+    response.metadata.recursion_desired = query.recursion_desired;
+    response.metadata.recursion_available = false;
+    response.metadata.authoritative = true;
+    response.add_queries(query.queries.iter().cloned());
 
     let store = records.read().expect("poisoned");
     let mut found = false;
     let mut name_exists = false;
-    for q in query.queries() {
-        let qname: LowerName = q.name().into();
+    for q in &query.queries {
+        let qname = LowerName::from(q.name().clone());
         if !name_exists {
             name_exists = store.keys().any(|(n, _)| *n == qname);
         }
@@ -225,14 +222,14 @@ fn handle_query(records: &RwLock<RecordStore>, buf: &[u8]) -> Option<Vec<u8>> {
         }
     }
     if !found {
-        // Name exists but queried type doesn't → NOERROR (empty answer).
-        // Name doesn't exist at all → NXDomain.
+        // Name exists but queried type doesn't: NOERROR (empty answer).
+        // Name doesn't exist at all: NXDomain.
         let code = if name_exists {
             ResponseCode::NoError
         } else {
             ResponseCode::NXDomain
         };
-        response.set_response_code(code);
+        response.metadata.response_code = code;
     }
 
     response.to_bytes().ok()
