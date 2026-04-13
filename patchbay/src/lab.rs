@@ -300,6 +300,10 @@ pub(crate) struct LabInner {
     /// In-process DNS server on the IX bridge (lazy, started on first access).
     pub dns_server: std::sync::Mutex<Option<crate::dns_server::DnsServer>>,
     /// Writer task handle (kept alive until lab is dropped).
+    /// Writer task handle. The task listens to `cancel` for graceful shutdown
+    /// (draining events + final flush). Stored as a bare JoinHandle so the
+    /// task can complete its cleanup during Runtime::drop rather than being
+    /// aborted immediately.
     pub writer_handle: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
     /// Test outcome flag shared with the writer and [`TestGuard`].
     pub test_status: Arc<AtomicU8>,
@@ -315,9 +319,6 @@ impl Drop for LabInner {
     fn drop(&mut self) {
         // Fallback cancellation in case the drop guard was bypassed.
         self.cancel.cancel();
-        if let Some(dns) = self.dns_server.get_mut().unwrap().take() {
-            dns.shutdown();
-        }
     }
 }
 
@@ -337,6 +338,7 @@ impl Drop for LabInner {
 ///    runtimes shut down, aborting all spawned tasks including user
 ///    tasks from `device.spawn()`. Sync workers exit after completing
 ///    any in-flight `run_sync` closure.
+/// 3. Flush all registered writers via `FlushRegistry::flush_all()`.
 ///    This synchronously flushes events.jsonl and per-namespace tracing
 ///    logs (`.tracing.jsonl`, `.ansi`, `.events.jsonl`, `.metrics`).
 /// 4. Write the final `state.json` with the test outcome status.

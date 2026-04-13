@@ -31,7 +31,6 @@ use hickory_proto::{
     },
     serialize::binary::{BinDecodable, BinEncodable},
 };
-use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
 use crate::netns;
@@ -62,7 +61,8 @@ type RecordStore = HashMap<(LowerName, RecordType), Vec<Record>>;
 #[derive(Clone)]
 pub struct DnsServer {
     records: Arc<RwLock<RecordStore>>,
-    shutdown: CancellationToken,
+    /// Aborts the serve task when the last clone drops.
+    _task: Arc<tokio_util::task::AbortOnDropHandle<()>>,
 }
 
 impl DnsServer {
@@ -74,7 +74,6 @@ impl DnsServer {
     /// the serve loop runs as an async task.
     pub(crate) fn start(netns: &Arc<netns::NetnsManager>, root_ns: &str) -> Result<Self> {
         let records = Arc::new(RwLock::new(RecordStore::new()));
-        let shutdown = CancellationToken::new();
 
         // Bind a dual-stack socket on [::]:53 inside the root namespace.
         // A single IPv6 socket with IPV6_V6ONLY disabled (Linux default)
@@ -88,20 +87,21 @@ impl DnsServer {
         })?;
 
         // Spawn the serve loop on the root namespace's tokio runtime.
+        // The task is aborted when the last DnsServer clone drops.
         let rt = netns.rt_handle_for(root_ns)?;
         let addr = socket.local_addr().ok();
         let serve_records = records.clone();
-        let cancel = shutdown.clone();
-        rt.spawn(async move {
+        let handle = rt.spawn(async move {
             let socket =
                 tokio::net::UdpSocket::from_std(socket).expect("convert std UdpSocket to tokio");
-            cancel
-                .run_until_cancelled(serve(serve_records, socket))
-                .await;
+            serve(serve_records, socket).await;
         });
         debug!(?addr, "dns server listening");
 
-        Ok(Self { records, shutdown })
+        Ok(Self {
+            records,
+            _task: Arc::new(tokio_util::task::AbortOnDropHandle::new(handle)),
+        })
     }
 
     /// Sets an A or AAAA record, replacing any previous record of the same type
@@ -162,13 +162,6 @@ impl DnsServer {
             }
         }
         None
-    }
-}
-
-impl DnsServer {
-    /// Shuts down the DNS server, stopping all serve loops.
-    pub(crate) fn shutdown(&self) {
-        self.shutdown.cancel();
     }
 }
 
