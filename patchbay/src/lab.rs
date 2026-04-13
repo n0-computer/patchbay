@@ -412,6 +412,7 @@ pub struct LabOpts {
     label: Option<String>,
     ipv6_dad_mode: Ipv6DadMode,
     ipv6_provisioning_mode: Ipv6ProvisioningMode,
+    allow_real_root: bool,
 }
 
 /// Where the lab writes event logs and state files.
@@ -504,6 +505,17 @@ impl LabOpts {
         self
     }
 
+    /// Allows running as real root without a user namespace.
+    ///
+    /// By default, `Lab::new` refuses to run as real root (UID 0 outside a
+    /// user namespace) because mount operations could leak to the host
+    /// filesystem. Call `init_userns` before creating a lab to enter a user
+    /// namespace, or set this flag to bypass the check.
+    pub fn allow_real_root(mut self) -> Self {
+        self.allow_real_root = true;
+        self
+    }
+
     /// Sets IPv6 provisioning behavior.
     pub fn ipv6_provisioning_mode(mut self, mode: Ipv6ProvisioningMode) -> Self {
         self.ipv6_provisioning_mode = mode;
@@ -522,6 +534,36 @@ impl LabOpts {
 impl Lab {
     // ── Constructors ────────────────────────────────────────────────────
 
+    /// Refuses to run as real root (UID 0 in the initial user namespace).
+    ///
+    /// Running as real root without a user namespace is dangerous because
+    /// mount operations can leak to the host filesystem. Call `init_userns`
+    /// before creating a lab to enter a user namespace.
+    fn refuse_real_root() -> Result<()> {
+        #[cfg(target_os = "linux")]
+        {
+            if !nix::unistd::Uid::effective().is_root() {
+                return Ok(());
+            }
+            // Check if we're in a non-initial user namespace by comparing
+            // our user namespace inode to the init namespace (pid 1).
+            let my_userns = std::fs::read_link("/proc/self/ns/user")
+                .ok()
+                .and_then(|p| p.to_str().map(String::from));
+            let init_userns = std::fs::read_link("/proc/1/ns/user")
+                .ok()
+                .and_then(|p| p.to_str().map(String::from));
+            if my_userns == init_userns {
+                anyhow::bail!(
+                    "refusing to run as real root (not inside a user namespace). \
+                     Call patchbay::init_userns() before creating a Lab, or use \
+                     LabOpts::default().allow_real_root() to bypass this check."
+                );
+            }
+        }
+        Ok(())
+    }
+
     /// Creates a new lab with default address ranges and IX settings.
     ///
     /// Reads `PATCHBAY_OUTDIR` from the environment for event output.
@@ -532,6 +574,9 @@ impl Lab {
 
     /// Creates a new lab with the given options.
     pub async fn with_opts(opts: LabOpts) -> Result<Self> {
+        if !opts.allow_real_root {
+            Self::refuse_real_root()?;
+        }
         let pid = std::process::id();
         let pid_tag = pid % 9999 + 1;
         let lab_seq = LAB_COUNTER.fetch_add(1, Ordering::Relaxed);

@@ -13,13 +13,7 @@ use std::sync::OnceLock;
 pub fn init_userns() -> anyhow::Result<()> {
     static RESULT: OnceLock<Result<(), String>> = OnceLock::new();
     RESULT
-        .get_or_init(|| {
-            #[cfg(target_os = "linux")]
-            if nix::unistd::Uid::effective().is_root() {
-                return Ok(());
-            }
-            do_bootstrap().map_err(|e| e.to_string())
-        })
+        .get_or_init(|| do_bootstrap().map_err(|e| e.to_string()))
         .as_ref()
         .map(|_| ())
         .map_err(|e| anyhow::anyhow!("{e}"))
@@ -43,9 +37,6 @@ pub unsafe fn init_userns_for_ctor() {
 fn do_bootstrap() -> anyhow::Result<()> {
     use anyhow::Context;
     use nix::sched::{unshare, CloneFlags};
-    if nix::unistd::Uid::effective().is_root() {
-        return Ok(());
-    }
     let uid = nix::unistd::Uid::current().as_raw();
     let gid = nix::unistd::Gid::current().as_raw();
     unshare(CloneFlags::CLONE_NEWUSER).context("unshare(CLONE_NEWUSER) failed")?;
@@ -67,9 +58,6 @@ fn do_bootstrap() -> anyhow::Result<()> {
 #[cfg(target_os = "linux")]
 unsafe fn userns_bootstrap_libc() {
     let uid = unsafe { libc::getuid() };
-    if uid == 0 {
-        return;
-    }
     let gid = unsafe { libc::getgid() };
     if unsafe { libc::unshare(libc::CLONE_NEWUSER) } != 0 {
         return;

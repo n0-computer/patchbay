@@ -100,9 +100,9 @@ fn apply_mount_overlay(overlay: Option<&DnsOverlay>) {
         return;
     }
     // Make all mounts private so bind mounts in this namespace do not
-    // propagate back to the parent. Without this, systems where / is
-    // mounted as "shared" (common with systemd) will see our overlay
-    // of /etc/resolv.conf and /etc/hosts leak into the real filesystem.
+    // propagate to the parent. The user namespace already prevents
+    // affecting the real root filesystem, but this is a low-cost
+    // safeguard against propagation within the lab's namespace tree.
     let ret = unsafe {
         libc::mount(
             c"none".as_ptr(),
@@ -114,7 +114,7 @@ fn apply_mount_overlay(overlay: Option<&DnsOverlay>) {
     };
     if ret != 0 {
         tracing::warn!(
-            "mount --make-rprivate / failed: {} — bind mounts may propagate to host",
+            "mount --make-rprivate / failed: {} — bind mounts may propagate within the lab",
             std::io::Error::last_os_error()
         );
     }
