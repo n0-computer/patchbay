@@ -1,4 +1,4 @@
-//! High-level lab API: [`Lab`], [`LabOpts`], [`Ix`], topology types.
+//! High-level lab API: [`Lab`], [`LabBuilder`], [`Ix`], topology types.
 
 use std::{
     collections::HashMap,
@@ -20,6 +20,7 @@ use tracing::{debug, debug_span};
 
 pub use crate::qdisc::LinkLimits;
 use crate::{
+    config::LabConfig,
     core::{
         self, CoreConfig, DeviceData, DownstreamPool, NetworkCore, NodeId, RouterData,
         RA_DEFAULT_ENABLED, RA_DEFAULT_INTERVAL_SECS, RA_DEFAULT_LIFETIME_SECS,
@@ -430,7 +431,7 @@ impl LabInner {
 /// A virtual network lab running in Linux network namespaces.
 ///
 /// `Lab` is cheaply cloneable. All methods take `&self` and use interior
-/// mutability. Use [`Lab::new`] or [`Lab::with_opts`] to create a lab,
+/// mutability. Use [`Lab::new`] or [`Lab::builder()`] to create a lab,
 /// then build routers and devices with [`Lab::add_router`] and
 /// [`Lab::add_device`].
 ///
@@ -471,32 +472,33 @@ pub struct Lab {
     pub(crate) inner: Arc<LabDropGuard>,
 }
 
-/// Options for constructing a [`Lab`].
+/// Builder for constructing a [`Lab`] with custom configuration.
 ///
-/// Use the builder methods to configure output directory and label, then pass
-/// to [`Lab::with_opts`].
+/// Use [`Lab::builder()`] to obtain a `LabBuilder`, configure output directory
+/// and label with the builder methods, then call [`.build()`](LabBuilder::build)
+/// to create the lab.
 ///
 /// # Example
 /// ```no_run
-/// # use patchbay::{Lab, LabOpts, OutDir};
+/// # use patchbay::{Lab, LabBuilder, OutDir};
 /// # #[tokio::main(flavor = "current_thread")]
 /// # async fn main() -> anyhow::Result<()> {
-/// let lab = Lab::with_opts(
-///     LabOpts::default()
-///         .outdir(OutDir::Nested("/tmp/patchbay-out".into()))
-///         .label("my-test"),
-/// )
-/// .await?;
+/// let lab = Lab::builder()
+///     .outdir(OutDir::Nested("/tmp/patchbay-out".into()))
+///     .label("my-test")
+///     .build()
+///     .await?;
 /// # Ok(())
 /// # }
 /// ```
 #[derive(Default)]
-pub struct LabOpts {
+pub struct LabBuilder {
     outdir: Option<OutDir>,
     label: Option<String>,
     ipv6_dad_mode: Ipv6DadMode,
     ipv6_provisioning_mode: Ipv6ProvisioningMode,
     allow_real_root: bool,
+    config: Option<LabConfig>,
 }
 
 /// Where the lab writes event logs and state files.
@@ -561,7 +563,7 @@ impl Ipv6Profile {
     }
 }
 
-impl LabOpts {
+impl LabBuilder {
     /// Sets the output directory for event log and state files.
     pub fn outdir(mut self, outdir: OutDir) -> Self {
         self.outdir = Some(outdir);
@@ -606,12 +608,29 @@ impl LabOpts {
         self
     }
 
+    /// Loads a TOML lab configuration. The config is applied during
+    /// [`build`](Self::build), creating all routers and devices defined
+    /// in the file. Builder options (outdir, label, etc.) take precedence
+    /// over config defaults.
+    pub fn config(mut self, cfg: LabConfig) -> Self {
+        self.config = Some(cfg);
+        self
+    }
+
     /// Applies a deployment profile that sets both DAD and v6 provisioning mode.
     pub fn ipv6_profile(mut self, profile: Ipv6Profile) -> Self {
         let (dad, provisioning) = profile.modes();
         self.ipv6_dad_mode = dad;
         self.ipv6_provisioning_mode = provisioning;
         self
+    }
+
+    /// Builds the [`Lab`] with the configured options.
+    ///
+    /// If a TOML [`config`](Self::config) was set, all routers and devices
+    /// defined in the config are created during build.
+    pub async fn build(self) -> Result<Lab> {
+        Lab::build(self).await
     }
 }
 
@@ -641,26 +660,32 @@ impl Lab {
                 anyhow::bail!(
                     "refusing to run as real root (not inside a user namespace). \
                      Call patchbay::init_userns() before creating a Lab, or use \
-                     LabOpts::default().allow_real_root() to bypass this check."
+                     Lab::builder().allow_real_root() to bypass this check."
                 );
             }
         }
         Ok(())
     }
 
+    /// Returns a [`LabBuilder`] for configuring and constructing a [`Lab`].
+    pub fn builder() -> LabBuilder {
+        LabBuilder::default()
+    }
+
     /// Creates a new lab with default address ranges and IX settings.
     ///
     /// Reads `PATCHBAY_OUTDIR` from the environment for event output.
-    /// Use [`Lab::with_opts`] for explicit configuration.
+    /// Use [`Lab::builder()`] for explicit configuration.
     pub async fn new() -> Result<Self> {
-        Self::with_opts(LabOpts::default().outdir_from_env()).await
+        Self::builder().outdir_from_env().build().await
     }
 
-    /// Creates a new lab with the given options.
-    pub async fn with_opts(opts: LabOpts) -> Result<Self> {
+    /// Internal constructor used by [`LabBuilder::build`].
+    async fn build(mut opts: LabBuilder) -> Result<Self> {
         if !opts.allow_real_root {
             Self::refuse_real_root()?;
         }
+        let config = opts.config.take();
         let pid = std::process::id();
         let pid_tag = pid % 9999 + 1;
         let lab_seq = LAB_COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -776,6 +801,11 @@ impl Lab {
             gw_v6: cfg.ix_gw_v6,
         });
 
+        // Apply TOML config if provided.
+        if let Some(cfg) = config {
+            lab.apply_config(cfg).await?;
+        }
+
         Ok(lab)
     }
 
@@ -820,22 +850,13 @@ impl Lab {
     /// Parses `lab.toml`, builds the network, and returns a ready-to-use lab.
     pub async fn load(path: impl AsRef<Path>) -> Result<Self> {
         let text = std::fs::read_to_string(path).context("read lab config")?;
-        let cfg: crate::config::LabConfig = toml::from_str(&text).context("parse lab config")?;
-        Self::from_config(cfg).await
+        let cfg: LabConfig = toml::from_str(&text).context("parse lab config")?;
+        Self::builder().outdir_from_env().config(cfg).build().await
     }
 
-    /// Builds a `Lab` from a parsed config, creating all namespaces and links.
-    pub async fn from_config(cfg: crate::config::LabConfig) -> Result<Self> {
-        Self::from_config_with_opts(cfg, LabOpts::default().outdir_from_env()).await
-    }
-
-    /// Builds a `Lab` from a parsed config with explicit options.
-    pub async fn from_config_with_opts(
-        cfg: crate::config::LabConfig,
-        opts: LabOpts,
-    ) -> Result<Self> {
-        let lab = Self::with_opts(opts).await?;
-
+    /// Applies a parsed TOML config to an already-built lab, creating all
+    /// routers and devices defined in the config.
+    async fn apply_config(&self, cfg: LabConfig) -> Result<()> {
         // Region latency pairs from TOML config are ignored in the new region API.
         // TODO: support regions in TOML config via add_region / link_regions.
 
@@ -863,12 +884,12 @@ impl Lab {
             for name in ready {
                 let rcfg = pending.remove(name).unwrap();
                 let upstream = {
-                    let inner = lab.inner.core.lock().unwrap();
+                    let inner = self.inner.core.lock().unwrap();
                     rcfg.upstream
                         .as_deref()
                         .and_then(|n| inner.router_id_by_name(n))
                 };
-                let mut rb = lab
+                let mut rb = self
                     .add_router(&rcfg.name)
                     .nat(rcfg.nat)
                     .ip_support(rcfg.ip_support)
@@ -951,7 +972,7 @@ impl Lab {
                         .ok_or_else(|| {
                             anyhow!("device '{}' iface '{}' missing 'gateway'", dev_name, ifname)
                         })?;
-                    let router_id = lab
+                    let router_id = self
                         .inner
                         .core
                         .lock()
@@ -997,7 +1018,7 @@ impl Lab {
             result
         };
         for dev in dev_data {
-            let mut builder = lab.add_device(&dev.name);
+            let mut builder = self.add_device(&dev.name);
             for (ifname, router_id, impair) in dev.ifaces {
                 let config = IfaceConfig::routed(router_id);
                 let config = if let Some(cond) = impair {
@@ -1013,7 +1034,7 @@ impl Lab {
             builder.build().await?;
         }
 
-        Ok(lab)
+        Ok(())
     }
 
     // ── Builder methods (sync — just populate data structures) ──────────

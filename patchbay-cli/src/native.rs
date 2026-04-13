@@ -121,7 +121,9 @@ pub async fn inspect_command(input: PathBuf, work_dir: PathBuf) -> Result<()> {
     check_caps()?;
 
     let (topo, is_sim) = load_topology_for_inspect(&input)?;
-    let lab = patchbay_runner::Lab::from_config(topo.clone())
+    let lab = patchbay_runner::Lab::builder()
+        .config(topo.clone())
+        .build()
         .await
         .with_context(|| format!("build lab config from {}", input.display()))?;
 

@@ -851,7 +851,7 @@ impl RouterPreset {
     /// Returns the recommended IPv6 profile for this preset.
     ///
     /// All presets return [`Ipv6Profile::Realistic`](crate::lab::Ipv6Profile). Use
-    /// [`LabOpts::ipv6_profile`](crate::LabOpts::ipv6_profile) with [`Ipv6Profile::Deterministic`](crate::lab::Ipv6Profile::Deterministic) to
+    /// [`LabBuilder::ipv6_profile`](crate::LabBuilder::ipv6_profile) with [`Ipv6Profile::Deterministic`](crate::lab::Ipv6Profile::Deterministic) to
     /// override for fast, reproducible tests.
     pub fn recommended_ipv6_profile(self) -> crate::lab::Ipv6Profile {
         crate::lab::Ipv6Profile::Realistic

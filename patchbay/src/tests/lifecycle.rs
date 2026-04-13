@@ -53,7 +53,7 @@ default_via = "eth0"
 gateway = "dc1"
 "#;
     let parsed: config::LabConfig = toml::from_str(cfg)?;
-    let lab = Lab::from_config(parsed).await?;
+    let lab = Lab::builder().config(parsed).build().await?;
     assert!(lab.device_by_name("fetcher-0").is_some());
     assert!(lab.device_by_name("fetcher-1").is_some());
     assert!(lab.device_by_name("fetcher").is_none());
@@ -231,7 +231,10 @@ async fn add_device_after_build() -> Result<()> {
 #[tokio::test(flavor = "current_thread")]
 async fn drop_guard_flushes_with_outstanding_handles() -> Result<()> {
     let outdir = testdir::testdir!();
-    let lab = Lab::with_opts(LabOpts::default().outdir(OutDir::Exact(outdir.clone()))).await?;
+    let lab = Lab::builder()
+        .outdir(OutDir::Exact(outdir.clone()))
+        .build()
+        .await?;
     let guard = lab.test_guard();
     let dc = lab.add_router("dc").build().await?;
     let dev = lab.add_device("dev").iface("eth0", dc.id()).build().await?;
