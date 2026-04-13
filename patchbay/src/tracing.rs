@@ -19,10 +19,10 @@ use std::{
     fs::File,
     io::{BufWriter, Write},
     path::{Path, PathBuf},
-    sync::Mutex,
+    sync::{Arc, Mutex},
 };
 
-use crate::consts;
+use crate::{consts, writer::Flushable};
 
 /// A file writer that defers creation until the first write.
 /// This avoids creating empty files for namespaces that never log.
@@ -248,19 +248,44 @@ struct NsWriterSubscriber {
     /// The existing global subscriber — handles all span lifecycle.
     inner: tracing::Dispatch,
     /// JSON tracing log writer (all events above file_level).
-    tracing_writer: Mutex<LazyFile>,
+    tracing_writer: Arc<Mutex<LazyFile>>,
     /// Human-readable ANSI tracing log writer.
-    ansi_writer: Mutex<LazyFile>,
+    ansi_writer: Arc<Mutex<LazyFile>>,
     /// Extracted `_events::` NDJSON writer.
-    events_writer: Mutex<LazyFile>,
+    events_writer: Arc<Mutex<LazyFile>>,
     /// Per-node metrics JSONL writer.
-    metrics_writer: Mutex<LazyFile>,
+    metrics_writer: Arc<Mutex<LazyFile>>,
     /// Target+level filter for the tracing file (from PATCHBAY_LOG / RUST_LOG).
     /// Supports full directive syntax, e.g. `iroh=trace,patchbay=debug`.
     file_filter: tracing_subscriber::filter::Targets,
     /// Local span metadata storage to emit tracing-subscriber-compatible
     /// `span` and `spans` fields in JSON logs.
     span_state: Mutex<SpanState>,
+}
+
+/// Handle that shares the same `Arc<Mutex<LazyFile>>` writers as a
+/// [`NsWriterSubscriber`], allowing the [`FlushRegistry`](crate::writer::FlushRegistry)
+/// to flush buffered bytes during lab shutdown.
+pub(crate) struct NsFlushHandle {
+    tracing_writer: Arc<Mutex<LazyFile>>,
+    ansi_writer: Arc<Mutex<LazyFile>>,
+    events_writer: Arc<Mutex<LazyFile>>,
+    metrics_writer: Arc<Mutex<LazyFile>>,
+}
+
+impl Flushable for NsFlushHandle {
+    fn flush(&self) {
+        for writer in [
+            &self.tracing_writer,
+            &self.ansi_writer,
+            &self.events_writer,
+            &self.metrics_writer,
+        ] {
+            if let Ok(mut guard) = writer.lock() {
+                let _ = guard.flush();
+            }
+        }
+    }
 }
 
 impl NsWriterSubscriber {
@@ -573,7 +598,7 @@ impl tracing::Subscriber for NsWriterSubscriber {
 pub(crate) fn install_namespace_subscriber(
     log_prefix: &str,
     run_dir: Option<&Path>,
-) -> Option<tracing::subscriber::DefaultGuard> {
+) -> Option<(tracing::subscriber::DefaultGuard, Arc<dyn Flushable>)> {
     let run_dir = run_dir?;
 
     // Ensure run_dir exists (writer may not have created it yet).
@@ -595,17 +620,29 @@ pub(crate) fn install_namespace_subscriber(
     // is delegated to it, keeping a single Registry for the whole process.
     let inner = tracing::dispatcher::get_default(|d| d.clone());
 
+    let tracing_writer = Arc::new(Mutex::new(LazyFile::new(tracing_path)));
+    let ansi_writer = Arc::new(Mutex::new(LazyFile::new(ansi_path)));
+    let events_writer = Arc::new(Mutex::new(LazyFile::new(events_path)));
+    let metrics_writer = Arc::new(Mutex::new(LazyFile::new(metrics_path)));
+
+    let flush_handle = Arc::new(NsFlushHandle {
+        tracing_writer: Arc::clone(&tracing_writer),
+        ansi_writer: Arc::clone(&ansi_writer),
+        events_writer: Arc::clone(&events_writer),
+        metrics_writer: Arc::clone(&metrics_writer),
+    });
+
     let subscriber = NsWriterSubscriber {
         inner,
-        tracing_writer: Mutex::new(LazyFile::new(tracing_path)),
-        ansi_writer: Mutex::new(LazyFile::new(ansi_path)),
-        events_writer: Mutex::new(LazyFile::new(events_path)),
-        metrics_writer: Mutex::new(LazyFile::new(metrics_path)),
+        tracing_writer,
+        ansi_writer,
+        events_writer,
+        metrics_writer,
         file_filter,
         span_state: Mutex::new(SpanState::default()),
     };
 
-    Some(tracing::subscriber::set_default(subscriber))
+    Some((tracing::subscriber::set_default(subscriber), flush_handle))
 }
 
 #[cfg(test)]

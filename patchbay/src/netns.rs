@@ -39,6 +39,9 @@ pub(crate) struct NamespaceOpts {
     /// Set on the sync worker so it shares the async worker's file handles.
     #[debug(skip)]
     pub tracing_dispatch: Option<tracing::Dispatch>,
+    /// Registry for flushing buffered writers during lab shutdown.
+    #[debug(skip)]
+    pub flush_registry: Option<Arc<crate::writer::FlushRegistry>>,
 }
 
 /// DNS overlay paths for bind-mounting `/etc/hosts` and `/etc/resolv.conf`.
@@ -81,7 +84,17 @@ fn setup_namespace_thread(
         // The root namespace (IX) has no log_prefix and should not create tracing files.
         let run_dir = opts.log_prefix.as_ref().and(opts.run_dir.as_ref());
         let log_name = opts.log_prefix.as_deref().unwrap_or("ns");
-        crate::ns_tracing::install_namespace_subscriber(log_name, run_dir.map(|p| p.as_path()))
+        let result =
+            crate::ns_tracing::install_namespace_subscriber(log_name, run_dir.map(|p| p.as_path()));
+        match result {
+            Some((guard, flush_handle)) => {
+                if let Some(ref registry) = opts.flush_registry {
+                    registry.register(flush_handle);
+                }
+                Some(guard)
+            }
+            None => None,
+        }
     }
 }
 
@@ -433,6 +446,8 @@ pub(crate) struct NetnsManager {
     workers: Mutex<HashMap<String, Worker>>,
     /// Run output directory for per-namespace tracing logs.
     run_dir: Option<PathBuf>,
+    /// Registry for flushing buffered writers during lab shutdown.
+    flush_registry: Option<Arc<crate::writer::FlushRegistry>>,
 }
 
 impl Default for NetnsManager {
@@ -447,12 +462,34 @@ impl NetnsManager {
             parent_span: tracing::Span::none(),
             workers: Mutex::new(HashMap::new()),
             run_dir: None,
+            flush_registry: None,
         }
     }
 
     /// Set the run output directory for per-namespace tracing logs.
     pub(crate) fn set_run_dir(&mut self, run_dir: PathBuf) {
         self.run_dir = Some(run_dir);
+    }
+
+    /// Cancels all async and sync workers, causing tokio runtimes to
+    /// shut down (aborting spawned tasks) and sync workers to exit.
+    /// Does not join the threads (that happens in Worker::drop when
+    /// LabInner is freed).
+    pub(crate) fn cancel_all_workers(&self) {
+        let workers = self.workers.lock().expect("poisoned");
+        for worker in workers.values() {
+            // Cancel the async worker's tokio runtime.
+            worker.cancel.cancel();
+            // Send shutdown to the sync worker (if started).
+            if let Some(ref sw) = *worker.sync_worker.lock().expect("poisoned") {
+                let _ = sw.tx.try_send(SyncMsg::Shutdown);
+            }
+        }
+    }
+
+    /// Set the flush registry for flushing buffered writers during lab shutdown.
+    pub(crate) fn set_flush_registry(&mut self, registry: Arc<crate::writer::FlushRegistry>) {
+        self.flush_registry = Some(registry);
     }
 
     // ── Namespace lifecycle ──────────────────────────────────────────
@@ -475,6 +512,7 @@ impl NetnsManager {
             run_dir: self.run_dir.clone(),
             log_prefix,
             tracing_dispatch: None,
+            flush_registry: self.flush_registry.clone(),
         };
         let worker = Worker::spawn(name, self.parent_span.clone(), opts)?;
         self.workers

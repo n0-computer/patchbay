@@ -20,7 +20,7 @@ use crate::{
     device::record_metric,
     event::{LabEventKind, RouterState},
     firewall::{Firewall, FirewallConfigBuilder},
-    lab::{Ipv6ProvisioningMode, Lab, LabInner, LinkCondition},
+    lab::{Ipv6ProvisioningMode, LabInner, LinkCondition},
     nat::{IpSupport, Nat, NatV6Mode},
     netlink::Netlink,
     nft::{
@@ -187,13 +187,6 @@ impl Router {
     /// Returns the network namespace name for this router.
     pub fn ns(&self) -> &str {
         &self.ns
-    }
-
-    /// Returns a clone of the owning [`Lab`].
-    pub fn lab(&self) -> Lab {
-        Lab {
-            inner: Arc::clone(&self.lab),
-        }
     }
 
     /// Builds a path in the lab run directory for this router.

@@ -15,7 +15,7 @@ use tracing::Instrument as _;
 use crate::{
     core::{self, IfaceBuild, NodeId},
     event::{DeviceState, IfaceSnapshot, LabEventKind},
-    lab::{Ipv6ProvisioningMode, Lab, LabInner},
+    lab::{Ipv6ProvisioningMode, LabInner},
     netlink::Netlink,
     nft::apply_or_remove_impair,
     wiring::{self, setup_device_async, DeviceSetupData},
@@ -157,13 +157,6 @@ impl Device {
     /// Returns the network namespace name for this device.
     pub fn ns(&self) -> &str {
         &self.ns
-    }
-
-    /// Returns a clone of the owning [`Lab`].
-    pub fn lab(&self) -> Lab {
-        Lab {
-            inner: Arc::clone(&self.lab),
-        }
     }
 
     /// Builds a path in the lab run directory for this device.
