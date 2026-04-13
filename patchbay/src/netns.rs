@@ -97,9 +97,28 @@ fn apply_mount_overlay(overlay: Option<&DnsOverlay>) {
         tracing::warn!(
             "unshare(CLONE_NEWNS) failed: {e} — /proc and DNS overlays may show host data"
         );
-    } else {
-        fixup_proc_net();
+        return;
     }
+    // Make all mounts private so bind mounts in this namespace do not
+    // propagate to the parent. The user namespace already prevents
+    // affecting the real root filesystem, but this is a low-cost
+    // safeguard against propagation within the lab's namespace tree.
+    let ret = unsafe {
+        libc::mount(
+            c"none".as_ptr(),
+            c"/".as_ptr(),
+            std::ptr::null(),
+            libc::MS_REC | libc::MS_PRIVATE,
+            std::ptr::null(),
+        )
+    };
+    if ret != 0 {
+        tracing::warn!(
+            "mount --make-rprivate / failed: {} — bind mounts may propagate within the lab",
+            std::io::Error::last_os_error()
+        );
+    }
+    fixup_proc_net();
     if let Some(o) = overlay {
         o.apply();
     }
