@@ -97,9 +97,28 @@ fn apply_mount_overlay(overlay: Option<&DnsOverlay>) {
         tracing::warn!(
             "unshare(CLONE_NEWNS) failed: {e} — /proc and DNS overlays may show host data"
         );
-    } else {
-        fixup_proc_net();
+        return;
     }
+    // Make all mounts private so bind mounts in this namespace do not
+    // propagate back to the parent. Without this, systems where / is
+    // mounted as "shared" (common with systemd) will see our overlay
+    // of /etc/resolv.conf and /etc/hosts leak into the real filesystem.
+    let ret = unsafe {
+        libc::mount(
+            c"none".as_ptr(),
+            c"/".as_ptr(),
+            std::ptr::null(),
+            libc::MS_REC | libc::MS_PRIVATE,
+            std::ptr::null(),
+        )
+    };
+    if ret != 0 {
+        tracing::warn!(
+            "mount --make-rprivate / failed: {} — bind mounts may propagate to host",
+            std::io::Error::last_os_error()
+        );
+    }
+    fixup_proc_net();
     if let Some(o) = overlay {
         o.apply();
     }
