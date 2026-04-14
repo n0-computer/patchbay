@@ -4,7 +4,7 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 
 use anyhow::{anyhow, Context, Result};
 use ipnet::Ipv6Net;
-use tracing::debug;
+use tracing::{debug, trace};
 
 use crate::{
     core::RouterConfig, netns, qdisc, wiring::set_sysctl_root, ConntrackTimeouts, LinkCondition,
@@ -43,7 +43,7 @@ async fn run_nft(rules: &str) -> Result<()> {
 
 /// Applies nftables rules inside `ns` on the namespace's async worker.
 pub(crate) async fn run_nft_in(netns: &netns::NetnsManager, ns: &str, rules: &str) -> Result<()> {
-    debug!(ns = %ns, rules = %rules, "nft: apply rules");
+    trace!(ns = %ns, rules = %rules, "nft: apply rules");
     let rules = rules.to_string();
     let rt = netns.rt_handle_for(ns)?;
     rt.spawn(async move { run_nft(&rules).await })
