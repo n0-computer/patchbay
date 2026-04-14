@@ -18,44 +18,176 @@ fn uses_fullcone_map(cfg: &NatConfig) -> bool {
     matches!(cfg.mapping, NatMapping::EndpointIndependent)
 }
 
+// ── libnftables dlopen fast path ─────────────────────────────────────
+
+mod libnft {
+    use std::{
+        ffi::{CStr, CString},
+        sync::OnceLock,
+    };
+
+    use anyhow::{anyhow, Result};
+
+    type NftCtx = *mut std::ffi::c_void;
+    type NftCtxNew = unsafe extern "C" fn(flags: u32) -> NftCtx;
+    type NftCtxFree = unsafe extern "C" fn(ctx: NftCtx);
+    type NftRunCmdFromBuffer =
+        unsafe extern "C" fn(ctx: NftCtx, buf: *const std::ffi::c_char) -> i32;
+    type NftCtxBufferOutput = unsafe extern "C" fn(ctx: NftCtx) -> i32;
+    type NftCtxGetOutputBuffer = unsafe extern "C" fn(ctx: NftCtx) -> *const std::ffi::c_char;
+    type NftCtxBufferError = unsafe extern "C" fn(ctx: NftCtx) -> i32;
+    type NftCtxGetErrorBuffer = unsafe extern "C" fn(ctx: NftCtx) -> *const std::ffi::c_char;
+
+    struct Lib {
+        _lib: libloading::Library,
+        ctx_new: NftCtxNew,
+        ctx_free: NftCtxFree,
+        run_cmd: NftRunCmdFromBuffer,
+        buffer_output: NftCtxBufferOutput,
+        _get_output: NftCtxGetOutputBuffer,
+        buffer_error: NftCtxBufferError,
+        get_error: NftCtxGetErrorBuffer,
+    }
+
+    // SAFETY: the function pointers are from a shared library that is
+    // loaded once and stays loaded. The functions themselves are thread-safe
+    // when called with distinct nft_ctx pointers.
+    unsafe impl Send for Lib {}
+    unsafe impl Sync for Lib {}
+
+    static LIB: OnceLock<Option<Lib>> = OnceLock::new();
+
+    fn load() -> Option<&'static Lib> {
+        LIB.get_or_init(|| {
+            let lib = match unsafe { libloading::Library::new("libnftables.so.1") } {
+                Ok(lib) => {
+                    tracing::debug!("libnftables.so.1 loaded, using in-process nft");
+                    lib
+                }
+                Err(e) => {
+                    tracing::debug!(error = %e, "libnftables.so.1 not available, falling back to nft binary");
+                    return None;
+                }
+            };
+            unsafe {
+                let ctx_new = *lib.get::<NftCtxNew>(b"nft_ctx_new\0").ok()?;
+                let ctx_free = *lib.get::<NftCtxFree>(b"nft_ctx_free\0").ok()?;
+                let run_cmd = *lib
+                    .get::<NftRunCmdFromBuffer>(b"nft_run_cmd_from_buffer\0")
+                    .ok()?;
+                let buffer_output = *lib
+                    .get::<NftCtxBufferOutput>(b"nft_ctx_buffer_output\0")
+                    .ok()?;
+                let _get_output = *lib
+                    .get::<NftCtxGetOutputBuffer>(b"nft_ctx_get_output_buffer\0")
+                    .ok()?;
+                let buffer_error = *lib
+                    .get::<NftCtxBufferError>(b"nft_ctx_buffer_error\0")
+                    .ok()?;
+                let get_error = *lib
+                    .get::<NftCtxGetErrorBuffer>(b"nft_ctx_get_error_buffer\0")
+                    .ok()?;
+                Some(Lib {
+                    _lib: lib,
+                    ctx_new,
+                    ctx_free,
+                    run_cmd,
+                    buffer_output,
+                    _get_output,
+                    buffer_error,
+                    get_error,
+                })
+            }
+        })
+        .as_ref()
+    }
+
+    /// Applies nftables rules via libnftables in-process. Returns None if
+    /// the library is not available.
+    pub(super) fn try_apply(rules: &str) -> Option<Result<()>> {
+        let lib = load()?;
+        let ctx = unsafe { (lib.ctx_new)(0) };
+        if ctx.is_null() {
+            return Some(Err(anyhow!("nft_ctx_new returned null")));
+        }
+        // Buffer output and errors so they don't go to stdout/stderr.
+        unsafe {
+            (lib.buffer_output)(ctx);
+            (lib.buffer_error)(ctx);
+        }
+        let c_rules = match CString::new(rules) {
+            Ok(c) => c,
+            Err(e) => {
+                unsafe { (lib.ctx_free)(ctx) };
+                return Some(Err(anyhow!("nft rules contain null byte: {e}")));
+            }
+        };
+        let ret = unsafe { (lib.run_cmd)(ctx, c_rules.as_ptr()) };
+        let result = if ret == 0 {
+            Ok(())
+        } else {
+            let err = unsafe {
+                let ptr = (lib.get_error)(ctx);
+                if ptr.is_null() {
+                    String::from("(no error message)")
+                } else {
+                    CStr::from_ptr(ptr).to_string_lossy().into_owned()
+                }
+            };
+            Err(anyhow!("nft apply failed: {}", err.trim()))
+        };
+        unsafe { (lib.ctx_free)(ctx) };
+        Some(result)
+    }
+}
+
 /// Applies nftables rules (assumes caller is already in the target namespace).
-async fn run_nft(rules: &str) -> Result<()> {
-    use tokio::io::AsyncWriteExt;
+/// Tries libnftables in-process first (~50us), falls back to spawning
+/// the nft binary (~5ms) if the library is not available.
+fn run_nft_sync(rules: &str) -> Result<()> {
+    if let Some(result) = libnft::try_apply(rules) {
+        tracing::trace!("nft: applied via libnftables (in-process)");
+        return result;
+    }
+    tracing::trace!("nft: applying via nft binary (fallback)");
+    run_nft_cmd(rules)
+}
+
+/// Fallback: apply rules by spawning the nft binary.
+fn run_nft_cmd(rules: &str) -> Result<()> {
+    use std::io::Write;
     let nft = if std::path::Path::new("/usr/sbin/nft").exists() {
         "/usr/sbin/nft"
     } else {
         "nft"
     };
-    let mut child = tokio::process::Command::new(nft)
+    let mut child = std::process::Command::new(nft)
         .args(["-f", "-"])
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::inherit())
+        .stderr(std::process::Stdio::piped())
         .spawn()
         .context("spawn nft")?;
     child
         .stdin
         .take()
-        .unwrap()
+        .expect("stdin")
         .write_all(rules.as_bytes())
-        .await
         .context("write nft stdin")?;
-    let st = child.wait().await.context("wait nft")?;
-    if st.success() {
+    let output = child.wait_with_output().context("wait nft")?;
+    if output.status.success() {
         Ok(())
     } else {
-        Err(anyhow!("nft apply failed"))
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        Err(anyhow!("nft apply failed: {}", stderr.trim()))
     }
 }
 
-/// Applies nftables rules inside `ns` on the namespace's async worker.
+/// Applies nftables rules inside `ns` on the namespace's sync worker.
 pub(crate) async fn run_nft_in(netns: &netns::NetnsManager, ns: &str, rules: &str) -> Result<()> {
     trace!(ns = %ns, rules = %rules, "nft: apply rules");
     let rules = rules.to_string();
-    let rt = netns.rt_handle_for(ns)?;
-    rt.spawn(async move { run_nft(&rules).await })
-        .await
-        .context("nft task panicked")?
+    netns.run_closure_in(ns, move || run_nft_sync(&rules))
 }
 
 /// Generates nftables rules for a [`NatConfig`].
