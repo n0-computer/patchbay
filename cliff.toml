@@ -38,8 +38,8 @@ body = """
 
 footer = ""
 postprocessors = [
-  { pattern = '<REPO>', replace = "https://github.com/n0-computer/n0-future" },
-  { pattern = "\\(#([0-9]+)\\)", replace = "([#${1}](https://github.com/n0-computer/n0-future/issues/${1}))"}
+  { pattern = '<REPO>', replace = "https://github.com/n0-computer/patchbay" },
+  { pattern = "\\(#([0-9]+)\\)", replace = "([#${1}](https://github.com/n0-computer/patchbay/issues/${1}))"}
 ]
 
 
