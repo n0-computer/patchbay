@@ -280,6 +280,8 @@ pub(crate) struct RouterData {
     pub ra_runtime: Arc<RaRuntimeCfg>,
     /// Per-router operation lock — serializes multi-step mutations.
     pub op: Arc<tokio::sync::Mutex<()>>,
+    /// Active load balancer configurations.
+    pub balancers: Vec<crate::balancer::BalancerConfig>,
 }
 
 impl RouterData {
@@ -802,6 +804,7 @@ impl NetworkCore {
                     RA_DEFAULT_LIFETIME_SECS,
                 )),
                 op: Arc::new(tokio::sync::Mutex::new(())),
+                balancers: Vec::new(),
             },
         );
         id
