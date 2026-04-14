@@ -95,6 +95,10 @@ pub(crate) fn udp_roundtrip(reflector: SocketAddr) -> Result<SocketAddr> {
 }
 
 /// Returns UDP round-trip time to `reflector` (blocking).
+///
+/// Retries up to 3 times on transient EAGAIN errors, which can occur
+/// under high-latency impairment when the socket buffer is temporarily
+/// full on a loaded CI runner.
 pub(crate) fn udp_rtt_sync(reflector: SocketAddr) -> Result<Duration> {
     let bind = if reflector.is_ipv4() {
         "0.0.0.0:0"
@@ -104,10 +108,26 @@ pub(crate) fn udp_rtt_sync(reflector: SocketAddr) -> Result<Duration> {
     let sock = UdpSocket::bind(bind).context("udp_rtt_sync bind")?;
     sock.set_read_timeout(Some(Duration::from_secs(2)))?;
     let mut buf = [0u8; 256];
-    let start = Instant::now();
-    sock.send_to(b"PING", reflector)?;
-    let _ = sock.recv_from(&mut buf)?;
-    Ok(start.elapsed())
+    for attempt in 0..3 {
+        let start = Instant::now();
+        match sock.send_to(b"PING", reflector) {
+            Ok(_) => {}
+            Err(e) if e.kind() == ErrorKind::WouldBlock && attempt < 2 => {
+                std::thread::sleep(Duration::from_millis(100));
+                continue;
+            }
+            Err(e) => return Err(e).context("udp_rtt_sync send"),
+        }
+        match sock.recv_from(&mut buf) {
+            Ok(_) => return Ok(start.elapsed()),
+            Err(e) if e.kind() == ErrorKind::WouldBlock && attempt < 2 => {
+                std::thread::sleep(Duration::from_millis(100));
+                continue;
+            }
+            Err(e) => return Err(e).context("udp_rtt_sync recv"),
+        }
+    }
+    anyhow::bail!("udp_rtt_sync: all retries exhausted")
 }
 
 /// Async UDP round-trip time measurement.

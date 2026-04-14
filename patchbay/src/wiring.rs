@@ -8,7 +8,7 @@ use std::{
 use anyhow::{anyhow, bail, Context, Result};
 use ipnet::{Ipv4Net, Ipv6Net};
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, instrument, Instrument as _};
+use tracing::{debug, instrument, trace, Instrument as _};
 
 use crate::{
     core::{CoreConfig, DeviceData, IfaceBuild, NodeId, RaRuntimeCfg, RouterData},
@@ -190,7 +190,7 @@ pub(crate) async fn setup_router_async(
         .await?;
 
         if let Some(upstream_ip4) = router.upstream_ip {
-            debug!(nat = ?router.cfg.nat, ip = %upstream_ip4, "router: apply NAT");
+            trace!(nat = ?router.cfg.nat, ip = %upstream_ip4, "router: apply NAT");
             apply_nat_for_router(netns, &router.ns, &router.cfg, &ns_if, upstream_ip4).await?;
         }
 
@@ -202,7 +202,7 @@ pub(crate) async fn setup_router_async(
                 let lan_pfx = Ipv6Net::new(dl_gw_v6, dl_prefix)
                     .unwrap_or_else(|_| Ipv6Net::new(dl_gw_v6, 64).unwrap());
                 let wan_pfx = nptv6_wan_prefix(up_v6, lan_pfx.prefix_len());
-                debug!(nat_v6 = ?router.cfg.nat_v6, %wan_pfx, %lan_pfx, "router: apply NAT v6");
+                trace!(nat_v6 = ?router.cfg.nat_v6, %wan_pfx, %lan_pfx, "router: apply NAT v6");
                 apply_nat_v6(
                     netns,
                     &router.ns,
@@ -313,7 +313,7 @@ pub(crate) async fn setup_router_async(
         .await?;
 
         if let Some(upstream_ip4) = router.upstream_ip {
-            debug!(nat = ?router.cfg.nat, ip = %upstream_ip4, "router: apply NAT");
+            trace!(nat = ?router.cfg.nat, ip = %upstream_ip4, "router: apply NAT");
             apply_nat_for_router(netns, &router.ns, &router.cfg, &wan_if, upstream_ip4).await?;
         }
 
@@ -325,7 +325,7 @@ pub(crate) async fn setup_router_async(
                 let lan_pfx = Ipv6Net::new(dl_gw_v6, dl_prefix)
                     .unwrap_or_else(|_| Ipv6Net::new(dl_gw_v6, 64).unwrap());
                 let wan_pfx = nptv6_wan_prefix(up_v6, lan_pfx.prefix_len());
-                debug!(nat_v6 = ?router.cfg.nat_v6, %wan_pfx, %lan_pfx, "router: apply NAT v6");
+                trace!(nat_v6 = ?router.cfg.nat_v6, %wan_pfx, %lan_pfx, "router: apply NAT v6");
                 apply_nat_v6(
                     netns,
                     &router.ns,
@@ -456,6 +456,8 @@ pub(crate) async fn setup_router_async(
             },
         )?;
     }
+
+    debug!(name = %router.name, ns = %router.ns, wan_ip = ?router.upstream_ip, nat = ?router.cfg.nat, "router: ready");
 
     Ok(())
 }
@@ -669,6 +671,7 @@ pub(crate) async fn setup_device_async(
             Vec::new()
         };
     debug!(id = dev.id.0, name = %dev.name, ns = %dev.ns, "device: setup");
+    let dev_ip = ifaces.iter().find(|i| i.is_default).and_then(|i| i.dev_ip);
     let log_prefix = format!("{}.{}", crate::consts::KIND_DEVICE, dev.name);
     create_named_netns(netns, &dev.ns, dns_overlay, Some(log_prefix), dad_mode)?;
 
@@ -700,13 +703,15 @@ pub(crate) async fn setup_device_async(
         .await?;
     }
 
+    debug!(name = %dev.name, ns = %dev.ns, ip = ?dev_ip, "device: ready");
+
     Ok(())
 }
 
 /// Wire a dummy interface inside a device namespace.
 #[instrument(name = "iface_dummy", skip_all, fields(iface = %build.ifname))]
 async fn wire_dummy_async(netns: &Arc<netns::NetnsManager>, build: &IfaceBuild) -> Result<()> {
-    debug!(ip = ?build.dev_ip, ip6 = ?build.dev_ip_v6, "iface_dummy: setup");
+    trace!(ip = ?build.dev_ip, ip6 = ?build.dev_ip_v6, "iface_dummy: setup");
     nl_run(netns, &build.dev_ns, {
         let ifname = build.ifname.clone();
         let dev_ip = build.dev_ip;
@@ -747,7 +752,7 @@ pub(crate) async fn wire_iface_async(
     if dev.dummy {
         return wire_dummy_async(netns, &dev).await;
     }
-    debug!(ip = ?dev.dev_ip, ip6 = ?dev.dev_ip_v6, gw = ?dev.gw_ip, gw6 = ?dev.gw_ip_v6, "iface: assigned addresses");
+    trace!(ip = ?dev.dev_ip, ip6 = ?dev.dev_ip_v6, gw = ?dev.gw_ip, gw6 = ?dev.gw_ip_v6, "iface: assigned addresses");
     let root_gw = format!("{}g{}", prefix, dev.idx);
     let root_dev = format!("{}e{}", prefix, dev.idx);
 
@@ -898,7 +903,7 @@ pub(crate) fn create_named_netns(
 
 /// Sets a sysctl value in the current namespace (caller must already be in the ns).
 pub(crate) fn set_sysctl_root(path: &str, val: &str) -> Result<()> {
-    debug!(path = %path, val = %val, "sysctl: set");
+    trace!(path = %path, val = %val, "sysctl: set");
     std::fs::write(format!("/proc/sys/{}", path), val)
         .with_context(|| format!("sysctl write {}", path))
 }
