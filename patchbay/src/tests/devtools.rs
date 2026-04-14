@@ -19,7 +19,11 @@ use crate::consts;
 #[ignore]
 async fn simple_lab_for_e2e() -> Result<()> {
     check_caps()?;
-    let lab = Lab::with_opts(LabOpts::default().outdir_from_env().label("e2e-test")).await?;
+    let lab = Lab::builder()
+        .outdir_from_env()
+        .label("e2e-test")
+        .build()
+        .await?;
 
     // DC router (public, no NAT).
     let dc = lab.add_router("dc").build().await?;
@@ -178,12 +182,11 @@ async fn run_sync_preserves_async_events() -> Result<()> {
     let tmp =
         std::env::temp_dir().join(format!("patchbay-test-sync-events-{}", std::process::id()));
     let _ = std::fs::create_dir_all(&tmp);
-    let lab = Lab::with_opts(
-        LabOpts::default()
-            .outdir(OutDir::Exact(tmp.clone()))
-            .label("sync-events"),
-    )
-    .await?;
+    let lab = Lab::builder()
+        .outdir(OutDir::Exact(tmp.clone()))
+        .label("sync-events")
+        .build()
+        .await?;
 
     let dc = lab.add_router("dc").build().await?;
     let dev = lab.add_device("dev").iface("eth0", dc.id()).build().await?;

@@ -8,7 +8,7 @@ use std::{
 };
 
 use anyhow::{anyhow, bail, Context, Result};
-use patchbay::{config::LabConfig, Lab, LabOpts};
+use patchbay::{config::LabConfig, Lab};
 use patchbay_utils::assets::{
     parse_binary_overrides, resolve_binary_source_path, BinaryOverride, PathResolveMode,
 };
@@ -810,10 +810,11 @@ async fn execute_single_sim(
     let setup = setup_topology_summary(&setup_base, Some(&topo));
 
     // ── Build lab ────────────────────────────────────────────────────────
-    let opts = LabOpts::default()
+    let lab = Lab::builder()
         .outdir(patchbay::OutDir::Exact(run_work_dir.to_path_buf()))
-        .label(sim_name);
-    let lab = Lab::from_config_with_opts(topo, opts)
+        .label(sim_name)
+        .config(topo)
+        .build()
         .await
         .context("step=configure-lab")?;
 

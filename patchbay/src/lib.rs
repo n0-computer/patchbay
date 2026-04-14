@@ -241,9 +241,9 @@ pub use iface::{Iface, IfaceConfig};
 pub use ipnet::Ipv4Net;
 pub use lab::{
     ConntrackTimeouts, DefaultRegions, Firewall, FirewallConfig, FirewallConfigBuilder, IpSupport,
-    Ipv6DadMode, Ipv6Profile, Ipv6ProvisioningMode, Ix, Lab, LabOpts, LinkCondition, LinkDirection,
-    LinkLimits, Nat, NatConfig, NatConfigBuilder, NatFiltering, NatMapping, NatV6Mode, OutDir,
-    Region, RegionLink, TestGuard,
+    Ipv6DadMode, Ipv6Profile, Ipv6ProvisioningMode, Ix, Lab, LabBuilder, LinkCondition,
+    LinkDirection, LinkLimits, Nat, NatConfig, NatConfigBuilder, NatFiltering, NatMapping,
+    NatV6Mode, OutDir, Region, RegionLink, TestGuard,
 };
 pub use metrics::MetricsBuilder;
 pub use router::{Router, RouterBuilder, RouterIface, RouterPreset};

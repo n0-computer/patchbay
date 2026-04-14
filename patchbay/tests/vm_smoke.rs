@@ -4,7 +4,7 @@
 use std::net::{IpAddr, SocketAddr};
 
 use anyhow::{Context, Result};
-use patchbay::{Lab, LabOpts, Nat, OutDir};
+use patchbay::{Lab, Nat, OutDir};
 use testdir::testdir;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -18,12 +18,11 @@ async fn tcp_through_nat() -> Result<()> {
     let outdir = testdir!();
     eprintln!("testdir: {}", outdir.display());
 
-    let lab = Lab::with_opts(
-        LabOpts::default()
-            .outdir(OutDir::Exact(outdir.clone()))
-            .label("vm-smoke"),
-    )
-    .await?;
+    let lab = Lab::builder()
+        .outdir(OutDir::Exact(outdir.clone()))
+        .label("vm-smoke")
+        .build()
+        .await?;
 
     let dc = lab.add_router("dc").build().await?;
     let home = lab.add_router("home").nat(Nat::Home).build().await?;
