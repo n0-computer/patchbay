@@ -7,9 +7,9 @@ header = """
 body = """
 {% if version %}\
     {% if previous.version %}\
-        ## [{{ version | trim_start_matches(pat="v") }}](<REPO>/compare/{{ previous.version }}..{{ version }}) - {{ timestamp | date(format="%Y-%m-%d") }}
+        ## [{{ version | trim_start_matches(pat="patchbay-v") }}](<REPO>/compare/{{ previous.version }}..{{ version }}) - {{ timestamp | date(format="%Y-%m-%d") }}
     {% else %}\
-        ## [{{ version | trim_start_matches(pat="v") }}] - {{ timestamp | date(format="%Y-%m-%d") }}
+        ## [{{ version | trim_start_matches(pat="patchbay-v") }}] - {{ timestamp | date(format="%Y-%m-%d") }}
     {% endif %}\
 {% else %}\
     ## [unreleased]
@@ -63,3 +63,4 @@ commit_parsers = [
   { message = "^revert", group = "<!-- 9 -->◀️ Revert" },
 ]
 skip_tags = "rolling"
+tag_pattern = "patchbay-v[0-9].*"
