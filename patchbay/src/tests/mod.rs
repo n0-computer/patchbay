@@ -37,6 +37,7 @@ mod alloc;
 mod devtools;
 #[cfg(feature = "dns-server")]
 mod dns;
+mod ecn;
 mod firewall;
 mod hairpin;
 mod holepunch;
