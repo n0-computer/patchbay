@@ -36,6 +36,7 @@ use crate::{check_caps, config};
 mod alloc;
 mod devtools;
 mod dns;
+mod ecn;
 mod firewall;
 mod hairpin;
 mod holepunch;

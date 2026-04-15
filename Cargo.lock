@@ -1792,6 +1792,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "noq-udp"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bb9be4fedd6b98f3ba82ccd3506f4d0219fb723c3f97c67e12fe1494aa020e44"
+dependencies = [
+ "cfg_aliases",
+ "libc",
+ "socket2 0.6.3",
+ "tracing",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "ntapi"
 version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1949,9 +1962,11 @@ dependencies = [
  "libc",
  "n0-tracing-test",
  "nix",
+ "noq-udp",
  "rtnetlink",
  "serde",
  "serde_json",
+ "socket2 0.5.10",
  "strum",
  "testdir",
  "tokio",
