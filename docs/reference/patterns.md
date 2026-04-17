@@ -127,7 +127,7 @@ let nat_b = lab.add_router("nat-b").nat(Nat::Easy).build().await?;
 
 // One side symmetric: hole punching fails, relay needed
 let nat_a = lab.add_router("nat-a").nat(Nat::Easy).build().await?;
-let nat_b = lab.add_router("nat-b").nat(Nat::Hardest).build().await?;
+let nat_b = lab.add_router("nat-b").nat(Nat::Hard).build().await?;
 // Assert: falls back to relay (TURN/DERP)
 ```
 
@@ -213,7 +213,7 @@ through: UDP direct -> UDP relay (TURN) -> TCP relay -> TLS/TCP relay on 443.
 
 ```rust
 let corp = lab.add_router("corp")
-    .nat(Nat::Hardest)
+    .nat(Nat::Hard)
     .firewall(Firewall::Corporate)  // TCP 80,443 + UDP 53 only
     .build().await?;
 
@@ -374,7 +374,7 @@ for _ in 0..3 {
 | WiFi to cellular | `iface.replug()` + `iface.set_condition()` |
 | Network goes down briefly | `iface.link_down()`, sleep, `iface.link_up()` |
 | Cone NAT | `Nat::Easy` |
-| Symmetric NAT | `Nat::Hardest` |
+| Symmetric NAT | `Nat::Hard` |
 | Double NAT / CGNAT | Chain routers: `home.upstream(cgnat.id())` |
 | Corporate UDP block | `Firewall::Corporate` on router |
 | Captive portal | Router with no upstream |

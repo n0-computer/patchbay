@@ -45,7 +45,7 @@ function layoutGraph(nodes: Node[], edges: Edge[]): Node[] {
 
 function natLabel(nat: Nat): string {
   if (nat === null) return 'none'
-  const mapping = typeof nat.mapping === 'string' ? 'EIM' : 'EDM'
+  const mapping = nat.mapping === 'endpoint_independent' ? 'EIM' : 'EDM'
   const filtering =
     nat.filtering === 'endpoint_independent'
       ? 'EIF'

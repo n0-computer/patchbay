@@ -717,8 +717,7 @@ RFC 3489 and RFC 4787 labels and the real-world deployments each models.
 | `"none"`    | Same as absent. |
 | `"easiest"` | EIM+EIF: any external host can reach the mapped port (full cone). |
 | `"easy"`    | EIM+APDF: same external port for all destinations (port-restricted cone). Default of most home routers. |
-| `"hard"`    | EDM+APDF with port preservation: port-predictable symmetric NAT. |
-| `"hardest"` | EDM+APDF with random ports: symmetric NAT that requires a relay. |
+| `"hard"`    | EDM+APDF with random ports: symmetric NAT that requires a relay. |
 
 **Region latency** can be added to introduce inter-router delays:
 

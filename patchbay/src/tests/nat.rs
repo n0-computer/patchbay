@@ -131,9 +131,9 @@ async fn matrix_connectivity_and_reflexive_ip() -> Result<()> {
         (Nat::Easy, UplinkWiring::DirectIx),
         (Nat::Easy, UplinkWiring::ViaPublicIsp),
         (Nat::Easy, UplinkWiring::ViaCgnatIsp),
-        (Nat::Hardest, UplinkWiring::DirectIx),
-        (Nat::Hardest, UplinkWiring::ViaPublicIsp),
-        (Nat::Hardest, UplinkWiring::ViaCgnatIsp),
+        (Nat::Hard, UplinkWiring::DirectIx),
+        (Nat::Hard, UplinkWiring::ViaPublicIsp),
+        (Nat::Hard, UplinkWiring::ViaCgnatIsp),
     ];
 
     let mut case_idx = 0u16;
@@ -357,46 +357,10 @@ async fn port_mapping_eim_stable() -> Result<()> {
     Ok(())
 }
 
-/// EDM with port preservation (Nat::Hard): external port stays stable across
-/// destinations when the internal source port is free. Validates the
-/// "symmetric but port-predictable" claim behind `Nat::Hard`. If this test
-/// fails, `Nat::Hard` is empirically equivalent to `Nat::Hardest` on this
-/// kernel and the two variants must be reconciled.
-#[tokio::test(flavor = "current_thread")]
-#[traced_test]
-async fn port_mapping_edm_preserve_stable() -> Result<()> {
-    use strum::IntoEnumIterator;
-    let mut port_base = 16_050u16;
-    let mut failures = Vec::new();
-    for wiring in UplinkWiring::iter() {
-        let result: Result<()> = async {
-            let (lab, ctx) = build_nat_case(Nat::Hard, wiring, port_base).await?;
-            let dev = lab.device_by_name("dev").unwrap();
-            let o1 = dev.probe_udp_mapping(ctx.r_dc)?;
-            let o2 = dev.probe_udp_mapping(ctx.r_ix)?;
-            if o1.port() != o2.port() {
-                bail!(
-                    "EDM Preserve: external port changed across destinations: \
-                     r_dc={} r_ix={}",
-                    o1.port(),
-                    o2.port()
-                );
-            }
-            Ok(())
-        }
-        .await;
-        if let Err(e) = result {
-            failures.push(format!("DestDep+Preserve/{wiring}: {e:#}"));
-        }
-        port_base += 10;
-    }
-    if !failures.is_empty() {
-        bail!("{} combos failed:\n{}", failures.len(), failures.join("\n"));
-    }
-    Ok(())
-}
-
-/// EDM (Corporate NAT): external port differs between two reflectors.
+/// EDM (Nat::Hard, symmetric NAT): external port differs between two
+/// reflectors. The nftables backend uses `masquerade random`, which
+/// assigns a fresh, random port per flow regardless of source-port
+/// availability.
 #[tokio::test(flavor = "current_thread")]
 #[traced_test]
 async fn port_mapping_edm_changes() -> Result<()> {
@@ -405,7 +369,7 @@ async fn port_mapping_edm_changes() -> Result<()> {
     let mut failures = Vec::new();
     for wiring in UplinkWiring::iter() {
         let result: Result<()> = async {
-            let (lab, ctx) = build_nat_case(Nat::Hardest, wiring, port_base).await?;
+            let (lab, ctx) = build_nat_case(Nat::Hard, wiring, port_base).await?;
             let dev = lab.device_by_name("dev").unwrap();
             let o1 = dev.probe_udp_mapping(ctx.r_dc)?;
             let o2 = dev.probe_udp_mapping(ctx.r_ix)?;

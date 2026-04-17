@@ -838,7 +838,7 @@ mod tests {
             },
             LabEventKind::NatChanged {
                 router: "r1".into(),
-                nat: crate::Nat::Hardest.into(),
+                nat: crate::Nat::Hard.into(),
             },
             LabEventKind::DeviceRemoved { name: "d1".into() },
             LabEventKind::RouterRemoved { name: "r1".into() },

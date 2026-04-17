@@ -26,10 +26,13 @@ simulates:
 
 | Preset | Mapping | Filtering | Port preservation | Hole-punch? | Real-world examples |
 |--------|---------|-----------|-------------------|-------------|---------------------|
-| `Nat::Easiest` | EIM | EIF | Preserve | Always | Older consumer routers, routers with UPnP or static forwarding |
-| `Nat::Easy` | EIM | APDF | Preserve | Yes, via UDP hole-punching with simultaneous send | Most home routers (FritzBox, Unifi, TP-Link, ASUS, OpenWRT); typical RFC 6888 compliant CGNAT |
-| `Nat::Hard` | EDM | APDF | Preserve | Sometimes, with port prediction | Mobile carriers, symmetric CGNAT, some stateful firewalls |
-| `Nat::Hardest` | EDM | APDF | Random | No, requires a relay | Cisco ASA, Palo Alto, Fortinet, AWS/Azure/GCP NAT Gateway |
+| `Nat::Easiest` | EIM | EIF | Always | Older consumer routers, routers with UPnP or static forwarding |
+| `Nat::Easy` | EIM | APDF | Yes, via UDP hole-punching with simultaneous send | Most home routers (FritzBox, Unifi, TP-Link, ASUS, OpenWRT); typical RFC 6888 compliant CGNAT |
+| `Nat::Hard` | EDM | APDF | No, requires a relay | Cisco ASA, Palo Alto, Fortinet, AWS/Azure/GCP NAT Gateway, mobile carriers, symmetric CGNAT |
+
+A fourth class exists in the wild — port-preserving symmetric NAT
+(SYMPP) — but patchbay models it as `Hard`. See
+[NAT simulation limits](nat-limitations.md) for the rationale.
 
 ## The fullcone dynamic map
 
@@ -129,25 +132,26 @@ no matching outbound conntrack entry exists, so the packet arrives with
 
 ### Endpoint-dependent mapping (symmetric NAT)
 
-`Nat::Hard` and `Nat::Hardest` use plain `masquerade` without a fullcone
-map. The distinction is the port allocation flag:
+`Nat::Hard` uses `masquerade random` without a fullcone map:
 
 ```nft
 table ip nat {
     chain postrouting {
         type nat hook postrouting priority 100;
-        oif "ix" masquerade           # Nat::Hard (port-preserving symmetric)
-        # or:
-        oif "ix" masquerade random    # Nat::Hardest (random per flow)
+        oif "ix" masquerade random
     }
 }
 ```
 
-With `Nat::Hard`, the kernel keeps the internal source port when it is
-free, which makes hole-punching succeed when peers exchange the observed
-port. With `Nat::Hardest`, the `random` flag assigns a fresh port per
-conntrack entry, so the peer cannot predict the mapped port from a STUN
-probe.
+The `random` flag assigns a fresh, unpredictable external port per
+conntrack entry, so the peer cannot predict the mapped port from a
+STUN probe. Hole-punching fails without a relay.
+
+Port-preserving symmetric NAT (SYMPP) exists in real hardware and is
+punchable through port prediction; patchbay does not model it as a
+distinct tier because Linux `nftables` cannot produce SYMPP-like
+behavior distinguishably from EIM. See
+[NAT simulation limits](nat-limitations.md).
 
 ## nftables pitfalls
 
@@ -213,19 +217,19 @@ The `Nat` enum provides named presets. Each preset converts into an
 
 ```rust
 pub struct NatConfig {
-    pub mapping: NatMapping,              // EndpointIndependent
-                                          // | EndpointDependent(PortPreservation)
-    pub filtering: NatFiltering,          // EIF, ADF, or APDF
-    pub timeouts: ConntrackTimeouts,      // udp, udp_stream, tcp_established
-    pub hairpin: bool,                    // loopback NAT; EIM only
+    pub mapping: NatMapping,         // EndpointIndependent | EndpointDependent
+    pub filtering: NatFiltering,     // EIF, ADF, or APDF
+    pub timeouts: ConntrackTimeouts, // udp, udp_stream, tcp_established
+    pub hairpin: bool,               // loopback NAT; EIM only
 }
 ```
 
-Port preservation lives inside `NatMapping::EndpointDependent(_)` because
-EIM always preserves the source port via the fullcone map and has no
-configuration. `NatConfigBuilder::build` returns a `Result` and rejects
-combinations the backend cannot express: `EndpointDependent` mapping paired
-with `AddressDependent` filtering or with `hairpin = true`.
+EIM always preserves the source port via the fullcone map. EDM always
+allocates a random port via `masquerade random`. Port-preserving EDM
+(SYMPP) is not modeled; see [NAT simulation limits](nat-limitations.md).
+`NatConfigBuilder::build` returns a `Result` and rejects combinations the
+backend cannot express: `EndpointDependent` mapping paired with
+`AddressDependent` filtering or with `hairpin = true`.
 
 The `generate_nat_rules` function in `nft.rs` builds nftables rules from
 `NatConfig` alone, without matching on `Nat` variants. Users can either

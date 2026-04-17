@@ -5,13 +5,24 @@ use serde::{Deserialize, Serialize};
 /// NAT behavior for IPv4.
 ///
 /// The variants form a gradient of hole-punching difficulty. `Easiest` and
-/// `Easy` are reachable with standard UDP hole-punching. `Hard` is reachable
-/// with port prediction. `Hardest` requires a relay like TURN.
+/// `Easy` are reachable with standard UDP hole-punching. `Hard` requires a
+/// relay like TURN.
 ///
 /// Each preset expands to a [`NatConfig`] via [`Nat::to_config`]. Timeouts
 /// and hairpin behavior come from [`ConntrackTimeouts::default`] and
 /// `hairpin: false`; for deployment-specific timeouts use
 /// [`RouterPreset`](crate::RouterPreset) instead.
+///
+/// # Port-preserving symmetric NAT
+///
+/// Real-world "port-preserving symmetric" (SYMPP) hardware exists and is
+/// hole-punchable with port prediction, forming a middle tier between
+/// `Easy` and `Hard`. patchbay does not model it distinctly: Linux
+/// `nftables` cannot produce true per-destination port allocation that
+/// preserves the source port, and simulating SYMPP through plain
+/// `masquerade` converges on EIM-like behavior under light load. See
+/// [`docs/reference/nat-limitations.md`](https://github.com/n0-computer/patchbay/blob/main/docs/reference/nat-limitations.md)
+/// for the full rationale and how a future backend could add it.
 #[derive(
     Clone,
     Copy,
@@ -34,7 +45,7 @@ pub enum Nat {
     ///
     /// Any external host can reach the mapped port after the first outbound
     /// packet. Typical of consumer routers with UPnP or static port
-    /// forwarding, older consumer NAT boxes, and the output of
+    /// forwarding, older consumer NAT boxes, and routers running
     /// `netfilter-full-cone-nat` style kernel modules.
     ///
     /// RFC 3489: Full Cone.
@@ -56,28 +67,17 @@ pub enum Nat {
     /// Filtering.
     Easy,
 
-    /// Restrictive NAT with a port-predictable mapping.
-    ///
-    /// Each destination gets its own external mapping, but the external port
-    /// still matches the internal source port when the port is free.
-    /// Hole-punching succeeds with port prediction. Typical of some stateful
-    /// firewalls, some CGNAT variants, and most mobile carriers.
-    ///
-    /// RFC 4787: Endpoint-Dependent Mapping with port preservation,
-    /// Address-and-Port-Dependent Filtering.
-    Hard,
-
     /// Most restrictive NAT.
     ///
     /// Each destination gets a fresh, random external port. Hole-punching
-    /// fails; peers need a relay. Typical of enterprise firewalls
-    /// (Cisco ASA, Palo Alto, Fortinet) and cloud NAT gateways (AWS, Azure,
-    /// GCP).
+    /// fails without a relay. Typical of enterprise firewalls (Cisco ASA,
+    /// Palo Alto, Fortinet), cloud NAT gateways (AWS, Azure, GCP), mobile
+    /// carriers, and most symmetric CGNAT.
     ///
     /// RFC 3489: Symmetric.
     /// RFC 4787: Endpoint-Dependent Mapping with random ports,
     /// Address-and-Port-Dependent Filtering.
-    Hardest,
+    Hard,
 
     /// Fully custom NAT configuration.
     ///
@@ -117,11 +117,7 @@ impl From<Nat> for Option<NatConfig> {
                 NatFiltering::AddressAndPortDependent,
             ),
             Nat::Hard => (
-                NatMapping::EndpointDependent(PortPreservation::Preserve),
-                NatFiltering::AddressAndPortDependent,
-            ),
-            Nat::Hardest => (
-                NatMapping::EndpointDependent(PortPreservation::Random),
+                NatMapping::EndpointDependent,
                 NatFiltering::AddressAndPortDependent,
             ),
             Nat::Custom(config) => return Some(config),
@@ -146,42 +142,20 @@ pub enum NatMapping {
     ///
     /// RFC 4787: Endpoint-Independent Mapping (EIM). The NAT reuses one
     /// external port for every destination from a given internal source
-    /// address and port. Port preservation is implicit and always enabled.
+    /// address and port. Port preservation is implicit and always enabled:
+    /// the nftables backend records the pre-SNAT source tuple in a
+    /// `@fullcone` map so inbound packets reach the correct internal host.
     EndpointIndependent,
 
     /// Different external port per destination.
     ///
     /// RFC 4787: Endpoint-Dependent Mapping (EDM), also called "symmetric".
-    /// Each unique destination 4-tuple gets a fresh external port. The
-    /// [`PortPreservation`] value selects how the fresh port is chosen.
-    EndpointDependent(PortPreservation),
-}
-
-/// Port allocation policy for [`NatMapping::EndpointDependent`].
-///
-/// Only applies to EDM: [`NatMapping::EndpointIndependent`] always
-/// preserves the source port, and the variant has no configuration.
-//
-// Gap: sequential port allocation (deployed in some older SOHO boxes and in
-// Port-Block-Allocated CGNAT) is not modeled. Hole-punching literature
-// treats it as a distinct class from `Preserve` because ports are
-// predictable across flows in a deterministic way. If a future test needs
-// it, implement as a new variant.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PortPreservation {
-    /// Reuse the internal source port when the external port is free.
-    ///
-    /// Linux `masquerade` without flags. Combined with EDM this produces a
-    /// symmetric NAT that port-prediction techniques can traverse.
-    #[default]
-    Preserve,
-    /// Allocate a random external port for each flow.
-    ///
-    /// Linux `masquerade random`. Combined with EDM this produces a
-    /// fresh, unpredictable external port per flow; hole-punching fails
-    /// without a relay.
-    Random,
+    /// Each unique destination 4-tuple gets a fresh, random external port
+    /// (Linux `masquerade random`). Hole-punching requires a relay.
+    /// Port-preserving EDM ("SYMPP") exists in the wild but is not
+    /// modeled distinctly; see the crate-level note on [`Nat`] for the
+    /// reason.
+    EndpointDependent,
 }
 
 /// NAT filtering behavior per RFC 4787 §5.
@@ -290,7 +264,7 @@ impl std::error::Error for NatConfigError {}
 /// Fields remain `pub` for ergonomic read access and pattern matching.
 /// Mutating a field on an existing `NatConfig` bypasses the builder's
 /// cross-field validation: for example, setting
-/// `cfg.mapping = NatMapping::EndpointDependent(_)` on a config with
+/// `cfg.mapping = NatMapping::EndpointDependent` on a config with
 /// `AddressDependent` filtering or `hairpin = true` produces a combination
 /// the nftables backend cannot express. Callers that mutate fields are
 /// responsible for maintaining these invariants; the library does not
@@ -298,11 +272,10 @@ impl std::error::Error for NatConfigError {}
 ///
 /// # Example
 /// ```
-/// # use patchbay::{NatConfig, NatMapping, NatFiltering, PortPreservation};
-/// // Port-preserving symmetric NAT with a short UDP timeout, matching a
-/// // mobile carrier CGN.
+/// # use patchbay::{NatConfig, NatFiltering, NatMapping};
+/// // Symmetric NAT with a short UDP timeout, for fast timeout tests.
 /// let cfg = NatConfig::builder()
-///     .mapping(NatMapping::EndpointDependent(PortPreservation::Preserve))
+///     .mapping(NatMapping::EndpointDependent)
 ///     .filtering(NatFiltering::AddressAndPortDependent)
 ///     .udp_stream_timeout(60)
 ///     .build()
@@ -468,7 +441,7 @@ mod tests {
     #[test]
     fn builder_rejects_edm_with_adf() {
         let err = NatConfig::builder()
-            .mapping(NatMapping::EndpointDependent(PortPreservation::Preserve))
+            .mapping(NatMapping::EndpointDependent)
             .filtering(NatFiltering::AddressDependent)
             .build()
             .unwrap_err();
@@ -478,7 +451,7 @@ mod tests {
     #[test]
     fn builder_rejects_edm_with_hairpin() {
         let err = NatConfig::builder()
-            .mapping(NatMapping::EndpointDependent(PortPreservation::Random))
+            .mapping(NatMapping::EndpointDependent)
             .hairpin(true)
             .build()
             .unwrap_err();
@@ -506,34 +479,18 @@ mod tests {
     }
 
     #[test]
-    fn builder_accepts_edm_preserve() {
+    fn builder_accepts_edm_apdf() {
         let cfg = NatConfig::builder()
-            .mapping(NatMapping::EndpointDependent(PortPreservation::Preserve))
+            .mapping(NatMapping::EndpointDependent)
             .filtering(NatFiltering::AddressAndPortDependent)
             .build()
             .unwrap();
-        assert!(matches!(
-            cfg.mapping,
-            NatMapping::EndpointDependent(PortPreservation::Preserve)
-        ));
-    }
-
-    #[test]
-    fn builder_accepts_edm_random() {
-        let cfg = NatConfig::builder()
-            .mapping(NatMapping::EndpointDependent(PortPreservation::Random))
-            .filtering(NatFiltering::AddressAndPortDependent)
-            .build()
-            .unwrap();
-        assert!(matches!(
-            cfg.mapping,
-            NatMapping::EndpointDependent(PortPreservation::Random)
-        ));
+        assert_eq!(cfg.mapping, NatMapping::EndpointDependent);
     }
 
     #[test]
     fn nat_to_config_covers_every_preset() {
-        for nat in [Nat::None, Nat::Easiest, Nat::Easy, Nat::Hard, Nat::Hardest] {
+        for nat in [Nat::None, Nat::Easiest, Nat::Easy, Nat::Hard] {
             let cfg = nat.to_config();
             assert_eq!(cfg.is_none(), nat == Nat::None);
         }
@@ -554,22 +511,9 @@ mod tests {
     }
 
     #[test]
-    fn nat_hard_is_edm_preserve_apdf() {
+    fn nat_hard_is_edm_apdf() {
         let cfg = Nat::Hard.to_config().unwrap();
-        assert_eq!(
-            cfg.mapping,
-            NatMapping::EndpointDependent(PortPreservation::Preserve)
-        );
-        assert_eq!(cfg.filtering, NatFiltering::AddressAndPortDependent);
-    }
-
-    #[test]
-    fn nat_hardest_is_edm_random_apdf() {
-        let cfg = Nat::Hardest.to_config().unwrap();
-        assert_eq!(
-            cfg.mapping,
-            NatMapping::EndpointDependent(PortPreservation::Random)
-        );
+        assert_eq!(cfg.mapping, NatMapping::EndpointDependent);
         assert_eq!(cfg.filtering, NatFiltering::AddressAndPortDependent);
     }
 }

@@ -41,17 +41,21 @@ use patchbay::Nat;
 let home = lab.add_router("home").nat(Nat::Easy).build().await?;
 ```
 
-The `Nat` enum forms a gradient of hole-punching difficulty. Each variant
-combines a mapping, filtering, and port-preservation choice to match a
-real-world device class:
+The `Nat` enum forms a three-tier gradient of hole-punching difficulty:
 
-| Mode | Mapping | Filtering | Port allocation | Real-world model |
-|------|---------|-----------|-----------------|------------------|
-| `None` | n/a | n/a | n/a | Datacenter, public IPs |
-| `Easiest` | Endpoint-independent | Endpoint-independent | Preserve | Full-cone router with UPnP or static forwarding |
-| `Easy` | Endpoint-independent | Address-and-port-dependent | Preserve | Standard home WiFi router |
-| `Hard` | Endpoint-dependent | Address-and-port-dependent | Preserve | Mobile carrier, symmetric CGNAT, port-predictable symmetric NAT |
-| `Hardest` | Endpoint-dependent | Address-and-port-dependent | Random | Enterprise gateway, AWS/Azure/GCP NAT Gateway |
+| Mode | Mapping | Filtering | Real-world model |
+|------|---------|-----------|------------------|
+| `None` | n/a | n/a | Datacenter, public IPs |
+| `Easiest` | Endpoint-independent | Endpoint-independent | Full-cone router with UPnP or static forwarding |
+| `Easy` | Endpoint-independent | Address-and-port-dependent | Standard home WiFi router, RFC 6888 compliant CGNAT |
+| `Hard` | Endpoint-dependent | Address-and-port-dependent | Enterprise gateway, cloud NAT, mobile carrier, symmetric CGNAT |
+
+`Hard` covers every symmetric NAT deployment: each destination gets a
+fresh, random external port. Port-preserving symmetric NAT (SYMPP) is a
+real middle tier in the wild (punchable through port prediction) but
+patchbay does not model it distinctly. See
+[NAT simulation limits](../reference/nat-limitations.md) for the
+reason.
 
 For a deep dive into how these modes are implemented in nftables and how
 hole-punching works across them, see the
@@ -91,7 +95,7 @@ changes mid-session, for example simulating a network migration. Call
 new connections use the updated rules:
 
 ```rust
-router.set_nat(Nat::Hardest).await?;
+router.set_nat(Nat::Hard).await?;
 router.flush_nat_state().await?;
 ```
 

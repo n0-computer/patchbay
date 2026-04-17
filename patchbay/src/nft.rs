@@ -7,8 +7,8 @@ use ipnet::Ipv6Net;
 use tracing::{debug, trace};
 
 use crate::{
-    core::RouterConfig, nat::PortPreservation, netns, qdisc, wiring::set_sysctl_root,
-    ConntrackTimeouts, LinkCondition, NatConfig, NatFiltering, NatMapping, NatV6Mode,
+    core::RouterConfig, netns, qdisc, wiring::set_sysctl_root, ConntrackTimeouts, LinkCondition,
+    NatConfig, NatFiltering, NatMapping, NatV6Mode,
 };
 
 /// Returns `true` when the NAT uses the fullcone DNAT map (Endpoint-Independent
@@ -62,7 +62,7 @@ pub(crate) async fn run_nft_in(netns: &netns::NetnsManager, ns: &str, rules: &st
 ///
 /// EIM uses a dynamic fullcone map to preserve source ports across destinations.
 /// EDM uses `masquerade` with or without the `random` flag depending on the
-/// [`PortPreservation`] carried by the mapping variant.
+/// always `masquerade random` (true symmetric NAT).
 /// EIF produces an unconditional fullcone DNAT in prerouting.
 /// ADF and APDF add a forward filter that only allows established/related
 /// flows. ADF additionally permits packets from any port on a
@@ -131,19 +131,17 @@ fn generate_nat_rules(cfg: &NatConfig, wan_if: &str, wan_ip: Ipv4Addr) -> String
             ip = wan_ip,
         )
     } else {
-        // EDM with Preserve: `masquerade`; Linux keeps the source port when
-        // free (see C1 empirical test `port_mapping_edm_preserve_stable`).
-        // EDM with Random: `masquerade random`; fresh port per flow.
-        let masq_stmt = match cfg.mapping {
-            NatMapping::EndpointDependent(PortPreservation::Preserve) => "masquerade",
-            NatMapping::EndpointDependent(PortPreservation::Random) => "masquerade random",
-            NatMapping::EndpointIndependent => unreachable!("EIM took the fullcone branch"),
-        };
+        // EDM: always `masquerade random` to allocate a fresh, random
+        // external port per destination 4-tuple. Plain `masquerade` (no
+        // flag) would try to preserve the source port, which conntrack
+        // grants whenever the (ext_ip, ext_port, dst_ip, dst_port) tuple
+        // is free. For a single internal source sending to multiple
+        // destinations that converges on EIM-looking behavior, so it is
+        // not a faithful symmetric NAT. See docs/reference/nat-limitations.md.
         format!(
-            r#"{hairpin}        oif "{wan}" {stmt}"#,
+            r#"{hairpin}        oif "{wan}" masquerade random"#,
             hairpin = hairpin_masq,
             wan = wan_if,
-            stmt = masq_stmt,
         )
     };
 

@@ -1,13 +1,7 @@
 // ── NAT types ──
 
-/** Port allocation for EDM. Matches Rust `PortPreservation`. */
-export type PortPreservation = 'preserve' | 'random'
-
-/** Matches Rust `NatMapping`. EIM has no payload; EDM carries
- * a `PortPreservation` tag. */
-export type NatMapping =
-  | 'endpoint_independent'
-  | { endpoint_dependent: PortPreservation }
+/** Matches Rust `NatMapping`. Unit variants only. */
+export type NatMapping = 'endpoint_independent' | 'endpoint_dependent'
 
 /** Matches Rust `NatFiltering`. */
 export type NatFiltering =

@@ -98,18 +98,18 @@
 //! builder methods called after [`RouterBuilder::preset`] override preset
 //! values.
 //!
-//! | Preset | NAT (kind, port alloc.) | Firewall | IP | Use case |
-//! |--------|-------------------------|----------|----|----------|
-//! | [`Home`](RouterPreset::Home) | `Easy` (EIM+APDF, preserve) | Block inbound | Dual | Consumer router (FritzBox, UniFi) |
+//! | Preset | NAT | Firewall | IP | Use case |
+//! |--------|-----|----------|----|----------|
+//! | [`Home`](RouterPreset::Home) | `Easy` (EIM+APDF) | Block inbound | Dual | Consumer router (FritzBox, UniFi) |
 //! | [`Public`](RouterPreset::Public) | None | None | Dual | Datacenter switch, ISP handoff |
 //! | [`PublicV4`](RouterPreset::PublicV4) | None | None | V4 | Legacy v4-only hosting |
-//! | [`IspCgnat`](RouterPreset::IspCgnat) | `Easy` (EIM+APDF, preserve) | Block inbound | Dual | RFC 6888 compliant CGNAT |
-//! | [`IspCgnatSymmetric`](RouterPreset::IspCgnatSymmetric) | `Hard` (EDM+APDF, preserve) | Block inbound | Dual | Symmetric CGNAT |
-//! | [`MobileCarrier`](RouterPreset::MobileCarrier) | `Hard` (EDM+APDF, preserve) | Block inbound | Dual | Typical LTE/5G carrier |
+//! | [`IspCgnat`](RouterPreset::IspCgnat) | `Easy` (EIM+APDF) | Block inbound | Dual | RFC 6888 compliant CGNAT |
+//! | [`IspCgnatSymmetric`](RouterPreset::IspCgnatSymmetric) | `Hard` (EDM+APDF, random) | Block inbound | Dual | Symmetric CGNAT |
+//! | [`MobileCarrier`](RouterPreset::MobileCarrier) | `Hard` (EDM+APDF, random) | Block inbound | Dual | Typical LTE/5G carrier |
 //! | [`IspV6`](RouterPreset::IspV6) | NAT64 | Block inbound | V6 | T-Mobile, Jio-style IPv6-only |
-//! | [`Corporate`](RouterPreset::Corporate) | `Hardest` (EDM+APDF, random) | TCP 80/443, UDP 53 only | Dual | Enterprise firewall |
-//! | [`Hotel`](RouterPreset::Hotel) | `Hardest` (EDM+APDF, random) | Captive portal (no UDP) | V4 | Guest WiFi |
-//! | [`Cloud`](RouterPreset::Cloud) | `Hardest` (EDM+APDF, random) | None | Dual | AWS/GCP/Azure NAT gateway |
+//! | [`Corporate`](RouterPreset::Corporate) | `Hard` (EDM+APDF, random) | TCP 80/443, UDP 53 only | Dual | Enterprise firewall |
+//! | [`Hotel`](RouterPreset::Hotel) | `Hard` (EDM+APDF, random) | Captive portal (no UDP) | V4 | Guest WiFi |
+//! | [`Cloud`](RouterPreset::Cloud) | `Hard` (EDM+APDF, random) | None | Dual | AWS/GCP/Azure NAT gateway |
 //!
 //! # Link conditions
 //!
@@ -180,7 +180,7 @@
 //! dev.set_default_route("eth0").await?;
 //! dev.iface("wlan0").unwrap().link_down().await?;
 //! dev.iface("wlan0").unwrap().link_up().await?;
-//! router.set_nat(Nat::Hardest).await?;
+//! router.set_nat(Nat::Hard).await?;
 //! router.flush_nat_state().await?;
 //! # Ok(())
 //! # }
@@ -246,7 +246,7 @@ pub use lab::{
     ConntrackTimeouts, DefaultRegions, Firewall, FirewallConfig, FirewallConfigBuilder, IpSupport,
     Ipv6DadMode, Ipv6Profile, Ipv6ProvisioningMode, Ix, Lab, LabBuilder, LinkCondition,
     LinkDirection, LinkLimits, Nat, NatConfig, NatConfigBuilder, NatConfigError, NatFiltering,
-    NatMapping, NatV6Mode, OutDir, PortPreservation, Region, RegionLink, TestGuard,
+    NatMapping, NatV6Mode, OutDir, Region, RegionLink, TestGuard,
 };
 pub use metrics::MetricsBuilder;
 pub use router::{Router, RouterBuilder, RouterIface, RouterPreset};

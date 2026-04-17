@@ -20,7 +20,7 @@ async fn switch_default_reflexive_ip() -> Result<()> {
         reflector,
         dc: _,
         _reflector_guard,
-    } = build_dual_nat_lab(Nat::Easy, Nat::Hardest, 16_200).await?;
+    } = build_dual_nat_lab(Nat::Easy, Nat::Hard, 16_200).await?;
 
     let wan_a = nat_a.uplink_ip().context("no uplink ip")?;
     let wan_b = nat_b.uplink_ip().context("no uplink ip")?;
@@ -115,7 +115,7 @@ async fn switch_default_tcp_roundtrip() -> Result<()> {
         nat_b: _,
         reflector: _,
         _reflector_guard,
-    } = build_dual_nat_lab(Nat::Easy, Nat::Hardest, 16_400).await?;
+    } = build_dual_nat_lab(Nat::Easy, Nat::Hard, 16_400).await?;
 
     let dc_ip = dc.uplink_ip().context("no dc uplink ip")?;
 

@@ -6,7 +6,7 @@
 
 use super::*;
 
-/// Switching between `Nat::Easy` (EIM, stable port) and `Nat::Hardest`
+/// Switching between `Nat::Easy` (EIM, stable port) and `Nat::Hard`
 /// (EDM with random port allocation) flips observed port stability.
 ///
 /// Easy to Hardest: the previously stable external port now varies per
@@ -16,10 +16,7 @@ use super::*;
 #[tokio::test(flavor = "current_thread")]
 #[traced_test]
 async fn mode_port_change() -> Result<()> {
-    let cases: &[(Nat, Nat, bool)] = &[
-        (Nat::Easy, Nat::Hardest, false),
-        (Nat::Hardest, Nat::Easy, true),
-    ];
+    let cases: &[(Nat, Nat, bool)] = &[(Nat::Easy, Nat::Hard, false), (Nat::Hard, Nat::Easy, true)];
     let mut port_base = 16_800u16;
     let mut failures = Vec::new();
     for &(from, to, expect_stable) in cases {
@@ -113,7 +110,7 @@ async fn conntrack_flush() -> Result<()> {
         eprintln!("skipping nat_rebind_conntrack_flush: conntrack not found");
         return Ok(());
     }
-    let (lab, ctx) = build_nat_case(Nat::Hardest, UplinkWiring::DirectIx, 17_000).await?;
+    let (lab, ctx) = build_nat_case(Nat::Hard, UplinkWiring::DirectIx, 17_000).await?;
     let nat_handle = lab.router_by_name("nat").context("missing nat")?;
     let bind = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0);
     let r_dc = ctx.r_dc;

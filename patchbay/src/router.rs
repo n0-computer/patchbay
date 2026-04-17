@@ -782,22 +782,33 @@ pub enum RouterPreset {
 
     /// ISP with symmetric CGNAT.
     ///
-    /// Models carrier-grade NAT that uses endpoint-dependent mapping with
-    /// port preservation. Common in some older fixed-line deployments and
-    /// in CGNAT hardware where administrators disable EIM. Hole-punching
-    /// succeeds only with port prediction ([`Nat::Hard`](crate::Nat::Hard)
-    /// semantics). IPv6 inbound is blocked by a stateful firewall.
+    /// Models carrier-grade NAT that uses endpoint-dependent mapping.
+    /// Common in older fixed-line deployments and in CGNAT hardware
+    /// where administrators disable EIM. Hole-punching requires a relay.
+    /// IPv6 inbound is blocked by a stateful firewall.
+    ///
+    /// patchbay simulates this as [`Nat::Hard`](crate::Nat::Hard) with
+    /// random port allocation. Real port-preserving symmetric CGNAT
+    /// (SYMPP, punchable through port prediction) is not modeled
+    /// distinctly; see [the NAT limits
+    /// reference](https://github.com/n0-computer/patchbay/blob/main/docs/reference/nat-limitations.md).
     ///
     /// Dual-stack, private downstream pool.
     IspCgnatSymmetric,
 
     /// Mobile carrier on LTE or 5G.
     ///
-    /// Models typical cellular deployments: symmetric NAT with port
-    /// preservation, a 60-second UDP stream timeout (matching the cellular
-    /// median reported in published CGN measurement studies), and a
-    /// stateful firewall that blocks unsolicited inbound on both address
+    /// Models typical cellular deployments: symmetric NAT with a
+    /// 60-second UDP stream timeout (matching the cellular median
+    /// reported in published CGN measurement studies) and a stateful
+    /// firewall that blocks unsolicited inbound on both address
     /// families.
+    ///
+    /// patchbay simulates this as [`Nat::Hard`](crate::Nat::Hard) with
+    /// random port allocation. Real mobile CGNAT is often
+    /// port-preserving symmetric NAT (SYMPP, punchable through port
+    /// prediction); that class is not modeled distinctly. See [the NAT
+    /// limits reference](https://github.com/n0-computer/patchbay/blob/main/docs/reference/nat-limitations.md).
     ///
     /// Dual-stack, private downstream pool.
     MobileCarrier,
@@ -873,17 +884,23 @@ impl RouterPreset {
     }
 
     fn nat(self) -> Option<NatConfig> {
-        // Start from the matching Nat preset and then override timeouts per
-        // deployment. `Nat::*.to_config()` supplies the correct mapping,
-        // filtering, and port-preservation combination for each tier.
+        // Each preset starts from a `Nat::*` expansion and overrides only
+        // timeouts. `Nat::*.to_config()` supplies the mapping and filtering.
+        //
+        // `Nat::Hard` now covers every symmetric-NAT preset. See
+        // docs/reference/nat-limitations.md for why `MobileCarrier` and
+        // `IspCgnatSymmetric` do not simulate port-preserving symmetric NAT
+        // distinctly from random-port symmetric NAT.
         let base = match self {
             Self::Public | Self::PublicV4 | Self::IspV6 => Nat::None,
-            // S1: RFC 6888 mandates EIM but most compliant deployments pair
-            // it with APDF (matching Nat::Easy), not the "full cone" EIF
-            // assumed by earlier versions of this preset.
+            // RFC 6888 mandates EIM; most compliant deployments pair it
+            // with APDF rather than EIF, matching Nat::Easy.
             Self::Home | Self::IspCgnat => Nat::Easy,
-            Self::IspCgnatSymmetric | Self::MobileCarrier => Nat::Hard,
-            Self::Corporate | Self::Hotel | Self::Cloud => Nat::Hardest,
+            Self::IspCgnatSymmetric
+            | Self::MobileCarrier
+            | Self::Corporate
+            | Self::Hotel
+            | Self::Cloud => Nat::Hard,
         };
         let mut cfg = base.to_config()?;
         cfg.timeouts = match self {

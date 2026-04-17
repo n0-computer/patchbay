@@ -61,7 +61,7 @@ pub use crate::{
     firewall::{Firewall, FirewallConfig, FirewallConfigBuilder},
     nat::{
         ConntrackTimeouts, IpSupport, Nat, NatConfig, NatConfigBuilder, NatConfigError,
-        NatFiltering, NatMapping, NatV6Mode, PortPreservation,
+        NatFiltering, NatMapping, NatV6Mode,
     },
 };
 

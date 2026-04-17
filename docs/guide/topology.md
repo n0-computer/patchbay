@@ -66,16 +66,16 @@ the preset configures:
 
 | Preset | NAT | Firewall | IP support | Pool |
 |--------|-----|----------|------------|------|
-| `Home` | `Easy` (EIM+APDF, preserve) | BlockInbound | DualStack | Private |
+| `Home` | `Easy` (EIM+APDF) | BlockInbound | DualStack | Private |
 | `Public` | None | None | DualStack | Public |
 | `PublicV4` | None | None | V4Only | Public |
-| `IspCgnat` | `Easy` (EIM+APDF, preserve) | BlockInbound | DualStack | Private |
-| `IspCgnatSymmetric` | `Hard` (EDM+APDF, preserve) | BlockInbound | DualStack | Private |
-| `MobileCarrier` | `Hard` (EDM+APDF, preserve) | BlockInbound | DualStack | Private |
+| `IspCgnat` | `Easy` (EIM+APDF) | BlockInbound | DualStack | Private |
+| `IspCgnatSymmetric` | `Hard` (EDM+APDF, random) | BlockInbound | DualStack | Private |
+| `MobileCarrier` | `Hard` (EDM+APDF, random) | BlockInbound | DualStack | Private |
 | `IspV6` | None (v4), NAT64 (v6) | BlockInbound | V6Only | Public |
-| `Corporate` | `Hardest` (EDM+APDF, random) | Corporate | DualStack | Private |
-| `Hotel` | `Hardest` (EDM+APDF, random) | CaptivePortal | V4Only | Private |
-| `Cloud` | `Hardest` (EDM+APDF, random) | None | DualStack | Private |
+| `Corporate` | `Hard` (EDM+APDF, random) | Corporate | DualStack | Private |
+| `Hotel` | `Hard` (EDM+APDF, random) | CaptivePortal | V4Only | Private |
+| `Cloud` | `Hard` (EDM+APDF, random) | None | DualStack | Private |
 
 Methods called after `.preset()` override the preset's defaults, so you
 can use a preset as a starting point and customize individual settings.

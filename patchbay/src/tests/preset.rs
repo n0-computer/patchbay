@@ -173,7 +173,7 @@ async fn preset_override() -> Result<()> {
 /// preset table) and in `plans/nat-breaking-changes.md`.
 #[test]
 fn preset_nat_snapshots() {
-    use crate::{Firewall, IpSupport, Nat, NatMapping, NatV6Mode, PortPreservation};
+    use crate::{Firewall, IpSupport, Nat, NatV6Mode};
 
     struct Expect {
         nat_kind: Option<Nat>,
@@ -227,7 +227,7 @@ fn preset_nat_snapshots() {
         (
             RouterPreset::Corporate,
             Expect {
-                nat_kind: Some(Nat::Hardest),
+                nat_kind: Some(Nat::Hard),
                 udp_stream: Some(120),
                 firewall: Firewall::Corporate,
                 ip_support: IpSupport::DualStack,
@@ -237,7 +237,7 @@ fn preset_nat_snapshots() {
         (
             RouterPreset::Hotel,
             Expect {
-                nat_kind: Some(Nat::Hardest),
+                nat_kind: Some(Nat::Hard),
                 udp_stream: Some(120),
                 firewall: Firewall::CaptivePortal,
                 ip_support: IpSupport::V4Only,
@@ -247,7 +247,7 @@ fn preset_nat_snapshots() {
         (
             RouterPreset::Cloud,
             Expect {
-                nat_kind: Some(Nat::Hardest),
+                nat_kind: Some(Nat::Hard),
                 udp_stream: Some(350),
                 firewall: Firewall::None,
                 ip_support: IpSupport::DualStack,
@@ -303,14 +303,6 @@ fn preset_nat_snapshots() {
                     actual.timeouts.udp_stream, udp_stream,
                     "{preset:?}: udp_stream"
                 );
-                if let NatMapping::EndpointDependent(pp) = actual.mapping {
-                    let expected_pp = match kind {
-                        Nat::Hard => PortPreservation::Preserve,
-                        Nat::Hardest => PortPreservation::Random,
-                        _ => unreachable!("EDM presets map to Hard or Hardest only"),
-                    };
-                    assert_eq!(pp, expected_pp, "{preset:?}: port preservation");
-                }
             }
             (actual, expected) => {
                 panic!("{preset:?}: nat mismatch: actual={actual:?}, expected={expected:?}");
