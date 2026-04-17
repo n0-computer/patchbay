@@ -44,9 +44,15 @@ function layoutGraph(nodes: Node[], edges: Edge[]): Node[] {
 }
 
 function natLabel(nat: Nat): string {
-  if (typeof nat === 'string') return nat
-  if ('custom' in nat) return 'custom'
-  return '?'
+  if (nat === null) return 'none'
+  const mapping = typeof nat.mapping === 'string' ? 'EIM' : 'EDM'
+  const filtering =
+    nat.filtering === 'endpoint_independent'
+      ? 'EIF'
+      : nat.filtering === 'address_dependent'
+      ? 'ADF'
+      : 'APDF'
+  return `${mapping}+${filtering}`
 }
 
 function selCls(nodeId: string, sel: string | null | undefined): string {

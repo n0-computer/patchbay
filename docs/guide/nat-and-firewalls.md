@@ -48,9 +48,9 @@ real-world device class:
 | Mode | Mapping | Filtering | Port allocation | Real-world model |
 |------|---------|-----------|-----------------|------------------|
 | `None` | n/a | n/a | n/a | Datacenter, public IPs |
-| `Easiest` | Endpoint-independent | Endpoint-independent | Preserve | Full-cone router, RFC 6888 compliant CGNAT |
+| `Easiest` | Endpoint-independent | Endpoint-independent | Preserve | Full-cone router with UPnP or static forwarding |
 | `Easy` | Endpoint-independent | Address-and-port-dependent | Preserve | Standard home WiFi router |
-| `Hard` | Endpoint-dependent | Address-and-port-dependent | Preserve | PBA CGNAT, mobile carrier, port-preserving symmetric NAT |
+| `Hard` | Endpoint-dependent | Address-and-port-dependent | Preserve | Mobile carrier, symmetric CGNAT, port-predictable symmetric NAT |
 | `Hardest` | Endpoint-dependent | Address-and-port-dependent | Random | Enterprise gateway, AWS/Azure/GCP NAT Gateway |
 
 For a deep dive into how these modes are implemented in nftables and how
@@ -230,11 +230,14 @@ let dc = lab.add_router("dc")
     .firewall(Firewall::Corporate)
     .build().await?;
 
-// Double NAT: ISP carrier-grade NAT in front of a home router.
-let isp = lab.add_router("isp").nat(Nat::Easiest).build().await?;
+// Double NAT: ISP carrier-grade NAT in front of a home router. The
+// `IspCgnat` preset gives realistic defaults (EIM + APDF, v6 inbound
+// blocked); use `.nat(Nat::Easiest)` if you specifically want to model
+// a full-cone CGNAT.
+let isp = lab.add_router("isp").preset(RouterPreset::IspCgnat).build().await?;
 let home = lab.add_router("home")
+    .preset(RouterPreset::Home)
     .upstream(isp.id())
-    .nat(Nat::Easy)
     .build().await?;
 ```
 

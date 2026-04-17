@@ -6,14 +6,16 @@
 
 use super::*;
 
-/// Changing NAT mode between Home (EIM) and Corporate (EDM) flips port stability.
+/// Switching between `Nat::Easy` (EIM, stable port) and `Nat::Hardest`
+/// (EDM with random port allocation) flips observed port stability.
 ///
-/// Home → Corporate: previously stable external port now varies per destination.
-/// Corporate → Home: previously varying port now stays stable.
+/// Easy to Hardest: the previously stable external port now varies per
+/// destination because random port allocation kicks in.
+/// Hardest to Easy: the previously varying port stabilises because EIM
+/// assigns the same external port for all destinations.
 #[tokio::test(flavor = "current_thread")]
 #[traced_test]
 async fn mode_port_change() -> Result<()> {
-    // Home→Corporate: port changes (EIM→EDM); Corporate→Home: port stabilises.
     let cases: &[(Nat, Nat, bool)] = &[
         (Nat::Easy, Nat::Hardest, false),
         (Nat::Hardest, Nat::Easy, true),

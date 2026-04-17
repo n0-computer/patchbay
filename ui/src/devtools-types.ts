@@ -1,18 +1,32 @@
 // ── NAT types ──
 
-/** NAT behavior preset (kebab-case from Rust `Nat` enum). */
-export type NatPreset = 'none' | 'home' | 'corporate' | 'cgnat' | 'cloud-nat' | 'full-cone'
+/** Port allocation for EDM. Matches Rust `PortPreservation`. */
+export type PortPreservation = 'preserve' | 'random'
 
-/** Custom NAT configuration (Rust `Nat::Custom(NatConfig)`). */
+/** Matches Rust `NatMapping`. EIM has no payload; EDM carries
+ * a `PortPreservation` tag. */
+export type NatMapping =
+  | 'endpoint_independent'
+  | { endpoint_dependent: PortPreservation }
+
+/** Matches Rust `NatFiltering`. */
+export type NatFiltering =
+  | 'endpoint_independent'
+  | 'address_dependent'
+  | 'address_and_port_dependent'
+
+/** Matches Rust `NatConfig`. Serialized directly as the value of
+ * `RouterState.nat` (or `null` when NAT is disabled). */
 export interface NatConfig {
-  mapping: 'endpoint_independent' | 'endpoint_dependent'
-  filtering: 'endpoint_independent' | 'address_and_port_dependent'
+  mapping: NatMapping
+  filtering: NatFiltering
   timeouts: { udp: number; udp_stream: number; tcp_established: number }
   hairpin: boolean
 }
 
-/** Matches Rust `Nat` — either a preset string or `{ custom: NatConfig }`. */
-export type Nat = NatPreset | { custom: NatConfig }
+/** Serialized form of `Option<NatConfig>` in `RouterState.nat` and
+ * `LabEventKind::NatChanged`. `null` means NAT is disabled. */
+export type Nat = NatConfig | null
 
 /** Matches Rust `NatV6Mode`. */
 export type NatV6Mode = 'none' | 'nptv6' | 'masquerade' | 'nat64'

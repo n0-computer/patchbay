@@ -81,8 +81,12 @@ pub enum Nat {
 
     /// Fully custom NAT configuration.
     ///
-    /// Use this when the named presets do not cover the scenario. Construct
-    /// the config with [`NatConfig::builder`].
+    /// [`RouterBuilder::nat`](crate::RouterBuilder::nat) and
+    /// [`Router::set_nat`](crate::Router::set_nat) both accept a
+    /// [`NatConfig`] directly, so `Nat::Custom` is rarely needed in
+    /// application code. Reach for it when you need a `Nat` value: for
+    /// TOML deserialization or when pattern-matching on a stored
+    /// preset.
     #[strum(disabled)]
     Custom(NatConfig),
 }
@@ -174,8 +178,9 @@ pub enum PortPreservation {
     Preserve,
     /// Allocate a random external port for each flow.
     ///
-    /// Linux `masquerade random`. Combined with EDM this makes hole-punching
-    /// practically impossible.
+    /// Linux `masquerade random`. Combined with EDM this produces a
+    /// fresh, unpredictable external port per flow; hole-punching fails
+    /// without a relay.
     Random,
 }
 
@@ -277,6 +282,20 @@ impl std::error::Error for NatConfigError {}
 /// Each preset ([`Nat::Easy`], [`Nat::Hard`], etc.) expands via
 /// [`Nat::to_config`]. Custom configurations are built with
 /// [`NatConfig::builder`], which validates cross-field invariants.
+///
+/// # Example
+/// ```
+/// # use patchbay::{NatConfig, NatMapping, NatFiltering, PortPreservation};
+/// // Port-preserving symmetric NAT with a short UDP timeout, matching a
+/// // mobile carrier CGN.
+/// let cfg = NatConfig::builder()
+///     .mapping(NatMapping::EndpointDependent(PortPreservation::Preserve))
+///     .filtering(NatFiltering::AddressAndPortDependent)
+///     .udp_stream_timeout(60)
+///     .build()
+///     .expect("valid combination");
+/// assert_eq!(cfg.timeouts.udp_stream, 60);
+/// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct NatConfig {
