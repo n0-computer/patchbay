@@ -25,7 +25,7 @@ async fn tcp_through_nat() -> Result<()> {
         .await?;
 
     let dc = lab.add_router("dc").build().await?;
-    let home = lab.add_router("home").nat(Nat::Home).build().await?;
+    let home = lab.add_router("home").nat(Nat::Easy).build().await?;
 
     let server = lab
         .add_device("server")

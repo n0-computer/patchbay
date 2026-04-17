@@ -31,11 +31,11 @@ multi-layer topologies like ISP + home or corporate gateway + branch
 office:
 
 ```rust
-let isp = lab.add_router("isp").nat(Nat::Cgnat).build().await?;
+let isp = lab.add_router("isp").nat(Nat::Easiest).build().await?;
 let home = lab
     .add_router("home")
     .upstream(isp.id())
-    .nat(Nat::Home)
+    .nat(Nat::Easy)
     .build()
     .await?;
 ```
@@ -77,7 +77,7 @@ the preset configures:
 
 Methods called after `.preset()` override the preset's defaults, so you
 can use a preset as a starting point and customize individual settings.
-For example, `RouterPreset::Home` with `.nat(Nat::FullCone)` gives you a
+For example, `RouterPreset::Home` with `.nat(Nat::Easiest)` gives you a
 home-style topology with fullcone NAT instead of the default
 endpoint-dependent filtering.
 

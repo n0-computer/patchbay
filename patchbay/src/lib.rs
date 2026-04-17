@@ -177,7 +177,7 @@
 //! dev.set_default_route("eth0").await?;
 //! dev.iface("wlan0").unwrap().link_down().await?;
 //! dev.iface("wlan0").unwrap().link_up().await?;
-//! router.set_nat_mode(Nat::Corporate).await?;
+//! router.set_nat_mode(Nat::Hardest).await?;
 //! router.flush_nat_state().await?;
 //! # Ok(())
 //! # }

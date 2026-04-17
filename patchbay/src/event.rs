@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     firewall::Firewall,
     lab::LinkCondition,
-    nat::{IpSupport, Nat, NatV6Mode},
+    nat::{IpSupport, NatConfig, NatV6Mode},
 };
 
 // ─────────────────────────────────────────────
@@ -129,8 +129,8 @@ pub enum LabEventKind {
     NatChanged {
         /// Router name.
         router: String,
-        /// New NAT configuration.
-        nat: Nat,
+        /// New NAT configuration. `None` means NAT is disabled.
+        nat: Option<NatConfig>,
     },
     /// Router IPv6 NAT mode changed.
     NatV6Changed {
@@ -349,8 +349,8 @@ pub struct RouterState {
     pub ns: String,
     /// Region tag.
     pub region: Option<String>,
-    /// NAT configuration.
-    pub nat: Nat,
+    /// NAT configuration. `None` means NAT is disabled.
+    pub nat: Option<NatConfig>,
     /// IPv6 NAT mode.
     pub nat_v6: NatV6Mode,
     /// Firewall configuration.
@@ -798,7 +798,7 @@ mod tests {
                 state: Box::new(RouterState {
                     ns: "ns-r1".into(),
                     region: None,
-                    nat: Nat::Home,
+                    nat: crate::Nat::Easy.into(),
                     nat_v6: NatV6Mode::None,
                     firewall: Firewall::None,
                     ip_support: IpSupport::V4Only,
@@ -838,7 +838,7 @@ mod tests {
             },
             LabEventKind::NatChanged {
                 router: "r1".into(),
-                nat: Nat::Corporate,
+                nat: crate::Nat::Hardest.into(),
             },
             LabEventKind::DeviceRemoved { name: "d1".into() },
             LabEventKind::RouterRemoved { name: "r1".into() },
@@ -888,7 +888,7 @@ mod tests {
                     state: Box::new(RouterState {
                         ns: "ns-r1".into(),
                         region: None,
-                        nat: Nat::Home,
+                        nat: crate::Nat::Easy.into(),
                         nat_v6: NatV6Mode::None,
                         firewall: Firewall::None,
                         ip_support: IpSupport::V4Only,

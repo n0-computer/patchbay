@@ -141,7 +141,7 @@ let corp = lab.add_router("corp").preset(RouterPreset::Corporate).build().await?
 // Override one knob:
 let home = lab.add_router("home")
     .preset(RouterPreset::Home)
-    .nat(Nat::FullCone)   // swap NAT type, keep everything else
+    .nat(Nat::Easiest)   // swap NAT type, keep everything else
     .build().await?;
 ```
 
@@ -258,7 +258,7 @@ connectivity regressions that single-topology tests miss.
 ```rust
 let home = lab.add_router("home")
     .preset(RouterPreset::Home)
-    .nat(Nat::FullCone)
+    .nat(Nat::Easiest)
     .build().await?;
 let alice = lab.add_device("alice").uplink(home.id()).build().await?;
 

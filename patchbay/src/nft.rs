@@ -7,8 +7,8 @@ use ipnet::Ipv6Net;
 use tracing::{debug, trace};
 
 use crate::{
-    core::RouterConfig, netns, qdisc, wiring::set_sysctl_root, ConntrackTimeouts, LinkCondition,
-    NatConfig, NatFiltering, NatMapping, NatV6Mode,
+    core::RouterConfig, nat::PortPreservation, netns, qdisc, wiring::set_sysctl_root,
+    ConntrackTimeouts, LinkCondition, NatConfig, NatFiltering, NatMapping, NatV6Mode,
 };
 
 /// Applies nftables rules (assumes caller is already in the target namespace).
@@ -54,9 +54,11 @@ pub(crate) async fn run_nft_in(netns: &netns::NetnsManager, ns: &str, rules: &st
 /// Generates nftables rules for a [`NatConfig`].
 ///
 /// EIM uses a dynamic fullcone map to preserve source ports across destinations.
-/// EDM uses `masquerade random` for per-flow port randomization.
+/// EDM uses `snat` with the port-preservation flag set by [`PortPreservation`].
 /// EIF adds unconditional fullcone DNAT in prerouting.
-/// APDF adds a forward filter that only allows established/related flows.
+/// ADF and APDF add a forward filter that only allows established/related flows.
+/// ADF additionally permits packets from any port on a previously-contacted
+/// external address.
 fn generate_nat_rules(cfg: &NatConfig, wan_if: &str, wan_ip: Ipv4Addr) -> String {
     let use_fullcone_map = cfg.mapping == NatMapping::EndpointIndependent;
     let hairpin = cfg.hairpin;
@@ -73,7 +75,7 @@ fn generate_nat_rules(cfg: &NatConfig, wan_if: &str, wan_ip: Ipv4Addr) -> String
     };
 
     // Prerouting: for EIM, DNAT via fullcone map so inbound UDP reaches
-    // the correct internal host.  For EDM, an empty prerouting chain is
+    // the correct internal host. For EDM, an empty prerouting chain is
     // still needed for conntrack reverse-NAT on reply packets.
     //
     // With hairpin: match on `ip daddr <wan_ip>` instead of `iif "<wan>"` so
@@ -98,9 +100,10 @@ fn generate_nat_rules(cfg: &NatConfig, wan_if: &str, wan_ip: Ipv4Addr) -> String
         String::new()
     };
 
-    // Postrouting: EIM uses snat + fullcone map update. EDM uses masquerade random.
-    // With hairpin: masquerade DNAT'd packets so the return path goes through
-    // the router (otherwise the LAN peer replies directly, confusing conntrack).
+    // Postrouting: EIM uses snat + fullcone map update. EDM uses snat with a
+    // per-preservation flag. With hairpin: masquerade DNAT'd packets so the
+    // return path goes through the router (otherwise the LAN peer replies
+    // directly, confusing conntrack).
     let hairpin_masq = if hairpin {
         "        ct status dnat masquerade\n".to_string()
     } else {
@@ -116,18 +119,38 @@ fn generate_nat_rules(cfg: &NatConfig, wan_if: &str, wan_ip: Ipv4Addr) -> String
             ip = wan_ip,
         )
     } else {
+        // EDM with Preserve: masquerade (Linux keeps the source port when free).
+        // EDM with Random: masquerade random (fresh port per flow).
+        let masq_flag = match cfg.port_preservation {
+            PortPreservation::Preserve => "",
+            PortPreservation::Random => " random",
+        };
         format!(
-            r#"{hairpin}        oif "{wan}" masquerade random"#,
+            r#"{hairpin}        oif "{wan}" masquerade{flag}"#,
             hairpin = hairpin_masq,
             wan = wan_if,
+            flag = masq_flag,
         )
     };
 
     let postrouting_priority = if use_fullcone_map { "srcnat" } else { "100" };
 
-    // APDF filter: only forward inbound packets matching existing conntrack flows.
-    let filter_table = if cfg.filtering == NatFiltering::AddressAndPortDependent {
-        format!(
+    // Filter table implements the filtering behavior on the WAN ingress path.
+    //
+    // APDF: `ct state established,related accept` is enough because conntrack
+    // only matches when source IP and source port exactly match the outbound
+    // flow.
+    //
+    // ADF: same conntrack accept plus a dynamic set of external IPs the
+    // internal side has contacted. Packets from any port on those IPs are
+    // allowed. The set is populated on the postrouting path; the forward
+    // chain consults it on inbound.
+    //
+    // EIF: no filter table; the prerouting fullcone DNAT delivers packets
+    // regardless of source.
+    let filter_table = match cfg.filtering {
+        NatFiltering::EndpointIndependent => String::new(),
+        NatFiltering::AddressAndPortDependent => format!(
             r#"
 table ip filter {{
     chain forward {{
@@ -137,9 +160,29 @@ table ip filter {{
     }}
 }}"#,
             wan = wan_if
-        )
-    } else {
-        String::new()
+        ),
+        NatFiltering::AddressDependent => format!(
+            r#"
+table ip filter {{
+    set contacted {{
+        type ipv4_addr
+        flags dynamic,timeout
+        timeout 300s
+        size 8192
+    }}
+    chain forward {{
+        type filter hook forward priority 0; policy accept;
+        iif "{wan}" ct state established,related accept
+        iif "{wan}" ip saddr @contacted accept
+        iif "{wan}" drop
+    }}
+    chain postrouting {{
+        type filter hook postrouting priority 0; policy accept;
+        oif "{wan}" update @contacted {{ ip daddr }}
+    }}
+}}"#,
+            wan = wan_if
+        ),
     };
 
     format!(
@@ -196,9 +239,7 @@ fn apply_conntrack_timeouts_from_config(
 
 /// Applies router NAT rules for the configured mode.
 ///
-/// Uses the effective NAT config from the router's [`Nat`] variant.
-/// Otherwise expands the [`Nat`] preset via [`Nat::to_config`].
-/// CGNAT and None are handled separately.
+/// Uses the stored `Option<NatConfig>` directly; `None` disables NAT.
 pub(crate) async fn apply_nat_for_router(
     netns: &netns::NetnsManager,
     ns: &str,

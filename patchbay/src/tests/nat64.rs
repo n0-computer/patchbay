@@ -18,7 +18,7 @@ async fn nat64_udp_v6_to_v4() -> Result<()> {
     let carrier = lab
         .add_router("carrier")
         .ip_support(IpSupport::DualStack)
-        .nat(Nat::Home)
+        .nat(Nat::Easy)
         .nat_v6(NatV6Mode::Nat64)
         .build()
         .await?;
@@ -67,7 +67,7 @@ async fn nat64_tcp_v6_to_v4() -> Result<()> {
     let carrier = lab
         .add_router("carrier")
         .ip_support(IpSupport::DualStack)
-        .nat(Nat::Home)
+        .nat(Nat::Easy)
         .nat_v6(NatV6Mode::Nat64)
         .build()
         .await?;
@@ -112,7 +112,7 @@ async fn nat64_preserves_native_v6() -> Result<()> {
     let carrier = lab
         .add_router("carrier")
         .ip_support(IpSupport::DualStack)
-        .nat(Nat::Home)
+        .nat(Nat::Easy)
         .nat_v6(NatV6Mode::Nat64)
         .build()
         .await?;

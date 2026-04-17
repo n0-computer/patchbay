@@ -1073,7 +1073,7 @@ impl Lab {
             name: name.to_string(),
             region: None,
             upstream: None,
-            nat: Nat::None,
+            nat: None,
             ip_support: IpSupport::V4Only,
             nat_v6: NatV6Mode::None,
             downstream_pool: None,
@@ -1169,11 +1169,11 @@ impl Lab {
             }
             let idx = inner.alloc_region_idx()?;
 
-            // Region router: Nat::None, public downstream, no region tag (it IS the region).
+            // Region router: no NAT, public downstream, no region tag (it IS the region).
             // DualStack so it can forward v6 traffic from sub-routers.
             let id = inner.add_router(
                 &region_router_name,
-                Nat::None,
+                None,
                 DownstreamPool::Public,
                 None,
                 IpSupport::DualStack,

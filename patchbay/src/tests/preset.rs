@@ -126,7 +126,7 @@ async fn preset_corporate_blocks_udp() -> Result<()> {
     Ok(())
 }
 
-/// Preset with override: Home preset with Nat::FullCone overrides only NAT.
+/// Preset with override: Home preset with Nat::Easiest overrides only NAT.
 #[tokio::test(flavor = "current_thread")]
 #[traced_test]
 async fn preset_override() -> Result<()> {
@@ -140,11 +140,11 @@ async fn preset_override() -> Result<()> {
         .await?;
     let dc_ip = dc.uplink_ip().context("no dc uplink ip")?;
 
-    // Home preset + FullCone NAT override.
+    // Home preset with full-cone NAT override.
     let home = lab
         .add_router("home")
         .preset(RouterPreset::Home)
-        .nat(Nat::FullCone)
+        .nat(Nat::Easiest)
         .build()
         .await?;
 
@@ -176,6 +176,8 @@ async fn preset_recommended_ipv6_profiles() -> Result<()> {
         RouterPreset::Public,
         RouterPreset::PublicV4,
         RouterPreset::IspCgnat,
+        RouterPreset::IspCgnatHard,
+        RouterPreset::MobileCarrier,
         RouterPreset::IspV6,
         RouterPreset::Corporate,
         RouterPreset::Hotel,

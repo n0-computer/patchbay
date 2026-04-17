@@ -8,12 +8,12 @@ use super::*;
 async fn cgnat_reflexive_ip() -> Result<()> {
     check_caps()?;
     let lab = Lab::new().await?;
-    let isp = lab.add_router("isp1").nat(Nat::Cgnat).build().await?;
+    let isp = lab.add_router("isp1").nat(Nat::Easiest).build().await?;
     let dc = lab.add_router("dc1").build().await?;
     let home = lab
         .add_router("home1")
         .upstream(isp.id())
-        .nat(Nat::Home)
+        .nat(Nat::Easy)
         .build()
         .await?;
     lab.add_device("dev1")
@@ -45,17 +45,17 @@ async fn cgnat_shared_reflexive_ip() -> Result<()> {
     check_caps()?;
     let lab = Lab::new().await?;
     let dc = lab.add_router("dc").build().await?;
-    let isp = lab.add_router("isp").nat(Nat::Cgnat).build().await?;
+    let isp = lab.add_router("isp").nat(Nat::Easiest).build().await?;
     let lan_provider = lab
         .add_router("lan-provider")
         .upstream(isp.id())
-        .nat(Nat::Home)
+        .nat(Nat::Easy)
         .build()
         .await?;
     let lan_fetcher = lab
         .add_router("lan-fetcher")
         .upstream(isp.id())
-        .nat(Nat::Home)
+        .nat(Nat::Easy)
         .build()
         .await?;
     lab.add_device("provider")
@@ -127,13 +127,13 @@ async fn matrix_connectivity_and_reflexive_ip() -> Result<()> {
     check_caps()?;
     let cases = [
         (Nat::None, UplinkWiring::DirectIx),
-        (Nat::Cgnat, UplinkWiring::DirectIx),
-        (Nat::Home, UplinkWiring::DirectIx),
-        (Nat::Home, UplinkWiring::ViaPublicIsp),
-        (Nat::Home, UplinkWiring::ViaCgnatIsp),
-        (Nat::Corporate, UplinkWiring::DirectIx),
-        (Nat::Corporate, UplinkWiring::ViaPublicIsp),
-        (Nat::Corporate, UplinkWiring::ViaCgnatIsp),
+        (Nat::Easiest, UplinkWiring::DirectIx),
+        (Nat::Easy, UplinkWiring::DirectIx),
+        (Nat::Easy, UplinkWiring::ViaPublicIsp),
+        (Nat::Easy, UplinkWiring::ViaCgnatIsp),
+        (Nat::Hardest, UplinkWiring::DirectIx),
+        (Nat::Hardest, UplinkWiring::ViaPublicIsp),
+        (Nat::Hardest, UplinkWiring::ViaCgnatIsp),
     ];
 
     let mut case_idx = 0u16;
@@ -165,8 +165,8 @@ async fn private_isolation_public_reachable() -> Result<()> {
     check_caps()?;
     let lab = Lab::new().await?;
     let dc = lab.add_router("dc").build().await?;
-    let nat_a = lab.add_router("nat-a").nat(Nat::Home).build().await?;
-    let nat_b = lab.add_router("nat-b").nat(Nat::Home).build().await?;
+    let nat_a = lab.add_router("nat-a").nat(Nat::Easy).build().await?;
+    let nat_b = lab.add_router("nat-b").nat(Nat::Easy).build().await?;
 
     let relay = lab
         .add_device("relay")
@@ -235,17 +235,21 @@ async fn wan_pool_selection() -> Result<()> {
     check_caps()?;
     let lab = Lab::new().await?;
     let isp_public = lab.add_router("isp-public").build().await?;
-    let isp_cgnat = lab.add_router("isp-cgnat").nat(Nat::Cgnat).build().await?;
+    let isp_cgnat = lab
+        .add_router("isp-cgnat")
+        .nat(Nat::Easiest)
+        .build()
+        .await?;
     let home_public = lab
         .add_router("home-public")
         .upstream(isp_public.id())
-        .nat(Nat::Home)
+        .nat(Nat::Easy)
         .build()
         .await?;
     let home_cgnat = lab
         .add_router("home-cgnat")
         .upstream(isp_cgnat.id())
-        .nat(Nat::Home)
+        .nat(Nat::Easy)
         .build()
         .await?;
 
@@ -328,7 +332,7 @@ async fn port_mapping_eim_stable() -> Result<()> {
     let mut failures = Vec::new();
     for wiring in UplinkWiring::iter() {
         let result: Result<()> = async {
-            let (lab, ctx) = build_nat_case(Nat::Home, wiring, port_base).await?;
+            let (lab, ctx) = build_nat_case(Nat::Easy, wiring, port_base).await?;
             let dev = lab.device_by_name("dev").unwrap();
             let o1 = dev.probe_udp_mapping(ctx.r_dc)?;
             let o2 = dev.probe_udp_mapping(ctx.r_ix)?;
@@ -362,7 +366,7 @@ async fn port_mapping_edm_changes() -> Result<()> {
     let mut failures = Vec::new();
     for wiring in UplinkWiring::iter() {
         let result: Result<()> = async {
-            let (lab, ctx) = build_nat_case(Nat::Corporate, wiring, port_base).await?;
+            let (lab, ctx) = build_nat_case(Nat::Hardest, wiring, port_base).await?;
             let dev = lab.device_by_name("dev").unwrap();
             let o1 = dev.probe_udp_mapping(ctx.r_dc)?;
             let o2 = dev.probe_udp_mapping(ctx.r_ix)?;
@@ -393,7 +397,7 @@ async fn port_mapping_edm_changes() -> Result<()> {
 async fn same_nat_shared_ip() -> Result<()> {
     let lab = Lab::new().await?;
     let dc = lab.add_router("dc").build().await?;
-    let nat = lab.add_router("nat").nat(Nat::Home).build().await?;
+    let nat = lab.add_router("nat").nat(Nat::Easy).build().await?;
     let dev_a = lab
         .add_device("dev-a")
         .iface("eth0", nat.id())
@@ -426,8 +430,8 @@ async fn same_nat_shared_ip() -> Result<()> {
 async fn different_nat_isolation() -> Result<()> {
     let lab = Lab::new().await?;
     let dc = lab.add_router("dc").build().await?;
-    let nat_a = lab.add_router("nat-a").nat(Nat::Home).build().await?;
-    let nat_b = lab.add_router("nat-b").nat(Nat::Home).build().await?;
+    let nat_a = lab.add_router("nat-a").nat(Nat::Easy).build().await?;
+    let nat_b = lab.add_router("nat-b").nat(Nat::Easy).build().await?;
     let dev_a = lab
         .add_device("dev-a")
         .iface("eth0", nat_a.id())
@@ -484,7 +488,7 @@ async fn v6_masquerade() -> Result<()> {
     let home = lab
         .add_router("nat")
         .upstream(isp.id())
-        .nat(Nat::Home)
+        .nat(Nat::Easy)
         .ip_support(IpSupport::DualStack)
         .nat_v6(NatV6Mode::Masquerade)
         .build()
@@ -528,7 +532,7 @@ async fn v6_no_translation() -> Result<()> {
     let home = lab
         .add_router("home")
         .upstream(isp.id())
-        .nat(Nat::Home)
+        .nat(Nat::Easy)
         .ip_support(IpSupport::DualStack)
         .nat_v6(NatV6Mode::None)
         .build()
@@ -562,7 +566,7 @@ async fn fullcone_external_reachable() -> Result<()> {
     check_caps()?;
     let lab = Lab::new().await?;
     let dc = lab.add_router("dc").build().await?;
-    let fc = lab.add_router("fc").nat(Nat::FullCone).build().await?;
+    let fc = lab.add_router("fc").nat(Nat::Easiest).build().await?;
     let dev = lab.add_device("dev").iface("eth0", fc.id()).build().await?;
 
     let dc_ip = dc.uplink_ip().context("no dc uplink ip")?;
@@ -606,7 +610,7 @@ async fn cgnat_external_reachable() -> Result<()> {
     check_caps()?;
     let lab = Lab::new().await?;
     let dc = lab.add_router("dc").build().await?;
-    let isp = lab.add_router("isp").nat(Nat::Cgnat).build().await?;
+    let isp = lab.add_router("isp").nat(Nat::Easiest).build().await?;
     // Device directly behind CGNAT (no Home NAT layer) to test CGNAT EIF in isolation.
     let dev = lab
         .add_device("dev")
@@ -663,11 +667,11 @@ async fn cgnat_port_mapping_eim() -> Result<()> {
     let lab = Lab::new().await?;
     let dc1 = lab.add_router("dc1").build().await?;
     let dc2 = lab.add_router("dc2").build().await?;
-    let isp = lab.add_router("isp").nat(Nat::Cgnat).build().await?;
+    let isp = lab.add_router("isp").nat(Nat::Easiest).build().await?;
     let home = lab
         .add_router("home")
         .upstream(isp.id())
-        .nat(Nat::Home)
+        .nat(Nat::Easy)
         .build()
         .await?;
     let dev = lab
@@ -710,7 +714,7 @@ async fn v6_masquerade_port_mapping() -> Result<()> {
     let nat = lab
         .add_router("nat")
         .ip_support(IpSupport::DualStack)
-        .nat(Nat::Home)
+        .nat(Nat::Easy)
         .nat_v6(NatV6Mode::Masquerade)
         .build()
         .await?;

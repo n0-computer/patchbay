@@ -15,7 +15,7 @@ use super::*;
 async fn add_remove_runtime() -> Result<()> {
     let lab = Lab::new().await?;
     let dc = lab.add_router("dc").build().await?;
-    let home = lab.add_router("home").nat(Nat::Home).build().await?;
+    let home = lab.add_router("home").nat(Nat::Easy).build().await?;
     let dev = lab
         .add_device("dev")
         .iface("eth0", home.id())
@@ -309,7 +309,7 @@ async fn replug_to_different_subnet() -> Result<()> {
     let dc_b = lab
         .add_router("dc-b")
         .downstream_cidr("172.20.0.0/24".parse()?)
-        .nat(Nat::Home)
+        .nat(Nat::Easy)
         .build()
         .await?;
 

@@ -290,7 +290,7 @@ dev.iface("wlan0").unwrap().set_condition(LinkCondition::Manual(LinkLimits {
 }), LinkDirection::Both).await?;
 
 // Change NAT mode at runtime.
-router.set_nat_mode(Nat::Corporate).await?;
+router.set_nat_mode(Nat::Hardest).await?;
 router.flush_nat_state().await?;
 ```
 

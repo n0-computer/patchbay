@@ -15,8 +15,8 @@ use super::*;
 async fn mode_port_change() -> Result<()> {
     // Home→Corporate: port changes (EIM→EDM); Corporate→Home: port stabilises.
     let cases: &[(Nat, Nat, bool)] = &[
-        (Nat::Home, Nat::Corporate, false),
-        (Nat::Corporate, Nat::Home, true),
+        (Nat::Easy, Nat::Hardest, false),
+        (Nat::Hardest, Nat::Easy, true),
     ];
     let mut port_base = 16_800u16;
     let mut failures = Vec::new();
@@ -60,7 +60,7 @@ async fn mode_ip_change() -> Result<()> {
     // Home→None is omitted: with NAT=None, the device's private IP appears
     // as the packet source; the DC has no return route, so the UDP probe
     // times out rather than completing.
-    let cases: &[(Nat, Nat)] = &[(Nat::None, Nat::Home)];
+    let cases: &[(Nat, Nat)] = &[(Nat::None, Nat::Easy)];
     let mut port_base = 16_900u16;
     let mut failures = Vec::new();
     for &(from, to) in cases {
@@ -76,7 +76,7 @@ async fn mode_ip_change() -> Result<()> {
                 test_utils::probe_udp(r_dc, Duration::from_millis(500), Some(bind))
             })?;
             let expected = match to {
-                Nat::Home => IpAddr::V4(wan_ip),
+                Nat::Easy => IpAddr::V4(wan_ip),
                 Nat::None => IpAddr::V4(ctx.dev_ip),
                 _ => unreachable!(),
             };
@@ -111,7 +111,7 @@ async fn conntrack_flush() -> Result<()> {
         eprintln!("skipping nat_rebind_conntrack_flush: conntrack not found");
         return Ok(());
     }
-    let (lab, ctx) = build_nat_case(Nat::Corporate, UplinkWiring::DirectIx, 17_000).await?;
+    let (lab, ctx) = build_nat_case(Nat::Hardest, UplinkWiring::DirectIx, 17_000).await?;
     let nat_handle = lab.router_by_name("nat").context("missing nat")?;
     let bind = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0);
     let r_dc = ctx.r_dc;

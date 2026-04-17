@@ -25,31 +25,33 @@ gets a different external port, so the address learned from STUN is
 useless for other peers.
 
 *Filtering* determines which inbound packets the router forwards.
-Endpoint-independent filtering (fullcone) accepts packets from any
-external host, as long as a mapping exists. Endpoint-dependent filtering
-only forwards packets from hosts the internal device has already
-contacted — unsolicited packets from unknown hosts are dropped even if
-the port is mapped.
+Endpoint-independent filtering (full cone) accepts packets from any
+external host, as long as a mapping exists. Address-dependent filtering
+accepts packets from any port on an address the internal device has
+already contacted. Address-and-port-dependent filtering only forwards
+packets from the exact address and port the internal device has
+already contacted; unsolicited packets are dropped even if the port is
+mapped.
 
 You configure NAT on the router builder with `.nat()`:
 
 ```rust
 use patchbay::Nat;
 
-let home = lab.add_router("home").nat(Nat::Home).build().await?;
+let home = lab.add_router("home").nat(Nat::Easy).build().await?;
 ```
 
-Each preset combines a mapping and filtering mode to match a real-world
-device class:
+The `Nat` enum forms a gradient of hole-punching difficulty. Each variant
+combines a mapping, filtering, and port-preservation choice to match a
+real-world device class:
 
-| Mode | Mapping | Filtering | Real-world model |
-|------|---------|-----------|------------------|
-| `None` | n/a | n/a | Datacenter, public IPs |
-| `Home` | Endpoint-independent | Endpoint-dependent | Home WiFi router |
-| `Corporate` | Endpoint-independent | Endpoint-dependent | Enterprise gateway |
-| `FullCone` | Endpoint-independent | Endpoint-independent | Gaming router, fullcone VPN |
-| `CloudNat` | Endpoint-dependent | Endpoint-dependent | AWS/GCP cloud NAT |
-| `Cgnat` | Endpoint-dependent | Endpoint-dependent | Carrier-grade NAT at the ISP |
+| Mode | Mapping | Filtering | Port allocation | Real-world model |
+|------|---------|-----------|-----------------|------------------|
+| `None` | n/a | n/a | n/a | Datacenter, public IPs |
+| `Easiest` | Endpoint-independent | Endpoint-independent | Preserve | Full-cone router, RFC 6888 compliant CGNAT |
+| `Easy` | Endpoint-independent | Address-and-port-dependent | Preserve | Standard home WiFi router |
+| `Hard` | Endpoint-dependent | Address-and-port-dependent | Preserve | PBA CGNAT, mobile carrier, port-preserving symmetric NAT |
+| `Hardest` | Endpoint-dependent | Address-and-port-dependent | Random | Enterprise gateway, AWS/Azure/GCP NAT Gateway |
 
 For a deep dive into how these modes are implemented in nftables and how
 hole-punching works across them, see the
@@ -64,11 +66,11 @@ independently:
 ```rust
 use patchbay::nat::{NatConfig, NatMapping, NatFiltering};
 
-let custom = Nat::Custom(NatConfig {
-    mapping: NatMapping::EndpointIndependent,
-    filtering: NatFiltering::EndpointIndependent,
-    ..Default::default()
-});
+let custom = NatConfig::builder()
+    .mapping(NatMapping::EndpointIndependent)
+    .filtering(NatFiltering::EndpointIndependent)
+    .hairpin(true)
+    .build();
 
 let router = lab.add_router("custom").nat(custom).build().await?;
 ```
@@ -82,7 +84,7 @@ changes mid-session, for example simulating a network migration. Call
 new connections use the updated rules:
 
 ```rust
-router.set_nat_mode(Nat::Corporate).await?;
+router.set_nat_mode(Nat::Hardest).await?;
 router.flush_nat_state().await?;
 ```
 
@@ -219,7 +221,7 @@ typical compositions:
 ```rust
 // Home router: NAT + inbound firewall. The most common residential setup.
 let home = lab.add_router("home")
-    .nat(Nat::Home)
+    .nat(Nat::Easy)
     .firewall(Firewall::BlockInbound)
     .build().await?;
 
@@ -229,10 +231,10 @@ let dc = lab.add_router("dc")
     .build().await?;
 
 // Double NAT: ISP carrier-grade NAT in front of a home router.
-let isp = lab.add_router("isp").nat(Nat::Cgnat).build().await?;
+let isp = lab.add_router("isp").nat(Nat::Easiest).build().await?;
 let home = lab.add_router("home")
     .upstream(isp.id())
-    .nat(Nat::Home)
+    .nat(Nat::Easy)
     .build().await?;
 ```
 
