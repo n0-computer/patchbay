@@ -21,10 +21,7 @@ use crate::{
     event::{LabEventKind, RouterState},
     firewall::{Firewall, FirewallConfigBuilder},
     lab::{Ipv6ProvisioningMode, LabInner, LinkCondition},
-    nat::{
-        ConntrackTimeouts, IpSupport, NatConfig, NatFiltering, NatMapping, NatV6Mode,
-        PortPreservation,
-    },
+    nat::{ConntrackTimeouts, IpSupport, Nat, NatConfig, NatV6Mode},
     netlink::Netlink,
     nft::{
         apply_firewall, apply_nat_for_router, apply_nat_v6, apply_or_remove_impair,
@@ -246,10 +243,12 @@ impl Router {
 
     /// Returns the effective NAT configuration for this router.
     ///
-    /// Returns `None` if the router has been removed. The inner `Option` is
-    /// `None` when NAT is disabled (routes are passed through unmodified).
-    pub fn nat_config(&self) -> Option<Option<NatConfig>> {
-        self.lab.with_router(self.id, |r| r.cfg.nat)
+    /// Returns `None` when NAT is disabled, when the router has been
+    /// removed, or when no config is set. Matches the pattern used by
+    /// other router accessors ([`mtu`](Self::mtu),
+    /// [`uplink_ip`](Self::uplink_ip), etc.).
+    pub fn nat_config(&self) -> Option<NatConfig> {
+        self.lab.with_router(self.id, |r| r.cfg.nat).flatten()
     }
 
     /// Returns the configured MTU, if set.
@@ -434,7 +433,7 @@ impl Router {
     /// # Errors
     ///
     /// Returns an error if the router has been removed or nftables commands fail.
-    pub async fn set_nat_mode<T: Into<Option<NatConfig>>>(&self, mode: T) -> Result<()> {
+    pub async fn set_nat<T: Into<Option<NatConfig>>>(&self, mode: T) -> Result<()> {
         let mode = mode.into();
         let op = self
             .lab
@@ -448,10 +447,13 @@ impl Router {
             let nat_params = inner.router_nat_params(self.id)?;
             (nat_params, cfg)
         };
-        run_nft_in(&self.lab.netns, &nat_params.ns, "flush table ip nat")
+        // Delete the whole tables rather than flushing: `flush` leaves named
+        // sets (`@contacted` for ADF) in place across transitions, which
+        // would bleed previous ADF state into the new config.
+        run_nft_in(&self.lab.netns, &nat_params.ns, "delete table ip nat")
             .await
             .ok();
-        run_nft_in(&self.lab.netns, &nat_params.ns, "flush table ip filter")
+        run_nft_in(&self.lab.netns, &nat_params.ns, "delete table ip filter")
             .await
             .ok();
         apply_nat_for_router(
@@ -519,7 +521,7 @@ impl Router {
     /// Flushes the conntrack table, forcing all active NAT mappings to expire.
     ///
     /// Subsequent flows get new external port assignments. Pair with
-    /// [`set_nat_mode`](Self::set_nat_mode) when testing mode transitions.
+    /// [`set_nat`](Self::set_nat) when testing mode transitions.
     ///
     /// # Errors
     ///
@@ -700,9 +702,9 @@ impl Router {
 /// from a known configuration and adjust only what your test needs.
 ///
 /// The ISP presets cover different shapes of carrier-grade NAT. `IspCgnat`
-/// is the RFC 6888 compliant fixed-line case. `IspCgnatHard` covers
-/// hardened symmetric CGNAT. `MobileCarrier` covers typical cellular
-/// deployments. `IspV6` is the IPv6-only case with NAT64.
+/// is the RFC 6888 compliant fixed-line case. `IspCgnatSymmetric` covers
+/// symmetric CGNAT. `MobileCarrier` covers typical cellular deployments.
+/// `IspV6` is the IPv6-only case with NAT64.
 ///
 /// # Example
 ///
@@ -767,31 +769,35 @@ pub enum RouterPreset {
     /// ISP with RFC 6888 compliant carrier-grade NAT.
     ///
     /// Models a provider that shares a pool of public IPv4 addresses across
-    /// subscribers via CGNAT with endpoint-independent mapping and filtering
-    /// per RFC 6888. Typical of fixed-line fiber CGNAT, Starlink, and some
-    /// compliant mobile deployments. Standard hole-punching works. IPv6
-    /// addresses are globally routable.
+    /// subscribers via CGNAT. RFC 6888 mandates endpoint-independent mapping
+    /// (EIM). In practice most compliant deployments pair EIM with
+    /// address-and-port-dependent filtering (APDF), matching
+    /// [`Nat::Easy`](crate::Nat::Easy), rather than the more permissive EIF
+    /// that the original "full cone CGNAT" description implied. Standard
+    /// UDP hole-punching succeeds. IPv6 addresses are globally routable but
+    /// the firewall blocks unsolicited inbound.
     ///
     /// Dual-stack, private downstream pool.
     IspCgnat,
 
-    /// ISP with hardened symmetric CGNAT.
+    /// ISP with symmetric CGNAT.
     ///
-    /// Models carrier-grade NAT that deploys symmetric (endpoint-dependent)
-    /// mapping with port preservation, common in Port-Block-Allocated CGNAT
-    /// (RFC 7753) and in some older fixed-line deployments. Hole-punching
-    /// succeeds only with port prediction.
+    /// Models carrier-grade NAT that uses endpoint-dependent mapping with
+    /// port preservation. Common in some older fixed-line deployments and
+    /// in CGNAT hardware where administrators disable EIM. Hole-punching
+    /// succeeds only with port prediction ([`Nat::Hard`](crate::Nat::Hard)
+    /// semantics). IPv6 inbound is blocked by a stateful firewall.
     ///
     /// Dual-stack, private downstream pool.
-    IspCgnatHard,
+    IspCgnatSymmetric,
 
     /// Mobile carrier on LTE or 5G.
     ///
     /// Models typical cellular deployments: symmetric NAT with port
-    /// preservation, aggressive UDP timeouts (around 60 seconds), and a
+    /// preservation, a 60-second UDP stream timeout (matching the cellular
+    /// median reported in published CGN measurement studies), and a
     /// stateful firewall that blocks unsolicited inbound on both address
-    /// families. Matches the observed behavior of most European and North
-    /// American mobile networks in 2026.
+    /// families.
     ///
     /// Dual-stack, private downstream pool.
     MobileCarrier,
@@ -846,76 +852,56 @@ pub enum RouterPreset {
 }
 
 impl RouterPreset {
+    #[cfg(test)]
+    pub(crate) fn nat_config(self) -> Option<NatConfig> {
+        self.nat()
+    }
+
     fn nat(self) -> Option<NatConfig> {
-        match self {
-            Self::Public | Self::PublicV4 | Self::IspV6 => None,
-            Self::Home => Some(NatConfig {
-                mapping: NatMapping::EndpointIndependent,
-                filtering: NatFiltering::AddressAndPortDependent,
-                port_preservation: PortPreservation::Preserve,
-                timeouts: ConntrackTimeouts {
-                    udp: 30,
-                    udp_stream: 300,
-                    tcp_established: 7200,
-                },
-                hairpin: false,
-            }),
-            Self::IspCgnat => Some(NatConfig {
-                mapping: NatMapping::EndpointIndependent,
-                filtering: NatFiltering::EndpointIndependent,
-                port_preservation: PortPreservation::Preserve,
-                timeouts: ConntrackTimeouts {
-                    udp: 30,
-                    udp_stream: 300,
-                    tcp_established: 7200,
-                },
-                hairpin: false,
-            }),
-            Self::IspCgnatHard => Some(NatConfig {
-                mapping: NatMapping::EndpointDependent,
-                filtering: NatFiltering::AddressAndPortDependent,
-                port_preservation: PortPreservation::Preserve,
-                timeouts: ConntrackTimeouts {
-                    udp: 30,
-                    udp_stream: 180,
-                    tcp_established: 3600,
-                },
-                hairpin: false,
-            }),
-            Self::MobileCarrier => Some(NatConfig {
-                mapping: NatMapping::EndpointDependent,
-                filtering: NatFiltering::AddressAndPortDependent,
-                port_preservation: PortPreservation::Preserve,
-                timeouts: ConntrackTimeouts {
-                    udp: 30,
-                    udp_stream: 60,
-                    tcp_established: 3600,
-                },
-                hairpin: false,
-            }),
-            Self::Corporate | Self::Hotel => Some(NatConfig {
-                mapping: NatMapping::EndpointDependent,
-                filtering: NatFiltering::AddressAndPortDependent,
-                port_preservation: PortPreservation::Random,
-                timeouts: ConntrackTimeouts {
-                    udp: 30,
-                    udp_stream: 120,
-                    tcp_established: 3600,
-                },
-                hairpin: false,
-            }),
-            Self::Cloud => Some(NatConfig {
-                mapping: NatMapping::EndpointDependent,
-                filtering: NatFiltering::AddressAndPortDependent,
-                port_preservation: PortPreservation::Random,
-                timeouts: ConntrackTimeouts {
-                    udp: 30,
-                    udp_stream: 350,
-                    tcp_established: 3600,
-                },
-                hairpin: false,
-            }),
-        }
+        // Start from the matching Nat preset and then override timeouts per
+        // deployment. `Nat::*.to_config()` supplies the correct mapping,
+        // filtering, and port-preservation combination for each tier.
+        let base = match self {
+            Self::Public | Self::PublicV4 | Self::IspV6 => Nat::None,
+            // S1: RFC 6888 mandates EIM but most compliant deployments pair
+            // it with APDF (matching Nat::Easy), not the "full cone" EIF
+            // assumed by earlier versions of this preset.
+            Self::Home | Self::IspCgnat => Nat::Easy,
+            Self::IspCgnatSymmetric | Self::MobileCarrier => Nat::Hard,
+            Self::Corporate | Self::Hotel | Self::Cloud => Nat::Hardest,
+        };
+        let mut cfg = base.to_config()?;
+        cfg.timeouts = match self {
+            Self::Home | Self::IspCgnat => ConntrackTimeouts {
+                udp: 30,
+                udp_stream: 300,
+                tcp_established: 7200,
+            },
+            Self::IspCgnatSymmetric => ConntrackTimeouts {
+                udp: 30,
+                udp_stream: 180,
+                tcp_established: 3600,
+            },
+            Self::MobileCarrier => ConntrackTimeouts {
+                udp: 30,
+                udp_stream: 60,
+                tcp_established: 3600,
+            },
+            Self::Corporate | Self::Hotel => ConntrackTimeouts {
+                udp: 30,
+                udp_stream: 120,
+                tcp_established: 3600,
+            },
+            Self::Cloud => ConntrackTimeouts {
+                udp: 30,
+                udp_stream: 350,
+                tcp_established: 3600,
+            },
+            Self::Public | Self::PublicV4 | Self::IspV6 => {
+                unreachable!("presets without NAT returned via Nat::None above")
+            }
+        };
+        Some(cfg)
     }
 
     fn nat_v6(self) -> NatV6Mode {
@@ -926,11 +912,16 @@ impl RouterPreset {
     }
 
     fn firewall(self) -> Firewall {
+        // S5: fixed-line CGNAT deployments block unsolicited inbound on v6
+        // (Swisscom, Deutsche Telekom, Starlink), matching cellular. Only
+        // the explicitly-public presets get Firewall::None.
         match self {
-            Self::Home | Self::IspV6 | Self::MobileCarrier => Firewall::BlockInbound,
-            Self::Public | Self::PublicV4 | Self::IspCgnat | Self::IspCgnatHard | Self::Cloud => {
-                Firewall::None
-            }
+            Self::Home
+            | Self::IspV6
+            | Self::IspCgnat
+            | Self::IspCgnatSymmetric
+            | Self::MobileCarrier => Firewall::BlockInbound,
+            Self::Public | Self::PublicV4 | Self::Cloud => Firewall::None,
             Self::Corporate => Firewall::Corporate,
             Self::Hotel => Firewall::CaptivePortal,
         }

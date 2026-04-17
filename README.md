@@ -319,7 +319,7 @@ region = "eu"
 
 [[router]]
 name = "home"
-nat = "home"
+nat = "easy"
 
 [device.laptop.eth0]
 gateway = "home"

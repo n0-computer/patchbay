@@ -670,7 +670,7 @@ name = "dc"
 # A home NAT router (endpoint-independent mapping, port-restricted filtering)
 [[router]]
 name = "lan-client"
-nat  = "home"
+nat  = "easy"
 
 # A device with one interface behind the DC router
 [device.server.eth0]
@@ -708,14 +708,17 @@ gateway = "dc"
 
 **NAT modes:**
 
-| Value          | Behavior |
-|----------------|----------|
-| (absent)       | No NAT; device has a public IP on the upstream network. |
-| `"home"`       | EIM+APDF: same external port for all destinations (port-restricted cone). |
-| `"corporate"`  | EDM+APDF: different port per destination (symmetric NAT). |
-| `"cgnat"`      | EIM+EIF: carrier-grade NAT, stacks with home NAT. |
-| `"cloud-nat"`  | EDM+APDF: symmetric NAT with longer timeouts (AWS/Azure/GCP). |
-| `"full-cone"`  | EIM+EIF: any host can reach the mapped port. |
+Each variant is a behavior preset. See the [`Nat`] documentation for the
+RFC 3489 and RFC 4787 labels and the real-world deployments each models.
+
+| Value       | Behavior |
+|-------------|----------|
+| (absent)    | No NAT; device has a public IP on the upstream network. |
+| `"none"`    | Same as absent. |
+| `"easiest"` | EIM+EIF: any external host can reach the mapped port (full cone). |
+| `"easy"`    | EIM+APDF: same external port for all destinations (port-restricted cone). Default of most home routers. |
+| `"hard"`    | EDM+APDF with port preservation: port-predictable symmetric NAT. |
+| `"hardest"` | EDM+APDF with random ports: symmetric NAT that requires a relay. |
 
 **Region latency** can be added to introduce inter-router delays:
 

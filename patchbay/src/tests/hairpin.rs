@@ -2,7 +2,8 @@
 //!
 //! Hairpinning lets a LAN device reach a peer on the same router via
 //! the router's public IP+port, rather than requiring a direct LAN
-//! connection.  FullCone enables it; Home NAT disables it.
+//! connection. `Nat::Easy` leaves it disabled; opt in with a custom
+//! `NatConfig` setting `hairpin(true)`.
 
 use super::*;
 
@@ -22,7 +23,7 @@ async fn fullcone_allows() -> Result<()> {
                 .mapping(NatMapping::EndpointIndependent)
                 .filtering(NatFiltering::EndpointIndependent)
                 .hairpin(true)
-                .build(),
+                .build()?,
         )
         .build()
         .await?;
@@ -108,13 +109,13 @@ async fn custom_allows() -> Result<()> {
     let dc = lab.add_router("dc").build().await?;
     let r = lab
         .add_router("r")
-        .nat(Nat::Custom(
+        .nat(
             NatConfig::builder()
                 .mapping(NatMapping::EndpointIndependent)
                 .filtering(NatFiltering::AddressAndPortDependent)
                 .hairpin(true)
-                .build(),
-        ))
+                .build()?,
+        )
         .build()
         .await?;
     let a = lab.add_device("a").iface("eth0", r.id()).build().await?;

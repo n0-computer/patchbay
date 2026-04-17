@@ -357,6 +357,45 @@ async fn port_mapping_eim_stable() -> Result<()> {
     Ok(())
 }
 
+/// EDM with port preservation (Nat::Hard): external port stays stable across
+/// destinations when the internal source port is free. Validates the
+/// "symmetric but port-predictable" claim behind `Nat::Hard`. If this test
+/// fails, `Nat::Hard` is empirically equivalent to `Nat::Hardest` on this
+/// kernel and the two variants must be reconciled.
+#[tokio::test(flavor = "current_thread")]
+#[traced_test]
+async fn port_mapping_edm_preserve_stable() -> Result<()> {
+    use strum::IntoEnumIterator;
+    let mut port_base = 16_050u16;
+    let mut failures = Vec::new();
+    for wiring in UplinkWiring::iter() {
+        let result: Result<()> = async {
+            let (lab, ctx) = build_nat_case(Nat::Hard, wiring, port_base).await?;
+            let dev = lab.device_by_name("dev").unwrap();
+            let o1 = dev.probe_udp_mapping(ctx.r_dc)?;
+            let o2 = dev.probe_udp_mapping(ctx.r_ix)?;
+            if o1.port() != o2.port() {
+                bail!(
+                    "EDM Preserve: external port changed across destinations: \
+                     r_dc={} r_ix={}",
+                    o1.port(),
+                    o2.port()
+                );
+            }
+            Ok(())
+        }
+        .await;
+        if let Err(e) = result {
+            failures.push(format!("DestDep+Preserve/{wiring}: {e:#}"));
+        }
+        port_base += 10;
+    }
+    if !failures.is_empty() {
+        bail!("{} combos failed:\n{}", failures.len(), failures.join("\n"));
+    }
+    Ok(())
+}
+
 /// EDM (Corporate NAT): external port differs between two reflectors.
 #[tokio::test(flavor = "current_thread")]
 #[traced_test]
@@ -555,6 +594,124 @@ async fn v6_no_translation() -> Result<()> {
         "v6 reflexive should be device's own v6 address (no NAT)"
     );
 
+    Ok(())
+}
+
+/// Address-Dependent Filtering (RFC 4787 ADF, "Restricted Cone") admits
+/// packets from any port on a previously-contacted external address.
+///
+/// After the device contacts the DC on one port, the DC sends from a
+/// different source port to the mapping. ADF permits the packet because the
+/// source IP is in the `@contacted` set. APDF (the default for `Nat::Easy`)
+/// would drop it because the source port does not match the outbound flow.
+#[tokio::test(flavor = "current_thread")]
+#[traced_test]
+async fn adf_allows_different_port_from_contacted_host() -> Result<()> {
+    check_caps()?;
+    let lab = Lab::new().await?;
+    let dc = lab.add_router("dc").build().await?;
+    let router = lab
+        .add_router("r")
+        .nat(
+            NatConfig::builder()
+                .mapping(NatMapping::EndpointIndependent)
+                .filtering(NatFiltering::AddressDependent)
+                .build()?,
+        )
+        .build()
+        .await?;
+    let dev = lab
+        .add_device("dev")
+        .iface("eth0", router.id())
+        .build()
+        .await?;
+
+    let dc_ip = dc.uplink_ip().context("no dc uplink ip")?;
+    let reflector = SocketAddr::new(IpAddr::V4(dc_ip), 21_000);
+    let _r = dc.spawn_reflector(reflector).await?;
+
+    // Device contacts DC, creating a mapping and populating @contacted.
+    let mapped = dev.probe_udp_mapping(reflector)?;
+
+    // Device listens on the internal port matching the mapping.
+    let dev_listen = SocketAddr::new(IpAddr::V4(dev.ip().unwrap()), mapped.port());
+    let _d = dev.spawn_reflector(dev_listen).await?;
+
+    // DC sends from a *different* source port to the mapped address.
+    let reply = dc.run_sync(move || {
+        let sock = std::net::UdpSocket::bind("0.0.0.0:0").context("bind")?;
+        sock.set_read_timeout(Some(Duration::from_secs(2)))?;
+        sock.send_to(b"HELLO", mapped)?;
+        let mut buf = [0u8; 512];
+        let (n, _) = sock.recv_from(&mut buf)?;
+        Ok(String::from_utf8_lossy(&buf[..n]).to_string())
+    })?;
+    assert!(
+        reply.starts_with("OBSERVED "),
+        "ADF must accept inbound from a contacted IP on any source port; got: {reply:?}"
+    );
+    Ok(())
+}
+
+/// Address-Dependent Filtering drops packets from uncontacted external
+/// addresses.
+///
+/// A second external host that the device never contacted sends to the
+/// mapped address. ADF must drop the packet because the source IP is not in
+/// `@contacted`.
+#[tokio::test(flavor = "current_thread")]
+#[traced_test]
+async fn adf_drops_from_uncontacted_host() -> Result<()> {
+    check_caps()?;
+    let lab = Lab::new().await?;
+    let dc_a = lab.add_router("dc-a").build().await?;
+    let dc_b = lab.add_router("dc-b").build().await?;
+    let router = lab
+        .add_router("r")
+        .nat(
+            NatConfig::builder()
+                .mapping(NatMapping::EndpointIndependent)
+                .filtering(NatFiltering::AddressDependent)
+                .build()?,
+        )
+        .build()
+        .await?;
+    let dev = lab
+        .add_device("dev")
+        .iface("eth0", router.id())
+        .build()
+        .await?;
+
+    let dc_a_ip = dc_a.uplink_ip().context("no dc-a uplink ip")?;
+    let dc_b_ip = dc_b.uplink_ip().context("no dc-b uplink ip")?;
+    let reflector = SocketAddr::new(IpAddr::V4(dc_a_ip), 21_100);
+    let _r = dc_a.spawn_reflector(reflector).await?;
+
+    // Device contacts dc-a only. dc-b is not in @contacted.
+    let mapped = dev.probe_udp_mapping(reflector)?;
+
+    let dev_listen = SocketAddr::new(IpAddr::V4(dev.ip().unwrap()), mapped.port());
+    let _d = dev.spawn_reflector(dev_listen).await?;
+
+    // dc-b sends unsolicited to the mapped address.
+    let _ = dc_b_ip;
+    let result = dc_b.run_sync(move || {
+        let sock = std::net::UdpSocket::bind("0.0.0.0:0").context("bind")?;
+        sock.set_read_timeout(Some(Duration::from_millis(500)))?;
+        sock.send_to(b"UNSOLICITED", mapped)?;
+        let mut buf = [0u8; 512];
+        match sock.recv_from(&mut buf) {
+            Ok(_) => bail!("ADF must drop packets from uncontacted source IP"),
+            Err(e)
+                if e.kind() == std::io::ErrorKind::WouldBlock
+                    || e.kind() == std::io::ErrorKind::TimedOut =>
+            {
+                Ok(())
+            }
+            Err(e) => Err(e.into()),
+        }
+    });
+    assert!(result.is_ok(), "expected timeout (drop), got: {result:?}");
     Ok(())
 }
 

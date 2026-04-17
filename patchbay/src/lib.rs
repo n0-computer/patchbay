@@ -177,7 +177,7 @@
 //! dev.set_default_route("eth0").await?;
 //! dev.iface("wlan0").unwrap().link_down().await?;
 //! dev.iface("wlan0").unwrap().link_up().await?;
-//! router.set_nat_mode(Nat::Hardest).await?;
+//! router.set_nat(Nat::Hardest).await?;
 //! router.flush_nat_state().await?;
 //! # Ok(())
 //! # }
@@ -242,8 +242,8 @@ pub use ipnet::Ipv4Net;
 pub use lab::{
     ConntrackTimeouts, DefaultRegions, Firewall, FirewallConfig, FirewallConfigBuilder, IpSupport,
     Ipv6DadMode, Ipv6Profile, Ipv6ProvisioningMode, Ix, Lab, LabBuilder, LinkCondition,
-    LinkDirection, LinkLimits, Nat, NatConfig, NatConfigBuilder, NatFiltering, NatMapping,
-    NatV6Mode, OutDir, Region, RegionLink, TestGuard,
+    LinkDirection, LinkLimits, Nat, NatConfig, NatConfigBuilder, NatConfigError, NatFiltering,
+    NatMapping, NatV6Mode, OutDir, PortPreservation, Region, RegionLink, TestGuard,
 };
 pub use metrics::MetricsBuilder;
 pub use router::{Router, RouterBuilder, RouterIface, RouterPreset};

@@ -11,6 +11,13 @@ use crate::{
     ConntrackTimeouts, LinkCondition, NatConfig, NatFiltering, NatMapping, NatV6Mode,
 };
 
+/// Returns `true` when the NAT uses the fullcone DNAT map (Endpoint-Independent
+/// Mapping). This is the single check that both postrouting and prerouting
+/// chain generation branch on.
+fn uses_fullcone_map(cfg: &NatConfig) -> bool {
+    matches!(cfg.mapping, NatMapping::EndpointIndependent)
+}
+
 /// Applies nftables rules (assumes caller is already in the target namespace).
 async fn run_nft(rules: &str) -> Result<()> {
     use tokio::io::AsyncWriteExt;
@@ -54,13 +61,14 @@ pub(crate) async fn run_nft_in(netns: &netns::NetnsManager, ns: &str, rules: &st
 /// Generates nftables rules for a [`NatConfig`].
 ///
 /// EIM uses a dynamic fullcone map to preserve source ports across destinations.
-/// EDM uses `snat` with the port-preservation flag set by [`PortPreservation`].
-/// EIF adds unconditional fullcone DNAT in prerouting.
-/// ADF and APDF add a forward filter that only allows established/related flows.
-/// ADF additionally permits packets from any port on a previously-contacted
-/// external address.
+/// EDM uses `masquerade` with or without the `random` flag depending on the
+/// [`PortPreservation`] carried by the mapping variant.
+/// EIF produces an unconditional fullcone DNAT in prerouting.
+/// ADF and APDF add a forward filter that only allows established/related
+/// flows. ADF additionally permits packets from any port on a
+/// previously-contacted external address.
 fn generate_nat_rules(cfg: &NatConfig, wan_if: &str, wan_ip: Ipv4Addr) -> String {
-    let use_fullcone_map = cfg.mapping == NatMapping::EndpointIndependent;
+    let use_fullcone_map = uses_fullcone_map(cfg);
     let hairpin = cfg.hairpin;
 
     let map_decl = if use_fullcone_map {
@@ -119,17 +127,19 @@ fn generate_nat_rules(cfg: &NatConfig, wan_if: &str, wan_ip: Ipv4Addr) -> String
             ip = wan_ip,
         )
     } else {
-        // EDM with Preserve: masquerade (Linux keeps the source port when free).
-        // EDM with Random: masquerade random (fresh port per flow).
-        let masq_flag = match cfg.port_preservation {
-            PortPreservation::Preserve => "",
-            PortPreservation::Random => " random",
+        // EDM with Preserve: `masquerade`; Linux keeps the source port when
+        // free (see C1 empirical test `port_mapping_edm_preserve_stable`).
+        // EDM with Random: `masquerade random`; fresh port per flow.
+        let masq_stmt = match cfg.mapping {
+            NatMapping::EndpointDependent(PortPreservation::Preserve) => "masquerade",
+            NatMapping::EndpointDependent(PortPreservation::Random) => "masquerade random",
+            NatMapping::EndpointIndependent => unreachable!("EIM took the fullcone branch"),
         };
         format!(
-            r#"{hairpin}        oif "{wan}" masquerade{flag}"#,
+            r#"{hairpin}        oif "{wan}" {stmt}"#,
             hairpin = hairpin_masq,
             wan = wan_if,
-            flag = masq_flag,
+            stmt = masq_stmt,
         )
     };
 
@@ -247,7 +257,7 @@ pub(crate) async fn apply_nat_for_router(
     wan_if: &str,
     wan_ip: Ipv4Addr,
 ) -> Result<()> {
-    match router_cfg.effective_nat_config() {
+    match router_cfg.nat {
         None => Ok(()),
         Some(cfg) => apply_nat_config(netns, ns, &cfg, wan_if, wan_ip).await,
     }

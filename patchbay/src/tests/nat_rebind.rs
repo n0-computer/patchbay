@@ -24,7 +24,7 @@ async fn mode_port_change() -> Result<()> {
         let result: Result<()> = async {
             let (lab, ctx) = build_nat_case(from, UplinkWiring::DirectIx, port_base).await?;
             let nat_handle = lab.router_by_name("nat").context("missing nat")?;
-            nat_handle.set_nat_mode(to).await?;
+            nat_handle.set_nat(to).await?;
             tokio::time::sleep(Duration::from_millis(50)).await;
             let dev = lab.device_by_name("dev").unwrap();
             let o1 = dev.probe_udp_mapping(ctx.r_dc)?;
@@ -68,7 +68,7 @@ async fn mode_ip_change() -> Result<()> {
             let (lab, ctx) = build_nat_case(from, UplinkWiring::DirectIx, port_base).await?;
             let nat_handle = lab.router_by_name("nat").context("missing nat")?;
             let wan_ip = nat_handle.uplink_ip().context("no uplink ip")?;
-            nat_handle.set_nat_mode(to).await?;
+            nat_handle.set_nat(to).await?;
             tokio::time::sleep(Duration::from_millis(50)).await;
             let bind = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0);
             let r_dc = ctx.r_dc;

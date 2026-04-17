@@ -97,13 +97,6 @@ pub(crate) struct RouterConfig {
     pub ra_lifetime_secs: u64,
 }
 
-impl RouterConfig {
-    /// Returns the effective NAT config, or `None` if NAT is disabled.
-    pub(crate) fn effective_nat_config(&self) -> Option<NatConfig> {
-        self.nat
-    }
-}
-
 /// Parameters needed to (re-)configure NAT on a router.
 #[allow(dead_code)]
 pub(crate) struct RouterNatParams {

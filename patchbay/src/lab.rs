@@ -60,8 +60,8 @@ fn region_base(idx: u8) -> Ipv4Addr {
 pub use crate::{
     firewall::{Firewall, FirewallConfig, FirewallConfigBuilder},
     nat::{
-        ConntrackTimeouts, IpSupport, Nat, NatConfig, NatConfigBuilder, NatFiltering, NatMapping,
-        NatV6Mode,
+        ConntrackTimeouts, IpSupport, Nat, NatConfig, NatConfigBuilder, NatConfigError,
+        NatFiltering, NatMapping, NatV6Mode, PortPreservation,
     },
 };
 

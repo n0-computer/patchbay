@@ -167,6 +167,68 @@ async fn preset_override() -> Result<()> {
     Ok(())
 }
 
+/// Snapshot of each preset's NAT config. Changes here are intentional and
+/// should be matched by a corresponding update in the docs
+/// (`docs/guide/nat-and-firewalls.md` preset table) and in
+/// `plans/nat-breaking-changes.md`.
+#[test]
+fn preset_nat_snapshots() {
+    use crate::{Nat, NatMapping, PortPreservation};
+
+    // (preset, expected_nat_kind_or_none, udp_stream_seconds_or_none)
+    let cases = [
+        (RouterPreset::Home, Some(Nat::Easy), Some(300u32)),
+        (RouterPreset::IspCgnat, Some(Nat::Easy), Some(300)),
+        (RouterPreset::IspCgnatSymmetric, Some(Nat::Hard), Some(180)),
+        (RouterPreset::MobileCarrier, Some(Nat::Hard), Some(60)),
+        (RouterPreset::Corporate, Some(Nat::Hardest), Some(120)),
+        (RouterPreset::Hotel, Some(Nat::Hardest), Some(120)),
+        (RouterPreset::Cloud, Some(Nat::Hardest), Some(350)),
+        (RouterPreset::Public, None, None),
+        (RouterPreset::PublicV4, None, None),
+        (RouterPreset::IspV6, None, None),
+    ];
+    for (preset, expected_kind, expected_udp_stream) in cases {
+        let cfg = preset.nat_config();
+        match (cfg, expected_kind) {
+            (None, None) => {}
+            (Some(actual), Some(kind)) => {
+                let expected_cfg = kind.to_config().expect("kind is not Nat::None");
+                assert_eq!(
+                    actual.mapping, expected_cfg.mapping,
+                    "{preset:?}: mapping mismatch"
+                );
+                assert_eq!(
+                    actual.filtering, expected_cfg.filtering,
+                    "{preset:?}: filtering mismatch"
+                );
+                let udp_stream = expected_udp_stream.expect("set when kind is Some");
+                assert_eq!(
+                    actual.timeouts.udp_stream, udp_stream,
+                    "{preset:?}: udp_stream mismatch"
+                );
+            }
+            (actual, expected) => {
+                panic!(
+                    "{preset:?}: config mismatch: actual={actual:?}, expected_kind={expected:?}"
+                );
+            }
+        }
+        // Cross-check that EDM presets carry the correct port-preservation
+        // tag: Hard → Preserve, Hardest → Random.
+        if let Some(actual) = cfg {
+            if let NatMapping::EndpointDependent(pp) = actual.mapping {
+                let expected_pp = match expected_kind {
+                    Some(Nat::Hard) => PortPreservation::Preserve,
+                    Some(Nat::Hardest) => PortPreservation::Random,
+                    _ => unreachable!("EDM presets map to Hard or Hardest only"),
+                };
+                assert_eq!(pp, expected_pp, "{preset:?}: port preservation mismatch");
+            }
+        }
+    }
+}
+
 /// All presets recommend Ipv6Profile::Realistic.
 #[tokio::test(flavor = "current_thread")]
 #[traced_test]
@@ -176,7 +238,7 @@ async fn preset_recommended_ipv6_profiles() -> Result<()> {
         RouterPreset::Public,
         RouterPreset::PublicV4,
         RouterPreset::IspCgnat,
-        RouterPreset::IspCgnatHard,
+        RouterPreset::IspCgnatSymmetric,
         RouterPreset::MobileCarrier,
         RouterPreset::IspV6,
         RouterPreset::Corporate,

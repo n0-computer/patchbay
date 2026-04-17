@@ -27,7 +27,7 @@ simulates:
 | Preset | Mapping | Filtering | Port preservation | Hole-punch? | Real-world examples |
 |--------|---------|-----------|-------------------|-------------|---------------------|
 | `Nat::Easiest` | EIM | EIF | Preserve | Always | Older consumer routers, RFC 6888 compliant fiber CGNAT |
-| `Nat::Easy` | EIM | APDF | Preserve | Yes, simultaneous open | FritzBox, Unifi, TP-Link, ASUS RT, OpenWRT |
+| `Nat::Easy` | EIM | APDF | Preserve | Yes, via UDP hole-punching with simultaneous send | FritzBox, Unifi, TP-Link, ASUS RT, OpenWRT |
 | `Nat::Hard` | EDM | APDF | Preserve | Sometimes, with port prediction | PBA CGNAT, mobile carriers, some stateful firewalls |
 | `Nat::Hardest` | EDM | APDF | Random | Practically never | Cisco ASA, Palo Alto, Fortinet, AWS/Azure/GCP NAT Gateway |
 
@@ -267,10 +267,8 @@ port space.
 
 ## Future work
 
-- **Address-restricted cone** (EIM + address-dependent filtering): extend
-  the fullcone map to track contacted remote IPs.
-- **Hairpin NAT**: add a prerouting rule for LAN packets addressed to the
-  router's own WAN IP.
 - **TCP fullcone**: extend `@fullcone` to TCP for a complete NAT model.
 - **Port-conflict-safe fullcone**: two-stage postrouting to read
   `ct reply proto-dst` after conntrack finalizes the mapping.
+- **Sequential port allocation** for Port-Block-Allocated CGNAT
+  simulation.
