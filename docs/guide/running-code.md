@@ -193,7 +193,7 @@ This is covered in more detail in the
 [NAT and Firewalls](nat-and-firewalls.md) chapter:
 
 ```rust
-router.set_nat_mode(Nat::Hardest).await?;
+router.set_nat(Nat::Hardest).await?;
 router.flush_nat_state().await?;
 ```
 

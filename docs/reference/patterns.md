@@ -155,13 +155,13 @@ Test by waiting beyond the timeout period then verifying connectivity.
 ```rust
 // Custom short timeout for fast testing
 let nat = lab.add_router("nat")
-    .nat(Nat::Custom(
+    .nat(
         NatConfig::builder()
             .mapping(NatMapping::EndpointIndependent)
             .filtering(NatFiltering::AddressAndPortDependent)
-            .udp_timeout(5)  // seconds, short for testing
-            .build(),
-    ))
+            .udp_timeout(5) // seconds, short for testing
+            .build()?,
+    )
     .build().await?;
 
 // Wait for timeout, verify mapping expired
@@ -184,7 +184,10 @@ address is assigned.
 
 ```rust
 let wifi_router = lab.add_router("wifi").nat(Nat::Easy).build().await?;
-let cell_router = lab.add_router("cell").nat(Nat::Easiest).build().await?;
+let cell_router = lab
+    .add_router("cell")
+    .preset(RouterPreset::MobileCarrier)
+    .build().await?;
 
 let device = lab.add_device("phone")
     .iface("eth0", wifi_router.id())

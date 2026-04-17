@@ -26,10 +26,10 @@ simulates:
 
 | Preset | Mapping | Filtering | Port preservation | Hole-punch? | Real-world examples |
 |--------|---------|-----------|-------------------|-------------|---------------------|
-| `Nat::Easiest` | EIM | EIF | Preserve | Always | Older consumer routers, RFC 6888 compliant fiber CGNAT |
-| `Nat::Easy` | EIM | APDF | Preserve | Yes, via UDP hole-punching with simultaneous send | FritzBox, Unifi, TP-Link, ASUS RT, OpenWRT |
-| `Nat::Hard` | EDM | APDF | Preserve | Sometimes, with port prediction | PBA CGNAT, mobile carriers, some stateful firewalls |
-| `Nat::Hardest` | EDM | APDF | Random | Practically never | Cisco ASA, Palo Alto, Fortinet, AWS/Azure/GCP NAT Gateway |
+| `Nat::Easiest` | EIM | EIF | Preserve | Always | Older consumer routers, routers with UPnP or static forwarding |
+| `Nat::Easy` | EIM | APDF | Preserve | Yes, via UDP hole-punching with simultaneous send | Most home routers (FritzBox, Unifi, TP-Link, ASUS, OpenWRT); typical RFC 6888 compliant CGNAT |
+| `Nat::Hard` | EDM | APDF | Preserve | Sometimes, with port prediction | Mobile carriers, symmetric CGNAT, some stateful firewalls |
+| `Nat::Hardest` | EDM | APDF | Random | No, requires a relay | Cisco ASA, Palo Alto, Fortinet, AWS/Azure/GCP NAT Gateway |
 
 ## The fullcone dynamic map
 
@@ -209,23 +209,28 @@ directions.
 ## NatConfig architecture
 
 The `Nat` enum provides named presets. Each preset converts into an
-`Option<NatConfig>` via `impl From<Nat>` that drives rule generation:
+`Option<NatConfig>` via `Nat::to_config` that drives rule generation:
 
 ```rust
 pub struct NatConfig {
-    pub mapping: NatMapping,                   // EIM or EDM
-    pub filtering: NatFiltering,               // EIF, ADF, or APDF
-    pub port_preservation: PortPreservation,   // Preserve or Random
-    pub timeouts: ConntrackTimeouts,           // udp, udp_stream, tcp_established
-    pub hairpin: bool,                         // loopback NAT
+    pub mapping: NatMapping,              // EndpointIndependent
+                                          // | EndpointDependent(PortPreservation)
+    pub filtering: NatFiltering,          // EIF, ADF, or APDF
+    pub timeouts: ConntrackTimeouts,      // udp, udp_stream, tcp_established
+    pub hairpin: bool,                    // loopback NAT; EIM only
 }
 ```
 
-The `generate_nat_rules()` function in `nft.rs` builds nftables rules
-from `NatConfig` alone, without matching on `Nat` variants. Users can
-either use the named presets (`router.nat(Nat::Easy)`) or build custom
-configurations with arbitrary mapping, filtering, and port-preservation
-combinations.
+Port preservation lives inside `NatMapping::EndpointDependent(_)` because
+EIM always preserves the source port via the fullcone map and has no
+configuration. `NatConfigBuilder::build` returns a `Result` and rejects
+combinations the backend cannot express: `EndpointDependent` mapping paired
+with `AddressDependent` filtering or with `hairpin = true`.
+
+The `generate_nat_rules` function in `nft.rs` builds nftables rules from
+`NatConfig` alone, without matching on `Nat` variants. Users can either
+use the named presets (`router.nat(Nat::Easy)`) or build custom
+configurations via `NatConfig::builder`.
 
 ## NPTv6 implementation notes
 

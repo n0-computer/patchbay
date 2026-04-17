@@ -167,65 +167,170 @@ async fn preset_override() -> Result<()> {
     Ok(())
 }
 
-/// Snapshot of each preset's NAT config. Changes here are intentional and
-/// should be matched by a corresponding update in the docs
-/// (`docs/guide/nat-and-firewalls.md` preset table) and in
-/// `plans/nat-breaking-changes.md`.
+/// Snapshot of each preset's NAT config, firewall, IP support, and IPv6
+/// NAT mode. Changes here are intentional and should be matched by a
+/// corresponding update in the docs (`docs/guide/nat-and-firewalls.md`
+/// preset table) and in `plans/nat-breaking-changes.md`.
 #[test]
 fn preset_nat_snapshots() {
-    use crate::{Nat, NatMapping, PortPreservation};
+    use crate::{Firewall, IpSupport, Nat, NatMapping, NatV6Mode, PortPreservation};
 
-    // (preset, expected_nat_kind_or_none, udp_stream_seconds_or_none)
-    let cases = [
-        (RouterPreset::Home, Some(Nat::Easy), Some(300u32)),
-        (RouterPreset::IspCgnat, Some(Nat::Easy), Some(300)),
-        (RouterPreset::IspCgnatSymmetric, Some(Nat::Hard), Some(180)),
-        (RouterPreset::MobileCarrier, Some(Nat::Hard), Some(60)),
-        (RouterPreset::Corporate, Some(Nat::Hardest), Some(120)),
-        (RouterPreset::Hotel, Some(Nat::Hardest), Some(120)),
-        (RouterPreset::Cloud, Some(Nat::Hardest), Some(350)),
-        (RouterPreset::Public, None, None),
-        (RouterPreset::PublicV4, None, None),
-        (RouterPreset::IspV6, None, None),
+    struct Expect {
+        nat_kind: Option<Nat>,
+        udp_stream: Option<u32>,
+        firewall: Firewall,
+        ip_support: IpSupport,
+        nat_v6: NatV6Mode,
+    }
+
+    let cases: &[(RouterPreset, Expect)] = &[
+        (
+            RouterPreset::Home,
+            Expect {
+                nat_kind: Some(Nat::Easy),
+                udp_stream: Some(300),
+                firewall: Firewall::BlockInbound,
+                ip_support: IpSupport::DualStack,
+                nat_v6: NatV6Mode::None,
+            },
+        ),
+        (
+            RouterPreset::IspCgnat,
+            Expect {
+                nat_kind: Some(Nat::Easy),
+                udp_stream: Some(300),
+                firewall: Firewall::BlockInbound,
+                ip_support: IpSupport::DualStack,
+                nat_v6: NatV6Mode::None,
+            },
+        ),
+        (
+            RouterPreset::IspCgnatSymmetric,
+            Expect {
+                nat_kind: Some(Nat::Hard),
+                udp_stream: Some(180),
+                firewall: Firewall::BlockInbound,
+                ip_support: IpSupport::DualStack,
+                nat_v6: NatV6Mode::None,
+            },
+        ),
+        (
+            RouterPreset::MobileCarrier,
+            Expect {
+                nat_kind: Some(Nat::Hard),
+                udp_stream: Some(60),
+                firewall: Firewall::BlockInbound,
+                ip_support: IpSupport::DualStack,
+                nat_v6: NatV6Mode::None,
+            },
+        ),
+        (
+            RouterPreset::Corporate,
+            Expect {
+                nat_kind: Some(Nat::Hardest),
+                udp_stream: Some(120),
+                firewall: Firewall::Corporate,
+                ip_support: IpSupport::DualStack,
+                nat_v6: NatV6Mode::None,
+            },
+        ),
+        (
+            RouterPreset::Hotel,
+            Expect {
+                nat_kind: Some(Nat::Hardest),
+                udp_stream: Some(120),
+                firewall: Firewall::CaptivePortal,
+                ip_support: IpSupport::V4Only,
+                nat_v6: NatV6Mode::None,
+            },
+        ),
+        (
+            RouterPreset::Cloud,
+            Expect {
+                nat_kind: Some(Nat::Hardest),
+                udp_stream: Some(350),
+                firewall: Firewall::None,
+                ip_support: IpSupport::DualStack,
+                nat_v6: NatV6Mode::None,
+            },
+        ),
+        (
+            RouterPreset::Public,
+            Expect {
+                nat_kind: None,
+                udp_stream: None,
+                firewall: Firewall::None,
+                ip_support: IpSupport::DualStack,
+                nat_v6: NatV6Mode::None,
+            },
+        ),
+        (
+            RouterPreset::PublicV4,
+            Expect {
+                nat_kind: None,
+                udp_stream: None,
+                firewall: Firewall::None,
+                ip_support: IpSupport::V4Only,
+                nat_v6: NatV6Mode::None,
+            },
+        ),
+        (
+            RouterPreset::IspV6,
+            Expect {
+                nat_kind: None,
+                udp_stream: None,
+                firewall: Firewall::BlockInbound,
+                ip_support: IpSupport::V6Only,
+                nat_v6: NatV6Mode::Nat64,
+            },
+        ),
     ];
-    for (preset, expected_kind, expected_udp_stream) in cases {
+    for (preset, expect) in cases {
+        let preset = *preset;
         let cfg = preset.nat_config();
-        match (cfg, expected_kind) {
+        match (cfg, expect.nat_kind) {
             (None, None) => {}
             (Some(actual), Some(kind)) => {
                 let expected_cfg = kind.to_config().expect("kind is not Nat::None");
-                assert_eq!(
-                    actual.mapping, expected_cfg.mapping,
-                    "{preset:?}: mapping mismatch"
-                );
+                assert_eq!(actual.mapping, expected_cfg.mapping, "{preset:?}: mapping");
                 assert_eq!(
                     actual.filtering, expected_cfg.filtering,
-                    "{preset:?}: filtering mismatch"
+                    "{preset:?}: filtering"
                 );
-                let udp_stream = expected_udp_stream.expect("set when kind is Some");
+                assert!(!actual.hairpin, "{preset:?}: hairpin must default to false");
+                let udp_stream = expect.udp_stream.expect("set when kind is Some");
                 assert_eq!(
                     actual.timeouts.udp_stream, udp_stream,
-                    "{preset:?}: udp_stream mismatch"
+                    "{preset:?}: udp_stream"
                 );
+                if let NatMapping::EndpointDependent(pp) = actual.mapping {
+                    let expected_pp = match kind {
+                        Nat::Hard => PortPreservation::Preserve,
+                        Nat::Hardest => PortPreservation::Random,
+                        _ => unreachable!("EDM presets map to Hard or Hardest only"),
+                    };
+                    assert_eq!(pp, expected_pp, "{preset:?}: port preservation");
+                }
             }
             (actual, expected) => {
-                panic!(
-                    "{preset:?}: config mismatch: actual={actual:?}, expected_kind={expected:?}"
-                );
+                panic!("{preset:?}: nat mismatch: actual={actual:?}, expected={expected:?}");
             }
         }
-        // Cross-check that EDM presets carry the correct port-preservation
-        // tag: Hard → Preserve, Hardest → Random.
-        if let Some(actual) = cfg {
-            if let NatMapping::EndpointDependent(pp) = actual.mapping {
-                let expected_pp = match expected_kind {
-                    Some(Nat::Hard) => PortPreservation::Preserve,
-                    Some(Nat::Hardest) => PortPreservation::Random,
-                    _ => unreachable!("EDM presets map to Hard or Hardest only"),
-                };
-                assert_eq!(pp, expected_pp, "{preset:?}: port preservation mismatch");
-            }
-        }
+        assert_eq!(
+            preset.firewall_for_tests(),
+            expect.firewall,
+            "{preset:?}: firewall"
+        );
+        assert_eq!(
+            preset.ip_support_for_tests(),
+            expect.ip_support,
+            "{preset:?}: ip_support"
+        );
+        assert_eq!(
+            preset.nat_v6_for_tests(),
+            expect.nat_v6,
+            "{preset:?}: nat_v6"
+        );
     }
 }
 

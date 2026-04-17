@@ -66,20 +66,22 @@ the preset configures:
 
 | Preset | NAT | Firewall | IP support | Pool |
 |--------|-----|----------|------------|------|
-| `Home` | Home (EIM+APDF) | BlockInbound | DualStack | Private |
+| `Home` | `Easy` (EIM+APDF, preserve) | BlockInbound | DualStack | Private |
 | `Public` | None | None | DualStack | Public |
 | `PublicV4` | None | None | V4Only | Public |
-| `IspCgnat` | Cgnat (EIM+EIF) | None | DualStack | Private |
-| `IspV6` | None (v4) / Nat64 (v6) | BlockInbound | V6Only | Public |
-| `Corporate` | Corporate (sym) | Corporate | DualStack | Private |
-| `Hotel` | Corporate (sym) | CaptivePortal | V4Only | Private |
-| `Cloud` | CloudNat (sym) | None | DualStack | Private |
+| `IspCgnat` | `Easy` (EIM+APDF, preserve) | BlockInbound | DualStack | Private |
+| `IspCgnatSymmetric` | `Hard` (EDM+APDF, preserve) | BlockInbound | DualStack | Private |
+| `MobileCarrier` | `Hard` (EDM+APDF, preserve) | BlockInbound | DualStack | Private |
+| `IspV6` | None (v4), NAT64 (v6) | BlockInbound | V6Only | Public |
+| `Corporate` | `Hardest` (EDM+APDF, random) | Corporate | DualStack | Private |
+| `Hotel` | `Hardest` (EDM+APDF, random) | CaptivePortal | V4Only | Private |
+| `Cloud` | `Hardest` (EDM+APDF, random) | None | DualStack | Private |
 
 Methods called after `.preset()` override the preset's defaults, so you
 can use a preset as a starting point and customize individual settings.
 For example, `RouterPreset::Home` with `.nat(Nat::Easiest)` gives you a
-home-style topology with fullcone NAT instead of the default
-endpoint-dependent filtering.
+home topology with full-cone NAT instead of the default
+port-restricted filtering.
 
 ### Address families
 

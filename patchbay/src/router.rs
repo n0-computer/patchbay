@@ -857,6 +857,21 @@ impl RouterPreset {
         self.nat()
     }
 
+    #[cfg(test)]
+    pub(crate) fn firewall_for_tests(self) -> Firewall {
+        self.firewall()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn nat_v6_for_tests(self) -> NatV6Mode {
+        self.nat_v6()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn ip_support_for_tests(self) -> IpSupport {
+        self.ip_support()
+    }
+
     fn nat(self) -> Option<NatConfig> {
         // Start from the matching Nat preset and then override timeouts per
         // deployment. `Nat::*.to_config()` supplies the correct mapping,

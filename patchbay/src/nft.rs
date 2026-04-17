@@ -102,16 +102,20 @@ fn generate_nat_rules(cfg: &NatConfig, wan_if: &str, wan_ip: Ipv4Addr) -> String
             )
         }
     } else if hairpin {
-        // EDM + hairpin: redirect traffic destined for the WAN IP back.
-        format!(r#"        ip daddr {ip} redirect"#, ip = wan_ip,)
+        unreachable!(
+            "NatConfigBuilder rejects EndpointDependent + hairpin \
+             (NatConfigError::HairpinRequiresEim); reaching this branch \
+             would mean an invalid NatConfig slipped past validation"
+        )
     } else {
         String::new()
     };
 
-    // Postrouting: EIM uses snat + fullcone map update. EDM uses snat with a
-    // per-preservation flag. With hairpin: masquerade DNAT'd packets so the
-    // return path goes through the router (otherwise the LAN peer replies
-    // directly, confusing conntrack).
+    // Postrouting: EIM uses snat + fullcone map update. EDM uses masquerade
+    // with or without the `random` flag based on port preservation. With
+    // hairpin (EIM only): masquerade DNAT'd packets so the return path goes
+    // through the router; otherwise the LAN peer replies directly and
+    // confuses conntrack.
     let hairpin_masq = if hairpin {
         "        ct status dnat masquerade\n".to_string()
     } else {

@@ -98,15 +98,18 @@
 //! builder methods called after [`RouterBuilder::preset`] override preset
 //! values.
 //!
-//! | Preset | NAT | Firewall | IP | Use case |
-//! |--------|-----|----------|----|----------|
-//! | [`Home`](RouterPreset::Home) | EIM + APDF | Block inbound | Dual | Consumer router (FritzBox, UniFi) |
+//! | Preset | NAT (kind, port alloc.) | Firewall | IP | Use case |
+//! |--------|-------------------------|----------|----|----------|
+//! | [`Home`](RouterPreset::Home) | `Easy` (EIM+APDF, preserve) | Block inbound | Dual | Consumer router (FritzBox, UniFi) |
 //! | [`Public`](RouterPreset::Public) | None | None | Dual | Datacenter switch, ISP handoff |
-//! | [`IspCgnat`](RouterPreset::IspCgnat) | CGNAT (EIM) | None | Dual | Carrier with shared IPv4 |
+//! | [`PublicV4`](RouterPreset::PublicV4) | None | None | V4 | Legacy v4-only hosting |
+//! | [`IspCgnat`](RouterPreset::IspCgnat) | `Easy` (EIM+APDF, preserve) | Block inbound | Dual | RFC 6888 compliant CGNAT |
+//! | [`IspCgnatSymmetric`](RouterPreset::IspCgnatSymmetric) | `Hard` (EDM+APDF, preserve) | Block inbound | Dual | Symmetric CGNAT |
+//! | [`MobileCarrier`](RouterPreset::MobileCarrier) | `Hard` (EDM+APDF, preserve) | Block inbound | Dual | Typical LTE/5G carrier |
 //! | [`IspV6`](RouterPreset::IspV6) | NAT64 | Block inbound | V6 | T-Mobile, Jio-style IPv6-only |
-//! | [`Corporate`](RouterPreset::Corporate) | Symmetric | TCP 80/443 only | Dual | Enterprise firewall |
-//! | [`Hotel`](RouterPreset::Hotel) | Symmetric | No UDP | V4 | Guest WiFi |
-//! | [`Cloud`](RouterPreset::Cloud) | Symmetric | None | Dual | AWS/GCP NAT gateway |
+//! | [`Corporate`](RouterPreset::Corporate) | `Hardest` (EDM+APDF, random) | TCP 80/443, UDP 53 only | Dual | Enterprise firewall |
+//! | [`Hotel`](RouterPreset::Hotel) | `Hardest` (EDM+APDF, random) | Captive portal (no UDP) | V4 | Guest WiFi |
+//! | [`Cloud`](RouterPreset::Cloud) | `Hardest` (EDM+APDF, random) | None | Dual | AWS/GCP/Azure NAT gateway |
 //!
 //! # Link conditions
 //!

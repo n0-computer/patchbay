@@ -242,6 +242,7 @@ impl Default for ConntrackTimeouts {
 /// Errors returned by [`NatConfigBuilder::build`] when the requested
 /// combination cannot be expressed in nftables.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum NatConfigError {
     /// Address-Dependent filtering requires Endpoint-Independent mapping.
     ///
@@ -281,7 +282,19 @@ impl std::error::Error for NatConfigError {}
 ///
 /// Each preset ([`Nat::Easy`], [`Nat::Hard`], etc.) expands via
 /// [`Nat::to_config`]. Custom configurations are built with
-/// [`NatConfig::builder`], which validates cross-field invariants.
+/// [`NatConfig::builder`], which validates cross-field invariants at
+/// construction time.
+///
+/// The struct is `#[non_exhaustive]` so only the builder and the `Nat`
+/// conversion can produce values; callers cannot write a struct literal.
+/// Fields remain `pub` for ergonomic read access and pattern matching.
+/// Mutating a field on an existing `NatConfig` bypasses the builder's
+/// cross-field validation: for example, setting
+/// `cfg.mapping = NatMapping::EndpointDependent(_)` on a config with
+/// `AddressDependent` filtering or `hairpin = true` produces a combination
+/// the nftables backend cannot express. Callers that mutate fields are
+/// responsible for maintaining these invariants; the library does not
+/// re-validate on apply.
 ///
 /// # Example
 /// ```

@@ -64,16 +64,23 @@ directly and choose the mapping, filtering, and timeout behavior
 independently:
 
 ```rust
-use patchbay::nat::{NatConfig, NatMapping, NatFiltering};
+use patchbay::{NatConfig, NatFiltering, NatMapping};
 
 let custom = NatConfig::builder()
     .mapping(NatMapping::EndpointIndependent)
     .filtering(NatFiltering::EndpointIndependent)
     .hairpin(true)
-    .build();
+    .build()?;
 
 let router = lab.add_router("custom").nat(custom).build().await?;
 ```
+
+`NatConfigBuilder::build` returns `Result<NatConfig, NatConfigError>`.
+The builder rejects unsupported combinations up front: `EndpointDependent`
+mapping paired with `AddressDependent` filtering or with
+`hairpin = true` both return an error because the backend cannot
+express them. The textbook NAT shapes (EIM with any filtering, EDM with
+APDF) all succeed.
 
 ### Changing NAT at runtime
 
@@ -84,7 +91,7 @@ changes mid-session, for example simulating a network migration. Call
 new connections use the updated rules:
 
 ```rust
-router.set_nat_mode(Nat::Hardest).await?;
+router.set_nat(Nat::Hardest).await?;
 router.flush_nat_state().await?;
 ```
 
