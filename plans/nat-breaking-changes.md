@@ -57,12 +57,13 @@ builder validation and is documented as caller responsibility.
 - `IspCgnatHard` renamed to `IspCgnatSymmetric`, RFC 7753 citation
   dropped (that RFC is a PCP extension, not a PBA RFC; the preset does
   not model Port Block Allocation). Firewall `None` to `BlockInbound`.
-- `MobileCarrier` (new): EDM+APDF, 60-second UDP stream timeout,
-  `BlockInbound` firewall.
-- `IspCgnatSymmetric` and `MobileCarrier` both map to `Nat::Hard`
-  (symmetric NAT with random ports). An earlier draft simulated these
-  as port-preserving symmetric NAT; patchbay does not do that
-  distinctly.
+- `IspCgnatSymmetric` resolves to `Nat::Hard` (symmetric NAT with
+  random ports) and covers both fixed-line symmetric CGN and cellular
+  carriers. The docstring notes that published measurement data
+  (Richter et al. IMC 2016) reports much shorter real-world UDP
+  timeouts (cellular median 65s, non-cellular 35s) than the 180s
+  vendor-default the preset uses; tune with `.udp_stream_timeout()`
+  for specific carriers.
 
 ## `Router` API
 

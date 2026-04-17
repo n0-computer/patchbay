@@ -215,16 +215,6 @@ fn preset_nat_snapshots() {
             },
         ),
         (
-            RouterPreset::MobileCarrier,
-            Expect {
-                nat_kind: Some(Nat::Hard),
-                udp_stream: Some(60),
-                firewall: Firewall::BlockInbound,
-                ip_support: IpSupport::DualStack,
-                nat_v6: NatV6Mode::None,
-            },
-        ),
-        (
             RouterPreset::Corporate,
             Expect {
                 nat_kind: Some(Nat::Hard),
@@ -336,7 +326,6 @@ async fn preset_recommended_ipv6_profiles() -> Result<()> {
         RouterPreset::PublicV4,
         RouterPreset::IspCgnat,
         RouterPreset::IspCgnatSymmetric,
-        RouterPreset::MobileCarrier,
         RouterPreset::IspV6,
         RouterPreset::Corporate,
         RouterPreset::Hotel,

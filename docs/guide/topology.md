@@ -71,7 +71,6 @@ the preset configures:
 | `PublicV4` | None | None | V4Only | Public |
 | `IspCgnat` | `Easy` (EIM+APDF) | BlockInbound | DualStack | Private |
 | `IspCgnatSymmetric` | `Hard` (EDM+APDF, random) | BlockInbound | DualStack | Private |
-| `MobileCarrier` | `Hard` (EDM+APDF, random) | BlockInbound | DualStack | Private |
 | `IspV6` | None (v4), NAT64 (v6) | BlockInbound | V6Only | Public |
 | `Corporate` | `Hard` (EDM+APDF, random) | Corporate | DualStack | Private |
 | `Hotel` | `Hard` (EDM+APDF, random) | CaptivePortal | V4Only | Private |

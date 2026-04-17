@@ -75,14 +75,15 @@ as `Hard` (random) to keep simulation pessimistic and honest.
 
 ### Impact
 
-Presets `MobileCarrier` and `IspCgnatSymmetric` resolve to `Nat::Hard`
-(random symmetric NAT). Hole-punching tests against these presets will
-fail, as they would against any symmetric NAT without port prediction.
-Applications that rely on port-prediction-based traversal to reach
-peers behind real SYMPP hardware will NOT see that path exercised in
-patchbay tests. The pessimistic model is the right default for
-"does my app work?" testing; it is wrong for "does my app exploit
-SYMPP optimistically?" testing.
+`RouterPreset::IspCgnatSymmetric` (which also represents the cellular
+CGNAT case) resolves to `Nat::Hard` (random symmetric NAT).
+Hole-punching tests against this preset will fail, as they would
+against any symmetric NAT without port prediction. Applications that
+rely on port-prediction-based traversal to reach peers behind real
+SYMPP hardware will NOT see that path exercised in patchbay tests.
+The pessimistic model is the right default for "does my app work?"
+testing; it is wrong for "does my app exploit SYMPP optimistically?"
+testing.
 
 ### How a future backend could add it
 

@@ -703,8 +703,8 @@ impl Router {
 ///
 /// The ISP presets cover different shapes of carrier-grade NAT. `IspCgnat`
 /// is the RFC 6888 compliant fixed-line case. `IspCgnatSymmetric` covers
-/// symmetric CGNAT. `MobileCarrier` covers typical cellular deployments.
-/// `IspV6` is the IPv6-only case with NAT64.
+/// symmetric CGNAT, including typical cellular carriers. `IspV6` is the
+/// IPv6-only case with NAT64.
 ///
 /// # Example
 ///
@@ -783,9 +783,19 @@ pub enum RouterPreset {
     /// ISP with symmetric CGNAT.
     ///
     /// Models carrier-grade NAT that uses endpoint-dependent mapping.
-    /// Common in older fixed-line deployments and in CGNAT hardware
-    /// where administrators disable EIM. Hole-punching requires a relay.
-    /// IPv6 inbound is blocked by a stateful firewall.
+    /// Covers both fixed-line symmetric CGN deployments (where operators
+    /// disable EIM) and cellular carriers on LTE or 5G, which in
+    /// published measurement studies overwhelmingly deploy symmetric
+    /// NAT. Hole-punching requires a relay. IPv6 inbound is blocked by
+    /// a stateful firewall.
+    ///
+    /// The UDP stream timeout defaults to 180 seconds, which is close
+    /// to common vendor defaults (Cisco ASR CGNAT, A10 Thunder CGN,
+    /// Fortinet FortiGate CGNAT). Real deployments often run lower:
+    /// Richter et al. (IMC 2016) report a median mapping timeout of
+    /// 65 seconds on cellular networks and 35 seconds on non-cellular
+    /// CGN. When testing keep-alive behavior for a specific carrier,
+    /// override with `.udp_stream_timeout(secs)`.
     ///
     /// patchbay simulates this as [`Nat::Hard`](crate::Nat::Hard) with
     /// random port allocation. Real port-preserving symmetric CGNAT
@@ -795,23 +805,6 @@ pub enum RouterPreset {
     ///
     /// Dual-stack, private downstream pool.
     IspCgnatSymmetric,
-
-    /// Mobile carrier on LTE or 5G.
-    ///
-    /// Models typical cellular deployments: symmetric NAT with a
-    /// 60-second UDP stream timeout (matching the cellular median
-    /// reported in published CGN measurement studies) and a stateful
-    /// firewall that blocks unsolicited inbound on both address
-    /// families.
-    ///
-    /// patchbay simulates this as [`Nat::Hard`](crate::Nat::Hard) with
-    /// random port allocation. Real mobile CGNAT is often
-    /// port-preserving symmetric NAT (SYMPP, punchable through port
-    /// prediction); that class is not modeled distinctly. See [the NAT
-    /// limits reference](https://github.com/n0-computer/patchbay/blob/main/docs/reference/nat-limitations.md).
-    ///
-    /// Dual-stack, private downstream pool.
-    MobileCarrier,
 
     /// IPv6-only ISP or mobile carrier with NAT64.
     ///
@@ -887,20 +880,16 @@ impl RouterPreset {
         // Each preset starts from a `Nat::*` expansion and overrides only
         // timeouts. `Nat::*.to_config()` supplies the mapping and filtering.
         //
-        // `Nat::Hard` now covers every symmetric-NAT preset. See
-        // docs/reference/nat-limitations.md for why `MobileCarrier` and
-        // `IspCgnatSymmetric` do not simulate port-preserving symmetric NAT
+        // `Nat::Hard` covers every symmetric-NAT preset. See
+        // docs/reference/nat-limitations.md for why `IspCgnatSymmetric`
+        // does not simulate port-preserving symmetric NAT (SYMPP)
         // distinctly from random-port symmetric NAT.
         let base = match self {
             Self::Public | Self::PublicV4 | Self::IspV6 => Nat::None,
             // RFC 6888 mandates EIM; most compliant deployments pair it
             // with APDF rather than EIF, matching Nat::Easy.
             Self::Home | Self::IspCgnat => Nat::Easy,
-            Self::IspCgnatSymmetric
-            | Self::MobileCarrier
-            | Self::Corporate
-            | Self::Hotel
-            | Self::Cloud => Nat::Hard,
+            Self::IspCgnatSymmetric | Self::Corporate | Self::Hotel | Self::Cloud => Nat::Hard,
         };
         let mut cfg = base.to_config()?;
         cfg.timeouts = match self {
@@ -912,11 +901,6 @@ impl RouterPreset {
             Self::IspCgnatSymmetric => ConntrackTimeouts {
                 udp: 30,
                 udp_stream: 180,
-                tcp_established: 3600,
-            },
-            Self::MobileCarrier => ConntrackTimeouts {
-                udp: 30,
-                udp_stream: 60,
                 tcp_established: 3600,
             },
             Self::Corporate | Self::Hotel => ConntrackTimeouts {
@@ -948,11 +932,9 @@ impl RouterPreset {
         // (Swisscom, Deutsche Telekom, Starlink), matching cellular. Only
         // the explicitly-public presets get Firewall::None.
         match self {
-            Self::Home
-            | Self::IspV6
-            | Self::IspCgnat
-            | Self::IspCgnatSymmetric
-            | Self::MobileCarrier => Firewall::BlockInbound,
+            Self::Home | Self::IspV6 | Self::IspCgnat | Self::IspCgnatSymmetric => {
+                Firewall::BlockInbound
+            }
             Self::Public | Self::PublicV4 | Self::Cloud => Firewall::None,
             Self::Corporate => Firewall::Corporate,
             Self::Hotel => Firewall::CaptivePortal,

@@ -186,7 +186,7 @@ address is assigned.
 let wifi_router = lab.add_router("wifi").nat(Nat::Easy).build().await?;
 let cell_router = lab
     .add_router("cell")
-    .preset(RouterPreset::MobileCarrier)
+    .preset(RouterPreset::IspCgnatSymmetric)
     .build().await?;
 
 let device = lab.add_device("phone")

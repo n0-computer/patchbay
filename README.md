@@ -132,10 +132,10 @@ let corp = lab.add_router("corp").preset(RouterPreset::Corporate).build().await?
 ```
 
 Available presets: `Home`, `Public`, `PublicV4`, `IspCgnat`,
-`IspCgnatSymmetric`, `MobileCarrier`, `IspV6`, `Corporate`, `Hotel`,
-`Cloud`. Individual methods called after `preset()` override preset
-values. See [docs/reference/ipv6.md](docs/reference/ipv6.md) for the
-full reference table.
+`IspCgnatSymmetric`, `IspV6`, `Corporate`, `Hotel`, `Cloud`. Individual
+methods called after `preset()` override preset values. See
+[docs/reference/ipv6.md](docs/reference/ipv6.md) for the full reference
+table.
 
 ### NAT
 

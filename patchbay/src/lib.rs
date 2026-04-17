@@ -104,8 +104,7 @@
 //! | [`Public`](RouterPreset::Public) | None | None | Dual | Datacenter switch, ISP handoff |
 //! | [`PublicV4`](RouterPreset::PublicV4) | None | None | V4 | Legacy v4-only hosting |
 //! | [`IspCgnat`](RouterPreset::IspCgnat) | `Easy` (EIM+APDF) | Block inbound | Dual | RFC 6888 compliant CGNAT |
-//! | [`IspCgnatSymmetric`](RouterPreset::IspCgnatSymmetric) | `Hard` (EDM+APDF, random) | Block inbound | Dual | Symmetric CGNAT |
-//! | [`MobileCarrier`](RouterPreset::MobileCarrier) | `Hard` (EDM+APDF, random) | Block inbound | Dual | Typical LTE/5G carrier |
+//! | [`IspCgnatSymmetric`](RouterPreset::IspCgnatSymmetric) | `Hard` (EDM+APDF, random) | Block inbound | Dual | Symmetric CGNAT, including cellular |
 //! | [`IspV6`](RouterPreset::IspV6) | NAT64 | Block inbound | V6 | T-Mobile, Jio-style IPv6-only |
 //! | [`Corporate`](RouterPreset::Corporate) | `Hard` (EDM+APDF, random) | TCP 80/443, UDP 53 only | Dual | Enterprise firewall |
 //! | [`Hotel`](RouterPreset::Hotel) | `Hard` (EDM+APDF, random) | Captive portal (no UDP) | V4 | Guest WiFi |
