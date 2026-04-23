@@ -10,25 +10,29 @@
 //!
 //! - [`config`] for user-facing builder types.
 //! - [`registry`] for the shared mapping registry and dedup logic.
-//! - [`wire`] for server-side protocol encoders and decoders that match the
-//!   client-side wire format implemented in `portmapper`.
+//! - [`nft`] for the dedicated `ip portmap` nftables table.
+//! - [`server`] for the lifecycle handle and the shared [`server::ServerContext`].
+//! - [`nat_pmp`], [`pcp`], and [`upnp`] for per-protocol decoders, encoders,
+//!   and request handlers.
 //!
-//! Per-protocol server tasks (`nat_pmp`, `pcp`, `upnp`) live alongside once
-//! implemented. The public API surface is intentionally small: [`PortmapMode`]
-//! and [`PortmapConfig`] for configuration; everything else is `pub(crate)`.
+//! Public API surface is intentionally small: [`PortmapMode`] and
+//! [`PortmapConfig`] for configuration. Every internal helper is
+//! `pub(crate)`.
+//!
+//! # Threat model
+//!
+//! All three protocols authorize clients by source IPv4 address. That is
+//! trivially spoofable on a real LAN and acceptable only inside the
+//! patchbay simulator, where the downstream bridge is populated solely by
+//! tests. Do not reuse this code in a production gateway without moving
+//! authorization to a stronger primitive.
 
 pub use config::{PortmapConfig, PortmapMode};
 
 mod config;
-#[allow(dead_code)]
 pub(crate) mod nat_pmp;
-#[allow(dead_code)]
 pub(crate) mod nft;
-#[allow(dead_code)]
 pub(crate) mod pcp;
-#[allow(dead_code)]
 pub(crate) mod registry;
-#[allow(dead_code)]
 pub(crate) mod server;
-#[allow(dead_code)]
 pub(crate) mod upnp;

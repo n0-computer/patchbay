@@ -12,22 +12,14 @@
 //! dispatch-by-version-byte live in [`super::server`]; this module only
 //! handles packets whose version byte is `0`.
 
-use std::{
-    net::Ipv4Addr,
-    num::NonZeroU16,
-    sync::Arc,
-    time::{Duration, Instant},
-};
+use std::{net::Ipv4Addr, num::NonZeroU16, time::Duration};
 
-use ipnet::Ipv4Net;
-use tokio::sync::Mutex;
 use tracing::{debug, trace, warn};
 
 use super::{
     nft,
-    registry::{AllocOutcome, MapProto, PortmapRegistry},
+    registry::{AllocOutcome, MapProto},
 };
-use crate::netns::NetnsManager;
 
 /// NAT-PMP wire-format version byte.
 pub(crate) const VERSION: u8 = 0;
@@ -50,22 +42,11 @@ enum ResultCode {
 }
 
 #[repr(u8)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, strum::FromRepr)]
 enum Opcode {
     DetermineExternalAddress = 0,
     MapUdp = 1,
     MapTcp = 2,
-}
-
-impl Opcode {
-    fn from_byte(b: u8) -> Option<Self> {
-        match b {
-            0 => Some(Self::DetermineExternalAddress),
-            1 => Some(Self::MapUdp),
-            2 => Some(Self::MapTcp),
-            _ => None,
-        }
-    }
 }
 
 /// Parsed NAT-PMP request.
@@ -85,7 +66,7 @@ impl Request {
         if buf.len() < 2 || buf[0] != VERSION {
             return None;
         }
-        match Opcode::from_byte(buf[1])? {
+        match Opcode::from_repr(buf[1])? {
             Opcode::DetermineExternalAddress => Some(Request::ExternalAddress),
             op @ (Opcode::MapUdp | Opcode::MapTcp) => {
                 if buf.len() < 12 {
@@ -145,33 +126,9 @@ fn encode_map_response(
     buf
 }
 
-/// Context shared between the dispatch loop and the handlers.
-///
-/// `epoch` is the router-local epoch zero: response `epoch_time` fields
-/// report seconds since this instant. Real routers use seconds since the
-/// SSDP/NAT-PMP service started; the test harness only needs this value to
-/// be monotonic and non-zero.
-pub(crate) struct Context {
-    pub registry: Arc<Mutex<PortmapRegistry>>,
-    pub netns: Arc<NetnsManager>,
-    pub ns: Arc<str>,
-    pub wan_ip: Ipv4Addr,
-    pub downstream_cidr: Ipv4Net,
-    pub epoch: Instant,
-    /// Clamp for requested lifetimes. Matches the recommended 2-hour
-    /// maximum from RFC 6886 section 3.3.
-    pub max_lifetime: Duration,
-}
-
-impl Context {
-    fn epoch_time(&self) -> u32 {
-        self.epoch.elapsed().as_secs() as u32
-    }
-}
-
 /// Handles a single NAT-PMP request and returns the response bytes.
 pub(crate) async fn handle_request(
-    ctx: &Context,
+    ctx: &super::server::ServerContext,
     client_ip: Ipv4Addr,
     packet: &[u8],
 ) -> Option<Vec<u8>> {
@@ -232,7 +189,7 @@ pub(crate) async fn handle_request(
 }
 
 async fn handle_map(
-    ctx: &Context,
+    ctx: &super::server::ServerContext,
     client_ip: Ipv4Addr,
     proto: MapProto,
     local_port: u16,

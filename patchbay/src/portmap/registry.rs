@@ -102,11 +102,13 @@ impl PortmapRegistry {
     }
 
     /// Returns the current mapping count.
+    #[allow(dead_code)]
     pub(crate) fn len(&self) -> usize {
         self.by_external.len()
     }
 
     /// Looks up a mapping by its external slot.
+    #[allow(dead_code)]
     pub(crate) fn get(&self, key: MappingKey) -> Option<&Mapping> {
         self.by_external.get(&key)
     }
@@ -246,6 +248,7 @@ impl PortmapRegistry {
 
     /// Removes and returns every mapping whose deadline is at or before
     /// `now`. Called periodically by the reaper.
+    #[allow(dead_code)]
     pub(crate) fn reap_expired(&mut self, now: Instant) -> Vec<Mapping> {
         let expired_keys: Vec<MappingKey> = self
             .by_external
@@ -260,6 +263,7 @@ impl PortmapRegistry {
     }
 
     /// Drains every mapping. Used on server shutdown.
+    #[allow(dead_code)]
     pub(crate) fn drain(&mut self) -> Vec<Mapping> {
         self.by_internal.clear();
         self.by_external.drain().map(|(_, m)| m).collect()

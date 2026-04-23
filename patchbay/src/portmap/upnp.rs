@@ -37,9 +37,9 @@ use tokio::{
 use tracing::{debug, trace, warn};
 
 use super::{
-    nat_pmp::Context,
     nft,
-    registry::{AllocOutcome, MapProto, PortmapRegistry},
+    registry::{AllocOutcome, MapProto, MappingKey},
+    server::ServerContext,
 };
 use crate::netns::NetnsManager;
 
@@ -73,7 +73,7 @@ const ROOT_DESC_URL: &str = "/rootDesc.xml";
 pub(crate) async fn spawn(
     netns: Arc<NetnsManager>,
     ns: Arc<str>,
-    ctx: Arc<Context>,
+    ctx: Arc<ServerContext>,
     downstream_gw: Ipv4Addr,
 ) -> Result<(JoinHandle<()>, JoinHandle<()>)> {
     let listener = bind_http_listener(&netns, &ns, downstream_gw).await?;
@@ -207,7 +207,7 @@ fn search_target_matches(target: Option<&str>) -> bool {
     }
 }
 
-async fn run_http(listener: TcpListener, ctx: Arc<Context>) {
+async fn run_http(listener: TcpListener, ctx: Arc<ServerContext>) {
     loop {
         let (stream, peer) = match listener.accept().await {
             Ok(v) => v,
@@ -227,7 +227,7 @@ async fn run_http(listener: TcpListener, ctx: Arc<Context>) {
 
 async fn handle_http_connection(
     mut stream: tokio::net::TcpStream,
-    ctx: Arc<Context>,
+    ctx: Arc<ServerContext>,
     peer: std::net::SocketAddr,
 ) -> Result<()> {
     let mut buf = Vec::with_capacity(4096);
@@ -300,7 +300,7 @@ async fn route_request(
     request_line: &str,
     headers: &[(String, String)],
     body: &[u8],
-    ctx: &Context,
+    ctx: &ServerContext,
 ) -> Vec<u8> {
     let mut parts = request_line.split_whitespace();
     let method = parts.next().unwrap_or("");
@@ -449,7 +449,7 @@ fn build_scpd() -> &'static str {
 </scpd>"#
 }
 
-async fn handle_soap(action: &str, body: &str, ctx: &Context) -> Vec<u8> {
+async fn handle_soap(action: &str, body: &str, ctx: &ServerContext) -> Vec<u8> {
     trace!(?action, "upnp soap request");
     let action_name = action.split('#').next_back().unwrap_or("");
     match action_name {
@@ -464,7 +464,7 @@ async fn handle_soap(action: &str, body: &str, ctx: &Context) -> Vec<u8> {
     }
 }
 
-async fn handle_add_port_mapping(body: &str, ctx: &Context, pick_any: bool) -> Vec<u8> {
+async fn handle_add_port_mapping(body: &str, ctx: &ServerContext, pick_any: bool) -> Vec<u8> {
     let external_port =
         match extract_tag(body, "NewExternalPort").and_then(|s| s.parse::<u16>().ok()) {
             Some(p) => p,
@@ -547,7 +547,7 @@ async fn handle_add_port_mapping(body: &str, ctx: &Context, pick_any: bool) -> V
     }
 }
 
-async fn handle_delete_port_mapping(body: &str, ctx: &Context) -> Vec<u8> {
+async fn handle_delete_port_mapping(body: &str, ctx: &ServerContext) -> Vec<u8> {
     let external_port =
         match extract_tag(body, "NewExternalPort").and_then(|s| s.parse::<u16>().ok()) {
             Some(p) => p,
@@ -566,7 +566,7 @@ async fn handle_delete_port_mapping(body: &str, ctx: &Context) -> Vec<u8> {
     let (removed, rules_snapshot) = {
         let mut registry = ctx.registry.lock().await;
         let removed = registry
-            .remove(super::registry::MappingKey {
+            .remove(MappingKey {
                 proto: protocol,
                 external_port: external_nz,
             })
@@ -632,11 +632,6 @@ fn soap_fault(code: u16, description: &str) -> String {
 </s:Envelope>"#
     )
 }
-
-// Silence the unused import in the dispatch loop when PortmapRegistry is
-// not directly referenced here. The registry is used via Context.
-#[allow(dead_code)]
-const _: fn() -> Option<PortmapRegistry> = || None;
 
 #[cfg(test)]
 mod tests {

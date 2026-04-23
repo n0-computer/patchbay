@@ -20,9 +20,9 @@ use std::{
 use tracing::{debug, trace};
 
 use super::{
-    nat_pmp::Context,
     nft,
-    registry::{AllocOutcome, MapProto, MappingKey},
+    registry::{AllocOutcome, MapProto},
+    server::ServerContext,
 };
 
 /// PCP wire-format version byte.
@@ -40,20 +40,10 @@ const HEADER_SIZE: usize = 24;
 const MAP_DATA_SIZE: usize = 36;
 
 #[repr(u8)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, strum::FromRepr)]
 enum Opcode {
     Announce = 0,
     Map = 1,
-}
-
-impl Opcode {
-    fn from_byte(b: u8) -> Option<Self> {
-        match b {
-            0 => Some(Self::Announce),
-            1 => Some(Self::Map),
-            _ => None,
-        }
-    }
 }
 
 #[repr(u8)]
@@ -97,7 +87,6 @@ enum Request {
     },
     /// Decoded but unsupported (e.g. protocol=0 for all protocols).
     UnsupportedProtocol {
-        lifetime_seconds: u32,
         data: MapData,
     },
 }
@@ -108,7 +97,7 @@ fn decode(buf: &[u8]) -> Option<Request> {
     if buf.len() < HEADER_SIZE || buf[0] != VERSION {
         return None;
     }
-    let opcode = Opcode::from_byte(buf[1])?;
+    let opcode = Opcode::from_repr(buf[1])?;
     let lifetime_seconds = u32::from_be_bytes([buf[4], buf[5], buf[6], buf[7]]);
     match opcode {
         Opcode::Announce => Some(Request::Announce),
@@ -130,7 +119,6 @@ fn decode(buf: &[u8]) -> Option<Request> {
                 PROTO_TCP => MapProto::Tcp,
                 _ => {
                     return Some(Request::UnsupportedProtocol {
-                        lifetime_seconds,
                         data: MapData {
                             nonce,
                             protocol: MapProto::Udp,
@@ -214,7 +202,7 @@ fn encode_map_response(r: MapResponse) -> Vec<u8> {
 /// Handles a single PCP packet. Returns the response bytes or `None`
 /// when the packet is malformed and should be silently dropped.
 pub(crate) async fn handle_request(
-    ctx: &Context,
+    ctx: &ServerContext,
     client_ip: Ipv4Addr,
     packet: &[u8],
 ) -> Option<Vec<u8>> {
@@ -271,7 +259,7 @@ pub(crate) async fn handle_request(
 }
 
 async fn handle_map(
-    ctx: &Context,
+    ctx: &ServerContext,
     client_ip: Ipv4Addr,
     lifetime_seconds: u32,
     data: MapData,
@@ -391,14 +379,6 @@ async fn handle_map(
         external_address: external_ip,
     })
 }
-
-/// Silences a linter warning about `MappingKey` being unused in this
-/// module while keeping the import paths clear for readers.
-#[allow(dead_code)]
-const _: fn() -> MappingKey = || MappingKey {
-    proto: MapProto::Udp,
-    external_port: NonZeroU16::new(1).unwrap(),
-};
 
 #[cfg(test)]
 mod tests {

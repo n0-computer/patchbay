@@ -40,8 +40,23 @@ pub struct PortmapConfig {
 }
 
 impl PortmapConfig {
-    /// Returns the config corresponding to `mode`.
+    /// Returns a [`PortmapConfig`] whose per-protocol flags match `mode`.
+    ///
+    /// Equivalent to `PortmapConfig::from(mode)`; kept for callers that
+    /// find the method form clearer at a call site.
     pub fn from_mode(mode: PortmapMode) -> Self {
+        mode.into()
+    }
+
+    /// Returns `true` when any protocol is enabled.
+    #[must_use]
+    pub fn any_enabled(&self) -> bool {
+        self.enable_nat_pmp || self.enable_pcp || self.enable_upnp
+    }
+}
+
+impl From<PortmapMode> for PortmapConfig {
+    fn from(mode: PortmapMode) -> Self {
         match mode {
             PortmapMode::None => Self::default(),
             PortmapMode::NatPmpOnly => Self {
@@ -67,11 +82,6 @@ impl PortmapConfig {
                 enable_upnp: true,
             },
         }
-    }
-
-    /// Returns `true` if any protocol is enabled.
-    pub fn any_enabled(&self) -> bool {
-        self.enable_nat_pmp || self.enable_pcp || self.enable_upnp
     }
 }
 

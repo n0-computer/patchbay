@@ -2,8 +2,8 @@
 //!
 //! [`PortmapServer`] owns the UDP 5351 socket shared between NAT-PMP and
 //! PCP, the shared mapping registry, and the per-protocol dispatch task.
-//! UPnP lands alongside in Step 5; until then only the NAT-PMP dispatcher
-//! is wired in.
+//! When UPnP is enabled it also owns the SSDP listener and the HTTP
+//! listener spawned from [`super::upnp`].
 //!
 //! The server follows the same lifecycle pattern as
 //! [`crate::dns_server::DnsServer`]: a cloneable handle backed by
@@ -31,6 +31,31 @@ use crate::netns::NetnsManager;
 /// recommendation from RFC 6886 section 3.3.
 const MAX_LIFETIME_SECS: u64 = 2 * 60 * 60;
 
+/// Shared state threaded through every protocol handler.
+///
+/// `epoch` is the router-local epoch zero: response `epoch_time` fields
+/// report seconds since this instant. Real routers use seconds since the
+/// portmap service started; the simulator only needs the value to be
+/// monotonic and non-zero within a single server instance.
+pub(crate) struct ServerContext {
+    pub(super) registry: Arc<Mutex<PortmapRegistry>>,
+    pub(super) netns: Arc<NetnsManager>,
+    pub(super) ns: Arc<str>,
+    pub(super) wan_ip: Ipv4Addr,
+    pub(super) downstream_cidr: Ipv4Net,
+    pub(super) epoch: Instant,
+    /// Clamp for requested lifetimes. Matches the recommended 2-hour
+    /// maximum from RFC 6886 section 3.3.
+    pub(super) max_lifetime: Duration,
+}
+
+impl ServerContext {
+    /// Seconds since this server started, saturating at `u32::MAX`.
+    pub(super) fn epoch_time(&self) -> u32 {
+        self.epoch.elapsed().as_secs().min(u64::from(u32::MAX)) as u32
+    }
+}
+
 /// Cloneable handle to a per-router portmap server.
 #[derive(Clone)]
 pub(crate) struct PortmapServer {
@@ -39,6 +64,7 @@ pub(crate) struct PortmapServer {
 
 struct PortmapServerInner {
     cfg: PortmapConfig,
+    #[allow(dead_code)]
     registry: Arc<Mutex<PortmapRegistry>>,
     netns: Arc<NetnsManager>,
     ns: Arc<str>,
@@ -81,7 +107,7 @@ impl PortmapServer {
             .await
             .ok();
 
-        let ctx = Arc::new(nat_pmp::Context {
+        let ctx = Arc::new(ServerContext {
             registry: registry.clone(),
             netns: netns.clone(),
             ns: ns.clone(),
@@ -114,18 +140,6 @@ impl PortmapServer {
         })
     }
 
-    /// Returns the configuration the server was started with.
-    #[allow(dead_code)]
-    pub(crate) fn config(&self) -> PortmapConfig {
-        self.inner.cfg
-    }
-
-    /// Returns the current mapping count. Intended for tests and metrics.
-    #[allow(dead_code)]
-    pub(crate) async fn mapping_count(&self) -> usize {
-        self.inner.registry.lock().await.len()
-    }
-
     /// Tears down the server's nftables table. Callers should call this
     /// before dropping the last handle so the rules do not outlive the
     /// server. Missing rules are not an error: the helper is idempotent.
@@ -138,7 +152,7 @@ fn spawn_dispatch(
     netns: Arc<NetnsManager>,
     ns: Arc<str>,
     cfg: PortmapConfig,
-    ctx: Arc<nat_pmp::Context>,
+    ctx: Arc<ServerContext>,
     downstream_gw: Ipv4Addr,
 ) -> Result<AbortOnDropHandle<()>> {
     let std_socket: std::net::UdpSocket = netns.run_closure_in(&ns, move || {
@@ -170,7 +184,7 @@ fn spawn_dispatch(
     Ok(AbortOnDropHandle::new(handle))
 }
 
-async fn dispatch_loop(socket: UdpSocket, ctx: Arc<nat_pmp::Context>, cfg: PortmapConfig) {
+async fn dispatch_loop(socket: UdpSocket, ctx: Arc<ServerContext>, cfg: PortmapConfig) {
     let mut buf = vec![0u8; 1500];
     loop {
         let (len, src) = match socket.recv_from(&mut buf).await {

@@ -721,18 +721,24 @@ impl Router {
         }
 
         // Tear down the current server before potentially starting a new
-        // one. Dropping the handle aborts its tasks; clear_portmap_rules
-        // removes any lingering nftables state.
-        {
+        // one. Shutdown removes lingering nftables state; dropping the
+        // handle aborts its tasks.
+        let existing_server = {
             let mut inner = self.lab.core.lock().unwrap();
-            if let Some(r) = inner.router_mut(self.id) {
-                r.portmap_server.take();
+            let taken = inner.router_mut(self.id).and_then(|r| {
                 r.cfg.portmap = new_cfg;
-            }
+                r.portmap_server.take()
+            });
+            taken
+        };
+        if let Some(server) = existing_server {
+            server.shutdown().await.ok();
+            drop(server);
+        } else {
+            portmap::nft::clear_portmap_rules(&self.lab.netns, &ns)
+                .await
+                .ok();
         }
-        portmap::nft::clear_portmap_rules(&self.lab.netns, &ns)
-            .await
-            .ok();
 
         if new_cfg.any_enabled() {
             let downstream_gw = downstream_gw
