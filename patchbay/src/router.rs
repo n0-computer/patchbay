@@ -680,6 +680,81 @@ impl Router {
     pub async fn spawn_reflector(&self, bind: SocketAddr) -> Result<core::ReflectorGuard> {
         self.lab.spawn_reflector_in(&self.ns, bind).await
     }
+
+    /// Enables, disables, or reconfigures the portmap server at runtime.
+    ///
+    /// Dropping to [`PortmapMode::None`] tears the server down and flushes
+    /// the `ip portmap` nftables table. Switching between non-`None` modes
+    /// replaces the server, which forgets every active mapping: callers
+    /// should expect clients to reprobe. Passing the same mode the router
+    /// is already running is a no-op.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the router has been removed, the namespace
+    /// runtime is gone, or starting the server inside the namespace
+    /// fails.
+    pub async fn set_portmap(&self, mode: PortmapMode) -> Result<()> {
+        let op = self
+            .lab
+            .with_router(self.id, |r| Arc::clone(&r.op))
+            .ok_or_else(|| anyhow!("router removed"))?;
+        let _guard = op.lock().await;
+        let new_cfg = PortmapConfig::from_mode(mode);
+
+        let (existing, ns, downstream_gw, wan_ip, downstream_cidr) = {
+            let inner = self.lab.core.lock().unwrap();
+            let r = inner
+                .router(self.id)
+                .ok_or_else(|| anyhow!("router removed"))?;
+            (
+                r.cfg.portmap,
+                r.ns.clone(),
+                r.downstream_gw,
+                r.upstream_ip,
+                r.downstream_cidr,
+            )
+        };
+
+        if existing == new_cfg {
+            return Ok(());
+        }
+
+        // Tear down the current server before potentially starting a new
+        // one. Dropping the handle aborts its tasks; clear_portmap_rules
+        // removes any lingering nftables state.
+        {
+            let mut inner = self.lab.core.lock().unwrap();
+            if let Some(r) = inner.router_mut(self.id) {
+                r.portmap_server.take();
+                r.cfg.portmap = new_cfg;
+            }
+        }
+        portmap::nft::clear_portmap_rules(&self.lab.netns, &ns)
+            .await
+            .ok();
+
+        if new_cfg.any_enabled() {
+            let downstream_gw = downstream_gw
+                .ok_or_else(|| anyhow!("portmap requires an IPv4 downstream gateway"))?;
+            let wan_ip = wan_ip.ok_or_else(|| anyhow!("portmap requires an IPv4 uplink IP"))?;
+            let downstream_cidr = downstream_cidr
+                .ok_or_else(|| anyhow!("portmap requires an IPv4 downstream CIDR"))?;
+            let server = portmap::server::PortmapServer::start(
+                Arc::clone(&self.lab.netns),
+                ns,
+                new_cfg,
+                downstream_gw,
+                wan_ip,
+                downstream_cidr,
+            )
+            .await?;
+            if let Some(r) = self.lab.core.lock().unwrap().router_mut(self.id) {
+                r.portmap_server = Some(server);
+            }
+        }
+        Ok(())
+    }
 }
 
 // ─────────────────────────────────────────────

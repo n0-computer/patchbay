@@ -332,6 +332,133 @@ async fn probe_all_protocols() -> Result<()> {
     Ok(())
 }
 
+/// `Router::set_nat_mode` must preserve active portmap rules because
+/// the portmap nftables table is separate from `ip nat`. Regression test
+/// for the adversarial review's C1 finding.
+#[tokio::test(flavor = "current_thread")]
+#[traced_test]
+async fn set_nat_mode_preserves_active_mapping() -> Result<()> {
+    check_caps()?;
+    let lab = Lab::new().await?;
+    let dc = lab.add_router("dc").build().await?;
+    let home = lab
+        .add_router("home")
+        .upstream(dc.id())
+        .nat(Nat::Home)
+        .portmap(PortmapMode::NatPmpOnly)
+        .build()
+        .await?;
+    let dev = lab
+        .add_device("dev")
+        .iface("eth0", home.id())
+        .build()
+        .await?;
+    let watcher = lab
+        .add_device("watcher")
+        .iface("eth0", dc.id())
+        .build()
+        .await?;
+
+    let local_port = NonZeroU16::new(50127).unwrap();
+
+    let external = dev
+        .spawn(move |_| async move {
+            let client = portmapper::Client::new(portmapper::Config {
+                enable_upnp: false,
+                enable_pcp: false,
+                enable_nat_pmp: true,
+                protocol: portmapper::Protocol::Udp,
+            });
+            client.probe().await??;
+            client.update_local_port(local_port);
+            let addr = wait_for_external(&client, Duration::from_secs(3)).await?;
+            anyhow::Ok(addr)
+        })?
+        .await??;
+
+    // Change NAT mode after a mapping exists. The fix in the nat module
+    // and the dedicated portmap table should mean the DNAT rule
+    // survives.
+    home.set_nat_mode(Nat::Cgnat).await?;
+
+    let payload = b"after-nat-mode-change";
+    let jh = dev.spawn(move |_| async move {
+        let sock = UdpSocket::bind(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, local_port.get()))
+            .await
+            .context("dev bind")?;
+        let mut buf = [0u8; 64];
+        let (n, _from) = tokio::time::timeout(Duration::from_secs(2), sock.recv_from(&mut buf))
+            .await
+            .context("dev recv timeout")?
+            .context("dev recv")?;
+        anyhow::Ok(buf[..n].to_vec())
+    })?;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    watcher
+        .spawn(move |_| async move {
+            let sock = UdpSocket::bind(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0))
+                .await
+                .context("watcher bind")?;
+            sock.send_to(payload, external)
+                .await
+                .context("watcher send")?;
+            anyhow::Ok(())
+        })?
+        .await??;
+
+    let got = jh.await??;
+    assert_eq!(got.as_slice(), payload);
+    Ok(())
+}
+
+/// `Router::set_portmap(None)` drops the server and removes the
+/// nftables table, so a later probe from the same client finds no
+/// portmap protocol.
+#[tokio::test(flavor = "current_thread")]
+#[traced_test]
+async fn set_portmap_disables_server_at_runtime() -> Result<()> {
+    check_caps()?;
+    let lab = Lab::new().await?;
+    let dc = lab.add_router("dc").build().await?;
+    let home = lab
+        .add_router("home")
+        .upstream(dc.id())
+        .nat(Nat::Home)
+        .portmap(PortmapMode::NatPmpAndPcp)
+        .build()
+        .await?;
+    let dev = lab
+        .add_device("dev")
+        .iface("eth0", home.id())
+        .build()
+        .await?;
+
+    let first = dev
+        .spawn(move |_| async move {
+            let client = portmapper::Client::new(portmapper::Config::default());
+            let probe = client.probe().await??;
+            anyhow::Ok(probe)
+        })?
+        .await??;
+    assert!(first.nat_pmp && first.pcp, "first probe: {first}");
+
+    home.set_portmap(PortmapMode::None).await?;
+
+    let second = dev
+        .spawn(move |_| async move {
+            let client = portmapper::Client::new(portmapper::Config::default());
+            let probe = client.probe().await??;
+            anyhow::Ok(probe)
+        })?
+        .await??;
+    assert!(
+        !second.nat_pmp && !second.pcp && !second.upnp,
+        "portmap still advertised after shutdown: {second}"
+    );
+    Ok(())
+}
+
 /// NAT-PMP delete: a map request with lifetime=0 removes the previous
 /// mapping so inbound traffic stops reaching the device.
 #[tokio::test(flavor = "current_thread")]
