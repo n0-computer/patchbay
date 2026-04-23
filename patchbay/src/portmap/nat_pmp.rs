@@ -14,12 +14,9 @@
 
 use std::{net::Ipv4Addr, num::NonZeroU16, time::Duration};
 
-use tracing::{debug, trace, warn};
+use tracing::{debug, trace};
 
-use super::{
-    nft,
-    registry::{AllocOutcome, MapProto},
-};
+use super::registry::{AllocOutcome, MapProto};
 
 /// NAT-PMP wire-format version byte.
 pub(crate) const VERSION: u8 = 0;
@@ -215,14 +212,9 @@ async fn handle_map(
     if requested_lifetime == 0 {
         let mut registry = ctx.registry.lock().await;
         registry.remove_by_internal(proto, client_ip, local);
-        let rules_snapshot: Vec<_> = registry.iter().cloned().collect();
-        drop(registry);
-        if let Err(e) =
-            nft::apply_portmap_rules(&ctx.netns, &ctx.ns, ctx.wan_ip, &rules_snapshot).await
-        {
-            warn!(error = %e, "nat-pmp: failed to apply portmap rules on delete");
-        }
-        // RFC 6886 section 3.3: reply with the requested local port, external port 0, lifetime 0.
+        ctx.apply_after_mutation(&mut registry, None).await.ok();
+        // RFC 6886 section 3.3: reply with the requested local port,
+        // external port 0, lifetime 0.
         return encode_map_response(
             proto,
             ResultCode::Success,
@@ -248,15 +240,36 @@ async fn handle_map(
             (ResultCode::OutOfResources, 0, 0)
         }
     };
-    let rules_snapshot: Vec<_> = registry.iter().cloned().collect();
+
+    // Apply while still holding the registry lock so two concurrent
+    // requests never race their apply calls. `created` tells
+    // `apply_after_mutation` which entry to roll back on nft failure.
+    let created_key = if let AllocOutcome::Created(ref m) = outcome {
+        Some(super::registry::MappingKey {
+            proto: m.proto,
+            external_port: m.external_port,
+        })
+    } else {
+        None
+    };
+    let applied = if matches!(outcome, AllocOutcome::Created(_) | AllocOutcome::Renewed(_)) {
+        ctx.apply_after_mutation(&mut registry, created_key).await
+    } else {
+        Ok(())
+    };
     drop(registry);
 
-    if matches!(outcome, AllocOutcome::Created(_) | AllocOutcome::Renewed(_)) {
-        if let Err(e) =
-            nft::apply_portmap_rules(&ctx.netns, &ctx.ns, ctx.wan_ip, &rules_snapshot).await
-        {
-            warn!(error = %e, "nat-pmp: failed to apply portmap rules");
-        }
+    if applied.is_err() && created_key.is_some() {
+        // Apply failed and the mapping was rolled back; report as
+        // OutOfResources so the client retries later.
+        return encode_map_response(
+            proto,
+            ResultCode::OutOfResources,
+            ctx.epoch_time(),
+            local.get(),
+            0,
+            0,
+        );
     }
 
     encode_map_response(

@@ -31,6 +31,14 @@ use crate::netns::NetnsManager;
 /// recommendation from RFC 6886 section 3.3.
 const MAX_LIFETIME_SECS: u64 = 2 * 60 * 60;
 
+/// Period at which the background reaper sweeps expired mappings.
+///
+/// Mappings carry a client-requested lifetime clamped by
+/// [`MAX_LIFETIME_SECS`]. The reaper removes any mapping whose deadline
+/// has elapsed and re-renders the nftables table so the DNAT rules
+/// match the current registry.
+const REAPER_INTERVAL: Duration = Duration::from_secs(30);
+
 /// Shared state threaded through every protocol handler.
 ///
 /// `epoch` is the router-local epoch zero: response `epoch_time` fields
@@ -54,6 +62,32 @@ impl ServerContext {
     pub(super) fn epoch_time(&self) -> u32 {
         self.epoch.elapsed().as_secs().min(u64::from(u32::MAX)) as u32
     }
+
+    /// Snapshots the mapping set while still holding the registry lock
+    /// and applies it to nftables. Holding the lock across the apply
+    /// serializes concurrent allocate+apply sequences so an older
+    /// snapshot cannot overwrite a newer one.
+    ///
+    /// On `nft` failure a just-created mapping is rolled back so
+    /// clients that receive an error do not find an orphan entry in
+    /// the registry later.
+    pub(super) async fn apply_after_mutation(
+        &self,
+        registry: &mut PortmapRegistry,
+        created: Option<super::registry::MappingKey>,
+    ) -> Result<()> {
+        let snapshot: Vec<_> = registry.iter().cloned().collect();
+        match nft::apply_portmap_rules(&self.netns, &self.ns, self.wan_ip, &snapshot).await {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                warn!(error = %e, "portmap: nft apply failed; rolling back");
+                if let Some(key) = created {
+                    registry.remove(key);
+                }
+                Err(e)
+            }
+        }
+    }
 }
 
 /// Cloneable handle to a per-router portmap server.
@@ -71,6 +105,7 @@ struct PortmapServerInner {
     wan_ip: Ipv4Addr,
     _task: AbortOnDropHandle<()>,
     _upnp_tasks: Vec<AbortOnDropHandle<()>>,
+    _reaper: AbortOnDropHandle<()>,
 }
 
 impl std::fmt::Debug for PortmapServer {
@@ -127,6 +162,8 @@ impl PortmapServer {
             upnp_tasks.push(AbortOnDropHandle::new(http));
         }
 
+        let reaper = spawn_reaper(&netns, &ns, ctx)?;
+
         Ok(Self {
             inner: Arc::new(PortmapServerInner {
                 cfg,
@@ -136,6 +173,7 @@ impl PortmapServer {
                 wan_ip,
                 _task: task,
                 _upnp_tasks: upnp_tasks,
+                _reaper: reaper,
             }),
         })
     }
@@ -181,6 +219,32 @@ fn spawn_dispatch(
         dispatch_loop(socket, ctx, cfg).await;
     });
 
+    Ok(AbortOnDropHandle::new(handle))
+}
+
+fn spawn_reaper(
+    netns: &Arc<NetnsManager>,
+    ns: &str,
+    ctx: Arc<ServerContext>,
+) -> Result<AbortOnDropHandle<()>> {
+    let rt = netns.rt_handle_for(ns)?;
+    let handle = rt.spawn(async move {
+        let mut ticker = tokio::time::interval(REAPER_INTERVAL);
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        // Burn the immediate first tick so we wait one REAPER_INTERVAL
+        // before the first sweep. Reduces noise at startup.
+        ticker.tick().await;
+        loop {
+            ticker.tick().await;
+            let mut registry = ctx.registry.lock().await;
+            let reaped = registry.reap_expired(Instant::now());
+            if reaped.is_empty() {
+                continue;
+            }
+            debug!(n = reaped.len(), "portmap: reaped expired mappings");
+            ctx.apply_after_mutation(&mut registry, None).await.ok();
+        }
+    });
     Ok(AbortOnDropHandle::new(handle))
 }
 

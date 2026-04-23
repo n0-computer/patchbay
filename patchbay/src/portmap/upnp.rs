@@ -38,7 +38,6 @@ use tokio::{
 use tracing::{debug, trace, warn};
 
 use super::{
-    nft,
     registry::{AllocOutcome, MapProto, MappingKey},
     server::ServerContext,
 };
@@ -572,32 +571,36 @@ async fn handle_add_port_mapping(
 
     let preferred = NonZeroU16::new(external_port);
 
-    let (outcome, rules_snapshot) = {
-        let mut registry = ctx.registry.lock().await;
-        let outcome = registry.allocate(
-            protocol,
-            internal_client,
-            internal_local,
-            if pick_any { None } else { preferred },
-            lifetime,
-            None,
-        );
-        let rules: Vec<_> = registry.iter().cloned().collect();
-        (outcome, rules)
-    };
+    let mut registry = ctx.registry.lock().await;
+    let outcome = registry.allocate(
+        protocol,
+        internal_client,
+        internal_local,
+        if pick_any { None } else { preferred },
+        lifetime,
+        None,
+    );
 
     match outcome {
         AllocOutcome::Created(ref m) | AllocOutcome::Renewed(ref m) => {
-            if let Err(e) =
-                nft::apply_portmap_rules(&ctx.netns, &ctx.ns, ctx.wan_ip, &rules_snapshot).await
-            {
-                warn!(error = %e, "upnp: apply nft");
+            let created_key = if let AllocOutcome::Created(_) = &outcome {
+                Some(MappingKey {
+                    proto: m.proto,
+                    external_port: m.external_port,
+                })
+            } else {
+                None
+            };
+            let applied = ctx.apply_after_mutation(&mut registry, created_key).await;
+            let external_port_str = m.external_port.get().to_string();
+            drop(registry);
+            if applied.is_err() {
                 return http_xml_response(soap_fault(500, "Action failed"));
             }
             if pick_any {
                 http_xml_response(soap_success(
                     "AddAnyPortMapping",
-                    &[("NewReservedPort", &m.external_port.get().to_string())],
+                    &[("NewReservedPort", &external_port_str)],
                 ))
             } else {
                 http_xml_response(soap_success("AddPortMapping", &[]))
@@ -630,20 +633,9 @@ async fn handle_delete_port_mapping(body: &str, ctx: &ServerContext, peer: Ipv4A
         proto: protocol,
         external_port: external_nz,
     };
-    let (authorized, removed, rules_snapshot) = {
-        let mut registry = ctx.registry.lock().await;
-        let owner = registry.get(key).map(|m| m.internal_ip);
-        let authorized = owner == Some(peer);
-        let removed = if authorized {
-            registry.remove(key).is_some()
-        } else {
-            false
-        };
-        let rules: Vec<_> = registry.iter().cloned().collect();
-        (authorized, removed, rules)
-    };
-
-    if !authorized {
+    let mut registry = ctx.registry.lock().await;
+    let owner = registry.get(key).map(|m| m.internal_ip);
+    if owner != Some(peer) {
         debug!(
             %peer,
             ext = external_nz.get(),
@@ -651,12 +643,12 @@ async fn handle_delete_port_mapping(body: &str, ctx: &ServerContext, peer: Ipv4A
         );
         return http_xml_response(soap_fault(606, "Action not authorized"));
     }
-    if !removed {
+    if registry.remove(key).is_none() {
         return http_xml_response(soap_fault(714, "NoSuchEntryInArray"));
     }
-    if let Err(e) = nft::apply_portmap_rules(&ctx.netns, &ctx.ns, ctx.wan_ip, &rules_snapshot).await
-    {
-        warn!(error = %e, "upnp: apply nft on delete");
+    let applied = ctx.apply_after_mutation(&mut registry, None).await;
+    drop(registry);
+    if applied.is_err() {
         return http_xml_response(soap_fault(500, "Action failed"));
     }
     http_xml_response(soap_success("DeletePortMapping", &[]))
