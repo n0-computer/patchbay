@@ -35,7 +35,6 @@ enum ResultCode {
     UnsupportedVersion = 1,
     NotAuthorizedOrRefused = 2,
     OutOfResources = 4,
-    UnsupportedOpcode = 5,
 }
 
 #[repr(u8)]
@@ -193,13 +192,16 @@ async fn handle_map(
     external_port: u16,
     requested_lifetime: u32,
 ) -> Vec<u8> {
-    // Local port 0 is an error condition for maps per RFC 6886.
+    // Local port 0 is not a valid map request per RFC 6886 section 3.3.
+    // No specific result code is defined, so use NotAuthorizedOrRefused:
+    // UnsupportedOpcode would mislead clients into thinking the server
+    // does not implement Map at all.
     let local = match NonZeroU16::new(local_port) {
         Some(p) => p,
         None => {
             return encode_map_response(
                 proto,
-                ResultCode::UnsupportedOpcode,
+                ResultCode::NotAuthorizedOrRefused,
                 ctx.epoch_time(),
                 local_port,
                 0,

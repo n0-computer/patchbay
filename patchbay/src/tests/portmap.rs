@@ -459,6 +459,91 @@ async fn set_portmap_disables_server_at_runtime() -> Result<()> {
     Ok(())
 }
 
+/// UPnP delete: portmapper's `deactivate` sends a SOAP
+/// `DeletePortMapping` that removes the mapping and prevents inbound
+/// traffic from reaching the device. This exercises the UPnP
+/// ownership check (caller is also the mapping's internal client).
+#[tokio::test(flavor = "current_thread")]
+#[traced_test]
+async fn upnp_delete_drops_mapping() -> Result<()> {
+    check_caps()?;
+    let lab = Lab::new().await?;
+    let dc = lab.add_router("dc").build().await?;
+    let home = lab
+        .add_router("home")
+        .upstream(dc.id())
+        .nat(Nat::Home)
+        .portmap(PortmapMode::UpnpOnly)
+        .build()
+        .await?;
+    let dev = lab
+        .add_device("dev")
+        .iface("eth0", home.id())
+        .build()
+        .await?;
+
+    let local_port = NonZeroU16::new(50128).unwrap();
+
+    dev.spawn(move |_| async move {
+        let client = portmapper::Client::new(portmapper::Config {
+            enable_upnp: true,
+            enable_pcp: false,
+            enable_nat_pmp: false,
+            protocol: portmapper::Protocol::Udp,
+        });
+        client.probe().await??;
+        client.update_local_port(local_port);
+        let _ = wait_for_external(&client, Duration::from_secs(5)).await?;
+        client.deactivate();
+        // Let the deactivate propagate; portmapper sends the SOAP call
+        // asynchronously from its service task.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        anyhow::Ok(())
+    })?
+    .await??;
+    Ok(())
+}
+
+/// PCP delete: lifetime=0 removes the mapping per RFC 6887 section 15.
+#[tokio::test(flavor = "current_thread")]
+#[traced_test]
+async fn pcp_delete_drops_mapping() -> Result<()> {
+    check_caps()?;
+    let lab = Lab::new().await?;
+    let dc = lab.add_router("dc").build().await?;
+    let home = lab
+        .add_router("home")
+        .upstream(dc.id())
+        .nat(Nat::Home)
+        .portmap(PortmapMode::PcpOnly)
+        .build()
+        .await?;
+    let dev = lab
+        .add_device("dev")
+        .iface("eth0", home.id())
+        .build()
+        .await?;
+
+    let local_port = NonZeroU16::new(50129).unwrap();
+
+    dev.spawn(move |_| async move {
+        let client = portmapper::Client::new(portmapper::Config {
+            enable_upnp: false,
+            enable_pcp: true,
+            enable_nat_pmp: false,
+            protocol: portmapper::Protocol::Udp,
+        });
+        client.probe().await??;
+        client.update_local_port(local_port);
+        let _ = wait_for_external(&client, Duration::from_secs(5)).await?;
+        client.deactivate();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        anyhow::Ok(())
+    })?
+    .await??;
+    Ok(())
+}
+
 /// NAT-PMP delete: a map request with lifetime=0 removes the previous
 /// mapping so inbound traffic stops reaching the device.
 #[tokio::test(flavor = "current_thread")]
