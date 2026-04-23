@@ -24,7 +24,7 @@ use tokio::{net::UdpSocket, sync::Mutex};
 use tokio_util::task::AbortOnDropHandle;
 use tracing::{debug, warn};
 
-use super::{config::PortmapConfig, nat_pmp, nft, pcp, registry::PortmapRegistry};
+use super::{config::PortmapConfig, nat_pmp, nft, pcp, registry::PortmapRegistry, upnp};
 use crate::netns::NetnsManager;
 
 /// Maximum lifetime a client may request, in seconds. Mirrors the
@@ -44,6 +44,7 @@ struct PortmapServerInner {
     ns: Arc<str>,
     wan_ip: Ipv4Addr,
     _task: AbortOnDropHandle<()>,
+    _upnp_tasks: Vec<AbortOnDropHandle<()>>,
 }
 
 impl std::fmt::Debug for PortmapServer {
@@ -80,15 +81,25 @@ impl PortmapServer {
             .await
             .ok();
 
-        let task = spawn_dispatch(
-            netns.clone(),
-            ns.clone(),
-            cfg,
-            registry.clone(),
-            downstream_gw,
+        let ctx = Arc::new(nat_pmp::Context {
+            registry: registry.clone(),
+            netns: netns.clone(),
+            ns: ns.clone(),
             wan_ip,
             downstream_cidr,
-        )?;
+            epoch: Instant::now(),
+            max_lifetime: Duration::from_secs(MAX_LIFETIME_SECS),
+        });
+
+        let task = spawn_dispatch(netns.clone(), ns.clone(), cfg, ctx.clone(), downstream_gw)?;
+
+        let mut upnp_tasks = Vec::new();
+        if cfg.enable_upnp {
+            let (ssdp, http) =
+                upnp::spawn(netns.clone(), ns.clone(), ctx.clone(), downstream_gw).await?;
+            upnp_tasks.push(AbortOnDropHandle::new(ssdp));
+            upnp_tasks.push(AbortOnDropHandle::new(http));
+        }
 
         Ok(Self {
             inner: Arc::new(PortmapServerInner {
@@ -98,6 +109,7 @@ impl PortmapServer {
                 ns,
                 wan_ip,
                 _task: task,
+                _upnp_tasks: upnp_tasks,
             }),
         })
     }
@@ -126,10 +138,8 @@ fn spawn_dispatch(
     netns: Arc<NetnsManager>,
     ns: Arc<str>,
     cfg: PortmapConfig,
-    registry: Arc<Mutex<PortmapRegistry>>,
+    ctx: Arc<nat_pmp::Context>,
     downstream_gw: Ipv4Addr,
-    wan_ip: Ipv4Addr,
-    downstream_cidr: Ipv4Net,
 ) -> Result<AbortOnDropHandle<()>> {
     let std_socket: std::net::UdpSocket = netns.run_closure_in(&ns, move || {
         let addr = SocketAddrV4::new(downstream_gw, nat_pmp::SERVER_PORT);
@@ -140,15 +150,6 @@ fn spawn_dispatch(
     })?;
 
     let rt = netns.rt_handle_for(&ns)?;
-    let ctx = Arc::new(nat_pmp::Context {
-        registry,
-        netns: netns.clone(),
-        ns: ns.clone(),
-        wan_ip,
-        downstream_cidr,
-        epoch: Instant::now(),
-        max_lifetime: Duration::from_secs(MAX_LIFETIME_SECS),
-    });
     let handle = rt.spawn(async move {
         let socket = match UdpSocket::from_std(std_socket) {
             Ok(s) => s,

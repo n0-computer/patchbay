@@ -30,3 +30,5 @@ pub(crate) mod pcp;
 pub(crate) mod registry;
 #[allow(dead_code)]
 pub(crate) mod server;
+#[allow(dead_code)]
+pub(crate) mod upnp;
