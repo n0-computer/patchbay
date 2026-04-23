@@ -20,10 +20,13 @@
 pub use config::{PortmapConfig, PortmapMode};
 
 mod config;
-// Internal types are consumed by the nftables and server-side code in later
-// steps. The skeleton allows dead code so the registry can land as a
-// reviewable unit with unit tests before its consumers exist.
+#[allow(dead_code)]
+pub(crate) mod nft;
+// The registry is consumed by the nft module and by protocol servers. Its
+// public surface spans more than the nft module uses today; the allow will
+// go away once Step 3 wires in the NAT-PMP server.
 #[allow(dead_code)]
 pub(crate) mod registry;
+// Protocol-specific wire handling lands in later steps.
 #[allow(dead_code)]
 pub(crate) mod wire;
