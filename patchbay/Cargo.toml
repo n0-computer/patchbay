@@ -37,4 +37,5 @@ ctor = "0.6"
 futures-buffered = "0.2"
 hickory-resolver = { version = "0.25", default-features = false, features = ["system-config", "tokio"] }
 n0-tracing-test = "0.3.0"
+portmapper = { version = "0.16", default-features = false }
 testdir = "0.9"

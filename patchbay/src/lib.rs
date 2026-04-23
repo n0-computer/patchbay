@@ -221,6 +221,8 @@ mod netns;
 pub(crate) mod nft;
 #[path = "tracing.rs"]
 mod ns_tracing;
+/// Port mapping server: UPnP IGD, NAT-PMP, and PCP.
+pub mod portmap;
 mod qdisc;
 /// Router handle, builder, and presets.
 pub(crate) mod router;
@@ -246,6 +248,7 @@ pub use lab::{
     NatV6Mode, OutDir, Region, RegionLink, TestGuard,
 };
 pub use metrics::MetricsBuilder;
+pub use portmap::{PortmapConfig, PortmapMode};
 pub use router::{Router, RouterBuilder, RouterIface, RouterPreset};
 
 pub use crate::{

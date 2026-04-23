@@ -47,6 +47,7 @@ mod mtu;
 mod nat;
 mod nat64;
 mod nat_rebind;
+mod portmap;
 mod preset;
 mod region;
 mod route;

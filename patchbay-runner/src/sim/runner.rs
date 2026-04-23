@@ -1039,16 +1039,8 @@ fn parse_step_failure(raw: &str) -> Option<StepFailureInfo> {
         match k {
             "index" => index = v.parse::<usize>().ok(),
             "action" => action = Some(v.to_string()),
-            "id" => {
-                if !v.is_empty() {
-                    id = Some(v.to_string());
-                }
-            }
-            "device" => {
-                if !v.is_empty() {
-                    device = Some(v.to_string());
-                }
-            }
+            "id" if !v.is_empty() => id = Some(v.to_string()),
+            "device" if !v.is_empty() => device = Some(v.to_string()),
             _ => {}
         }
     }
