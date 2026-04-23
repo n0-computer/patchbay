@@ -24,7 +24,7 @@ use tokio::{net::UdpSocket, sync::Mutex};
 use tokio_util::task::AbortOnDropHandle;
 use tracing::{debug, warn};
 
-use super::{config::PortmapConfig, nat_pmp, nft, registry::PortmapRegistry};
+use super::{config::PortmapConfig, nat_pmp, nft, pcp, registry::PortmapRegistry};
 use crate::netns::NetnsManager;
 
 /// Maximum lifetime a client may request, in seconds. Mirrors the
@@ -181,16 +181,15 @@ async fn dispatch_loop(socket: UdpSocket, ctx: Arc<nat_pmp::Context>, cfg: Portm
         };
         let packet = &buf[..len];
         let version = packet.first().copied().unwrap_or(u8::MAX);
+        let SocketAddr::V4(src_v4) = src else {
+            continue;
+        };
+        let client_ip = *src_v4.ip();
         let response = match version {
             nat_pmp::VERSION if cfg.enable_nat_pmp => {
-                let SocketAddr::V4(src_v4) = src else {
-                    continue;
-                };
-                nat_pmp::handle_request(&ctx, *src_v4.ip(), packet).await
+                nat_pmp::handle_request(&ctx, client_ip, packet).await
             }
-            // PCP wire version is 2; handled in a later step. For now the
-            // server silently drops PCP packets when PCP is disabled and
-            // responds with "unsupported version" once PCP is added.
+            pcp::VERSION if cfg.enable_pcp => pcp::handle_request(&ctx, client_ip, packet).await,
             _ => None,
         };
         if let Some(bytes) = response {

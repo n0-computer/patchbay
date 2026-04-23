@@ -123,6 +123,99 @@ async fn nat_pmp_map_udp_roundtrip() -> Result<()> {
     Ok(())
 }
 
+/// PCP probe + map: the device requests a TCP mapping over PCP and an
+/// inbound TCP connection to the router's WAN IP reaches the device.
+#[tokio::test(flavor = "current_thread")]
+#[traced_test]
+async fn pcp_map_tcp_roundtrip() -> Result<()> {
+    check_caps()?;
+    let lab = Lab::new().await?;
+    let dc = lab.add_router("dc").build().await?;
+    let home = lab
+        .add_router("home")
+        .upstream(dc.id())
+        .nat(Nat::Home)
+        .portmap(PortmapMode::PcpOnly)
+        .build()
+        .await?;
+    let dev = lab
+        .add_device("dev")
+        .iface("eth0", home.id())
+        .build()
+        .await?;
+    let watcher = lab
+        .add_device("watcher")
+        .iface("eth0", dc.id())
+        .build()
+        .await?;
+
+    let home_wan = home.uplink_ip().context("no home wan ip")?;
+    let local_port = NonZeroU16::new(50125).unwrap();
+
+    let mapping = dev
+        .spawn(move |_| async move {
+            let client = portmapper::Client::new(portmapper::Config {
+                enable_upnp: false,
+                enable_pcp: true,
+                enable_nat_pmp: false,
+                protocol: portmapper::Protocol::Tcp,
+            });
+            let probe = client.probe().await??;
+            if !probe.pcp {
+                anyhow::bail!("portmapper did not detect PCP: {probe}");
+            }
+            client.update_local_port(local_port);
+            let addr = wait_for_external(&client, Duration::from_secs(3)).await?;
+            anyhow::Ok(addr)
+        })?
+        .await??;
+    assert_eq!(*mapping.ip(), home_wan);
+
+    // Bind a TCP listener on the mapped local port.
+    let payload = b"pcp-probe";
+    let jh = dev.spawn(move |_| async move {
+        use tokio::io::AsyncReadExt;
+        let listener = tokio::net::TcpListener::bind(SocketAddrV4::new(
+            Ipv4Addr::UNSPECIFIED,
+            local_port.get(),
+        ))
+        .await
+        .context("dev tcp listen")?;
+        let (mut stream, _peer) = tokio::time::timeout(Duration::from_secs(2), listener.accept())
+            .await
+            .context("dev accept timeout")?
+            .context("dev accept")?;
+        let mut buf = [0u8; 64];
+        let n = tokio::time::timeout(Duration::from_secs(2), stream.read(&mut buf))
+            .await
+            .context("dev read timeout")?
+            .context("dev read")?;
+        anyhow::Ok(buf[..n].to_vec())
+    })?;
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let external = mapping;
+    watcher
+        .spawn(move |_| async move {
+            use tokio::io::AsyncWriteExt;
+            let mut stream = tokio::time::timeout(
+                Duration::from_secs(2),
+                tokio::net::TcpStream::connect(external),
+            )
+            .await
+            .context("watcher connect timeout")?
+            .context("watcher connect")?;
+            stream.write_all(payload).await.context("watcher write")?;
+            anyhow::Ok(())
+        })?
+        .await??;
+
+    let got = jh.await??;
+    assert_eq!(got.as_slice(), payload);
+    Ok(())
+}
+
 /// NAT-PMP delete: a map request with lifetime=0 removes the previous
 /// mapping so inbound traffic stops reaching the device.
 #[tokio::test(flavor = "current_thread")]

@@ -25,6 +25,8 @@ pub(crate) mod nat_pmp;
 #[allow(dead_code)]
 pub(crate) mod nft;
 #[allow(dead_code)]
+pub(crate) mod pcp;
+#[allow(dead_code)]
 pub(crate) mod registry;
 #[allow(dead_code)]
 pub(crate) mod server;
