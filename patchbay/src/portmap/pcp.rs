@@ -79,6 +79,13 @@ struct MapData {
 }
 
 #[derive(Debug)]
+struct Decoded {
+    /// Client IP as declared in the PCP header bytes 8-23, IPv4-mapped.
+    client_addr: Ipv6Addr,
+    request: Request,
+}
+
+#[derive(Debug)]
 enum Request {
     Announce,
     Map {
@@ -93,14 +100,17 @@ enum Request {
 
 /// Decodes a PCP request. Returns `None` on malformed packets so the
 /// server can silently drop them per RFC 6887 section 8.2.
-fn decode(buf: &[u8]) -> Option<Request> {
+fn decode(buf: &[u8]) -> Option<Decoded> {
     if buf.len() < HEADER_SIZE || buf[0] != VERSION {
         return None;
     }
     let opcode = Opcode::from_repr(buf[1])?;
     let lifetime_seconds = u32::from_be_bytes([buf[4], buf[5], buf[6], buf[7]]);
-    match opcode {
-        Opcode::Announce => Some(Request::Announce),
+    let mut client_bytes = [0u8; 16];
+    client_bytes.copy_from_slice(&buf[8..24]);
+    let client_addr = Ipv6Addr::from(client_bytes);
+    let request = match opcode {
+        Opcode::Announce => Request::Announce,
         Opcode::Map => {
             if buf.len() < HEADER_SIZE + MAP_DATA_SIZE {
                 return None;
@@ -114,33 +124,43 @@ fn decode(buf: &[u8]) -> Option<Request> {
             let mut addr_bytes = [0u8; 16];
             addr_bytes.copy_from_slice(&data[20..36]);
             let external_address = Ipv6Addr::from(addr_bytes);
-            let protocol = match proto_byte {
-                PROTO_UDP => MapProto::Udp,
-                PROTO_TCP => MapProto::Tcp,
-                _ => {
-                    return Some(Request::UnsupportedProtocol {
-                        data: MapData {
-                            nonce,
-                            protocol: MapProto::Udp,
-                            local_port,
-                            external_port,
-                            external_address,
-                        },
-                    });
-                }
-            };
-            Some(Request::Map {
-                lifetime_seconds,
-                data: MapData {
-                    nonce,
-                    protocol,
-                    local_port,
-                    external_port,
-                    external_address,
+            match proto_byte {
+                PROTO_UDP => Request::Map {
+                    lifetime_seconds,
+                    data: MapData {
+                        nonce,
+                        protocol: MapProto::Udp,
+                        local_port,
+                        external_port,
+                        external_address,
+                    },
                 },
-            })
+                PROTO_TCP => Request::Map {
+                    lifetime_seconds,
+                    data: MapData {
+                        nonce,
+                        protocol: MapProto::Tcp,
+                        local_port,
+                        external_port,
+                        external_address,
+                    },
+                },
+                _ => Request::UnsupportedProtocol {
+                    data: MapData {
+                        nonce,
+                        protocol: MapProto::Udp,
+                        local_port,
+                        external_port,
+                        external_address,
+                    },
+                },
+            }
         }
-    }
+    };
+    Some(Decoded {
+        client_addr,
+        request,
+    })
 }
 
 /// Encodes a response header. The opcode-specific data follows the
@@ -206,7 +226,10 @@ pub(crate) async fn handle_request(
     client_ip: Ipv4Addr,
     packet: &[u8],
 ) -> Option<Vec<u8>> {
-    let request = match decode(packet) {
+    let Decoded {
+        client_addr,
+        request,
+    } = match decode(packet) {
         Some(r) => r,
         None => {
             trace!(?client_ip, len = packet.len(), "pcp: invalid request");
@@ -214,18 +237,43 @@ pub(crate) async fn handle_request(
         }
     };
 
+    let epoch = ctx.epoch_time();
+
+    // RFC 6887 section 8.1: the client address in the PCP header MUST
+    // match the packet's source IP (or be its IPv4-mapped form). If it
+    // does not, respond with AddressMismatch.
+    if client_addr != client_ip.to_ipv6_mapped() {
+        debug!(
+            ?client_ip,
+            ?client_addr,
+            "pcp: client_addr header does not match source IP"
+        );
+        return Some(match request {
+            Request::Announce => encode_announce_response(ResultCode::AddressMismatch, epoch),
+            Request::Map { data, .. } | Request::UnsupportedProtocol { data, .. } => {
+                encode_map_response(MapResponse {
+                    result: ResultCode::AddressMismatch,
+                    lifetime_seconds: 0,
+                    epoch_time: epoch,
+                    nonce: data.nonce,
+                    protocol: data.protocol,
+                    local_port: data.local_port,
+                    external_port: 0,
+                    external_address: Ipv4Addr::UNSPECIFIED,
+                })
+            }
+        });
+    }
+
     if !ctx.downstream_cidr.contains(&client_ip) {
         debug!(?client_ip, cidr = %ctx.downstream_cidr, "pcp: client not on downstream subnet");
         return Some(match request {
-            Request::Announce => encode_announce_response(
-                ResultCode::NotAuthorized,
-                ctx.epoch.elapsed().as_secs() as u32,
-            ),
+            Request::Announce => encode_announce_response(ResultCode::NotAuthorized, epoch),
             Request::Map { data, .. } | Request::UnsupportedProtocol { data, .. } => {
                 encode_map_response(MapResponse {
                     result: ResultCode::NotAuthorized,
                     lifetime_seconds: 0,
-                    epoch_time: ctx.epoch.elapsed().as_secs() as u32,
+                    epoch_time: epoch,
                     nonce: data.nonce,
                     protocol: data.protocol,
                     local_port: data.local_port,
@@ -237,14 +285,11 @@ pub(crate) async fn handle_request(
     }
 
     match request {
-        Request::Announce => Some(encode_announce_response(
-            ResultCode::Success,
-            ctx.epoch.elapsed().as_secs() as u32,
-        )),
+        Request::Announce => Some(encode_announce_response(ResultCode::Success, epoch)),
         Request::UnsupportedProtocol { data, .. } => Some(encode_map_response(MapResponse {
             result: ResultCode::UnsuppProtocol,
             lifetime_seconds: 0,
-            epoch_time: ctx.epoch.elapsed().as_secs() as u32,
+            epoch_time: epoch,
             nonce: data.nonce,
             protocol: data.protocol,
             local_port: data.local_port,
@@ -389,7 +434,7 @@ mod tests {
         let mut buf = [0u8; HEADER_SIZE];
         buf[0] = VERSION;
         buf[1] = Opcode::Announce as u8;
-        match decode(&buf).unwrap() {
+        match decode(&buf).unwrap().request {
             Request::Announce => (),
             other => panic!("{other:?}"),
         }
@@ -401,12 +446,17 @@ mod tests {
         buf[0] = VERSION;
         buf[1] = Opcode::Map as u8;
         buf[4..8].copy_from_slice(&300u32.to_be_bytes());
+        // client_addr = 10.0.0.5 IPv4-mapped
+        let client = Ipv4Addr::new(10, 0, 0, 5);
+        buf[8..24].copy_from_slice(&client.to_ipv6_mapped().octets());
         let data = &mut buf[HEADER_SIZE..];
         data[0..12].copy_from_slice(&[1u8; 12]);
         data[12] = PROTO_UDP;
         data[16..18].copy_from_slice(&1234u16.to_be_bytes());
         data[18..20].copy_from_slice(&5678u16.to_be_bytes());
-        match decode(&buf).unwrap() {
+        let decoded = decode(&buf).unwrap();
+        assert_eq!(decoded.client_addr, client.to_ipv6_mapped());
+        match decoded.request {
             Request::Map {
                 lifetime_seconds,
                 data,
@@ -443,7 +493,7 @@ mod tests {
         buf[0] = VERSION;
         buf[1] = Opcode::Map as u8;
         buf[HEADER_SIZE + 12] = 99; // unknown protocol
-        match decode(&buf).unwrap() {
+        match decode(&buf).unwrap().request {
             Request::UnsupportedProtocol { .. } => (),
             other => panic!("{other:?}"),
         }

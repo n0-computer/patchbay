@@ -32,6 +32,7 @@ use anyhow::{Context as _, Result};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, UdpSocket},
+    sync::Semaphore,
     task::JoinHandle,
 };
 use tracing::{debug, trace, warn};
@@ -68,6 +69,21 @@ const SCPD_URL: &str = "/WANIPCn.xml";
 
 /// Device description URL served by the HTTP server.
 const ROOT_DESC_URL: &str = "/rootDesc.xml";
+
+/// Upper bound on an HTTP request body. Generously sized for SOAP.
+/// Bodies above this are rejected with HTTP 413 before they are buffered.
+const MAX_BODY_SIZE: usize = 64 * 1024;
+
+/// Per-request header read timeout. Defends against slowloris clients
+/// that open a TCP connection and dribble bytes.
+const HEADER_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Per-request body read timeout.
+const BODY_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Cap on concurrent HTTP connections. Accepted connections beyond this
+/// count wait on a semaphore; no per-source fairness, just a backstop.
+const MAX_HTTP_CONNECTIONS: usize = 128;
 
 /// Spawns the UPnP IGD server tasks and returns their abort handles.
 pub(crate) async fn spawn(
@@ -208,6 +224,7 @@ fn search_target_matches(target: Option<&str>) -> bool {
 }
 
 async fn run_http(listener: TcpListener, ctx: Arc<ServerContext>) {
+    let connection_limit = Arc::new(Semaphore::new(MAX_HTTP_CONNECTIONS));
     loop {
         let (stream, peer) = match listener.accept().await {
             Ok(v) => v,
@@ -216,9 +233,27 @@ async fn run_http(listener: TcpListener, ctx: Arc<ServerContext>) {
                 continue;
             }
         };
+        // Reject IPv6 peers early: the advertised LOCATION is IPv4 only.
+        let peer_v4 = match peer {
+            std::net::SocketAddr::V4(v) => *v.ip(),
+            std::net::SocketAddr::V6(_) => continue,
+        };
+        let permit = match connection_limit.clone().try_acquire_owned() {
+            Ok(p) => p,
+            Err(_) => {
+                debug!(%peer, "upnp http: connection limit reached, rejecting");
+                continue;
+            }
+        };
         let ctx = ctx.clone();
+        // The accept task is wrapped in AbortOnDropHandle at the server
+        // level; the per-connection handler runs as a detached
+        // `tokio::spawn` but carries the semaphore permit, which releases
+        // when the future drops. Dropping the accept task therefore
+        // stops taking new connections; in-flight ones drain naturally.
         tokio::spawn(async move {
-            if let Err(e) = handle_http_connection(stream, ctx, peer).await {
+            let _permit = permit;
+            if let Err(e) = handle_http_connection(stream, ctx, peer_v4).await {
                 debug!(error = %e, %peer, "upnp http: connection error");
             }
         });
@@ -228,24 +263,32 @@ async fn run_http(listener: TcpListener, ctx: Arc<ServerContext>) {
 async fn handle_http_connection(
     mut stream: tokio::net::TcpStream,
     ctx: Arc<ServerContext>,
-    peer: std::net::SocketAddr,
+    peer: Ipv4Addr,
 ) -> Result<()> {
     let mut buf = Vec::with_capacity(4096);
     let mut tmp = [0u8; 2048];
-    // Read until we have complete headers.
-    let header_end = loop {
-        let n = stream.read(&mut tmp).await?;
-        if n == 0 {
-            return Ok(());
+    // Read until we have complete headers, or the read deadline fires.
+    let header_end = tokio::time::timeout(HEADER_TIMEOUT, async {
+        loop {
+            let n = stream.read(&mut tmp).await?;
+            if n == 0 {
+                return Ok::<usize, anyhow::Error>(0);
+            }
+            buf.extend_from_slice(&tmp[..n]);
+            if let Some(pos) = find_headers_end(&buf) {
+                return Ok(pos);
+            }
+            if buf.len() > MAX_BODY_SIZE {
+                anyhow::bail!("headers too large");
+            }
         }
-        buf.extend_from_slice(&tmp[..n]);
-        if let Some(pos) = find_headers_end(&buf) {
-            break pos;
-        }
-        if buf.len() > 65_536 {
-            anyhow::bail!("headers too large");
-        }
-    };
+    })
+    .await
+    .context("upnp http: header read timeout")??;
+
+    if header_end == 0 {
+        return Ok(());
+    }
 
     let (request_line, headers) =
         parse_request_headers(&buf[..header_end]).context("invalid http request headers")?;
@@ -254,23 +297,28 @@ async fn handle_http_connection(
         .find(|(k, _)| k.eq_ignore_ascii_case("content-length"))
         .and_then(|(_, v)| v.trim().parse::<usize>().ok())
         .unwrap_or(0);
-
-    let body_start = header_end + 4;
-    while buf.len() < body_start + content_length {
-        let n = stream.read(&mut tmp).await?;
-        if n == 0 {
-            break;
-        }
-        buf.extend_from_slice(&tmp[..n]);
-    }
-    let body = &buf[body_start..body_start + content_length.min(buf.len() - body_start)];
-
-    // Reject IPv6 peers: the advertised LOCATION is IPv4 only.
-    if matches!(peer, std::net::SocketAddr::V6(_)) {
+    if content_length > MAX_BODY_SIZE {
+        let response = simple_status_response(413, "Payload Too Large");
+        stream.write_all(&response).await.ok();
         return Ok(());
     }
 
-    let response = route_request(&request_line, &headers, body, &ctx).await;
+    let body_start = header_end + 4;
+    tokio::time::timeout(BODY_TIMEOUT, async {
+        while buf.len() < body_start + content_length {
+            let n = stream.read(&mut tmp).await?;
+            if n == 0 {
+                anyhow::bail!("short body: peer closed before content-length bytes");
+            }
+            buf.extend_from_slice(&tmp[..n]);
+        }
+        Ok::<(), anyhow::Error>(())
+    })
+    .await
+    .context("upnp http: body read timeout")??;
+    let body = &buf[body_start..body_start + content_length];
+
+    let response = route_request(&request_line, &headers, body, &ctx, peer).await;
     stream.write_all(&response).await?;
     stream.flush().await?;
     Ok(())
@@ -301,6 +349,7 @@ async fn route_request(
     headers: &[(String, String)],
     body: &[u8],
     ctx: &ServerContext,
+    peer: Ipv4Addr,
 ) -> Vec<u8> {
     let mut parts = request_line.split_whitespace();
     let method = parts.next().unwrap_or("");
@@ -316,7 +365,7 @@ async fn route_request(
                 .map(|(_, v)| v.trim_matches('"').to_string())
                 .unwrap_or_default();
             let body_str = std::str::from_utf8(body).unwrap_or("");
-            handle_soap(&action_header, body_str, ctx).await
+            handle_soap(&action_header, body_str, ctx, peer).await
         }
         _ => simple_status_response(404, "Not Found"),
     }
@@ -449,22 +498,27 @@ fn build_scpd() -> &'static str {
 </scpd>"#
 }
 
-async fn handle_soap(action: &str, body: &str, ctx: &ServerContext) -> Vec<u8> {
-    trace!(?action, "upnp soap request");
+async fn handle_soap(action: &str, body: &str, ctx: &ServerContext, peer: Ipv4Addr) -> Vec<u8> {
+    trace!(?action, %peer, "upnp soap request");
     let action_name = action.split('#').next_back().unwrap_or("");
     match action_name {
         "GetExternalIPAddress" => http_xml_response(soap_success(
             "GetExternalIPAddress",
             &[("NewExternalIPAddress", &ctx.wan_ip.to_string())],
         )),
-        "AddPortMapping" => handle_add_port_mapping(body, ctx, false).await,
-        "AddAnyPortMapping" => handle_add_port_mapping(body, ctx, true).await,
-        "DeletePortMapping" => handle_delete_port_mapping(body, ctx).await,
+        "AddPortMapping" => handle_add_port_mapping(body, ctx, peer, false).await,
+        "AddAnyPortMapping" => handle_add_port_mapping(body, ctx, peer, true).await,
+        "DeletePortMapping" => handle_delete_port_mapping(body, ctx, peer).await,
         _ => http_xml_response(soap_fault(401, "Invalid Action")),
     }
 }
 
-async fn handle_add_port_mapping(body: &str, ctx: &ServerContext, pick_any: bool) -> Vec<u8> {
+async fn handle_add_port_mapping(
+    body: &str,
+    ctx: &ServerContext,
+    peer: Ipv4Addr,
+    pick_any: bool,
+) -> Vec<u8> {
     let external_port =
         match extract_tag(body, "NewExternalPort").and_then(|s| s.parse::<u16>().ok()) {
             Some(p) => p,
@@ -491,8 +545,15 @@ async fn handle_add_port_mapping(body: &str, ctx: &ServerContext, pick_any: bool
         .and_then(|s| s.parse::<u32>().ok())
         .unwrap_or(0);
 
-    // Security: internal client must be on our downstream subnet.
-    if !ctx.downstream_cidr.contains(&internal_client) {
+    // Security: internal client must match the caller's source IP and
+    // fall inside the downstream subnet. Enforcing caller==client stops
+    // a LAN host from hijacking inbound traffic destined for a peer.
+    if !ctx.downstream_cidr.contains(&internal_client) || internal_client != peer {
+        debug!(
+            %peer,
+            %internal_client,
+            "upnp: reject AddPortMapping with mismatched/off-subnet client"
+        );
         return http_xml_response(soap_fault(606, "Action not authorized"));
     }
 
@@ -547,7 +608,7 @@ async fn handle_add_port_mapping(body: &str, ctx: &ServerContext, pick_any: bool
     }
 }
 
-async fn handle_delete_port_mapping(body: &str, ctx: &ServerContext) -> Vec<u8> {
+async fn handle_delete_port_mapping(body: &str, ctx: &ServerContext, peer: Ipv4Addr) -> Vec<u8> {
     let external_port =
         match extract_tag(body, "NewExternalPort").and_then(|s| s.parse::<u16>().ok()) {
             Some(p) => p,
@@ -563,18 +624,33 @@ async fn handle_delete_port_mapping(body: &str, ctx: &ServerContext) -> Vec<u8> 
         _ => return http_xml_response(soap_fault(402, "Invalid Args")),
     };
 
-    let (removed, rules_snapshot) = {
+    // Security: only the mapping's owner may delete it. Look up the
+    // mapping, compare internal IP to caller, then remove.
+    let key = MappingKey {
+        proto: protocol,
+        external_port: external_nz,
+    };
+    let (authorized, removed, rules_snapshot) = {
         let mut registry = ctx.registry.lock().await;
-        let removed = registry
-            .remove(MappingKey {
-                proto: protocol,
-                external_port: external_nz,
-            })
-            .is_some();
+        let owner = registry.get(key).map(|m| m.internal_ip);
+        let authorized = owner == Some(peer);
+        let removed = if authorized {
+            registry.remove(key).is_some()
+        } else {
+            false
+        };
         let rules: Vec<_> = registry.iter().cloned().collect();
-        (removed, rules)
+        (authorized, removed, rules)
     };
 
+    if !authorized {
+        debug!(
+            %peer,
+            ext = external_nz.get(),
+            "upnp: reject DeletePortMapping; caller is not the mapping owner",
+        );
+        return http_xml_response(soap_fault(606, "Action not authorized"));
+    }
     if !removed {
         return http_xml_response(soap_fault(714, "NoSuchEntryInArray"));
     }
