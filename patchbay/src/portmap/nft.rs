@@ -21,16 +21,20 @@ use crate::{netns, nft::run_nft_in};
 
 /// Generates the full `ip portmap` table body for the given mappings.
 ///
-/// Runs at nft priority `-110`, which sits 10 below the `dstnat` priority
-/// (`-100`) used by [`crate::nft::apply_nat_for_router`]. That placement
-/// guarantees a static port forward DNAT applies before the fullcone map
-/// rule, and that the packet's changed destination no longer matches the
-/// fullcone criteria downstream.
+/// The table has two chains. The prerouting chain at priority `-110`
+/// (10 below `dstnat` at `-100`, used by
+/// [`crate::nft::apply_nat_for_router`]) rewrites the destination of
+/// inbound packets matching `(ip daddr <wan_ip>, proto, dport <ext>)` to
+/// `<internal_ip>:<internal_port>`. Matching on `daddr` rather than `iif`
+/// lets a LAN host hitting the router's WAN IP through hairpin follow the
+/// same DNAT path as traffic arriving from the uplink.
 ///
-/// The rule form is `ip daddr <wan_ip> meta l4proto <p> dport <ext> dnat
-/// to <internal_ip>:<internal_port>`. Matching on `daddr` (rather than
-/// `iif`) lets a LAN host hitting the router's WAN IP through hairpin
-/// follow the same DNAT path as traffic arriving from the uplink.
+/// The forward chain at priority `-10` (below the APDF filter produced
+/// by the NAT config at `0`) accepts any packet whose conntrack entry
+/// has been DNAT'd and whose destination matches a current mapping. This
+/// is necessary because the Home NAT filter drops `NEW` inbound flows on
+/// the WAN interface; without this chain the DNAT succeeds but the
+/// forwarded packet is dropped before it reaches the internal host.
 pub(crate) fn generate_portmap_rules(wan_ip: Ipv4Addr, mappings: &[Mapping]) -> String {
     let mut rules = String::new();
     rules.push_str("table ip portmap {\n");
@@ -51,36 +55,47 @@ pub(crate) fn generate_portmap_rules(wan_ip: Ipv4Addr, mappings: &[Mapping]) -> 
         ));
     }
     rules.push_str("    }\n");
+    rules.push_str("    chain forward {\n");
+    rules.push_str("        type filter hook forward priority -10; policy accept;\n");
+    for m in mappings {
+        let proto = match m.proto {
+            MapProto::Udp => "udp",
+            MapProto::Tcp => "tcp",
+        };
+        rules.push_str(&format!(
+            "        ip daddr {ip} {proto} dport {port} ct status dnat accept\n",
+            proto = proto,
+            ip = m.internal_ip,
+            port = m.internal_port.get(),
+        ));
+    }
+    rules.push_str("    }\n");
     rules.push_str("}\n");
     rules
 }
 
 /// Flushes and repopulates the `ip portmap` table in `ns`.
 ///
-/// The table is deleted if present, then re-declared with the new rule
-/// set. `delete table` fails if the table does not exist; nft treats that
-/// as an error and aborts the containing script, so the delete runs
-/// separately and its error is swallowed before the fresh ruleset is
-/// installed. Safe to call with an empty `mappings` slice, which leaves
-/// the table declared but empty.
+/// The script prepends `add table ip portmap` (idempotent: noop if the
+/// table already exists) followed by `flush table ip portmap` so the
+/// update is atomic from a single `nft -f` invocation. Safe to call with
+/// an empty `mappings` slice, which leaves the table declared but empty.
 pub(crate) async fn apply_portmap_rules(
     netns: &netns::NetnsManager,
     ns: &str,
     wan_ip: Ipv4Addr,
     mappings: &[Mapping],
 ) -> Result<()> {
-    run_nft_in(netns, ns, "delete table ip portmap\n")
-        .await
-        .ok();
-    run_nft_in(netns, ns, &generate_portmap_rules(wan_ip, mappings)).await
+    let mut script = String::from("add table ip portmap\nflush table ip portmap\n");
+    script.push_str(&generate_portmap_rules(wan_ip, mappings));
+    run_nft_in(netns, ns, &script).await
 }
 
-/// Removes the `ip portmap` table entirely. Idempotent.
+/// Removes the `ip portmap` table entirely. Idempotent: missing table is
+/// swallowed as a success.
 pub(crate) async fn clear_portmap_rules(netns: &netns::NetnsManager, ns: &str) -> Result<()> {
-    run_nft_in(netns, ns, "delete table ip portmap\n")
-        .await
-        .ok();
-    Ok(())
+    // `add table` makes the delete idempotent in a single script.
+    run_nft_in(netns, ns, "add table ip portmap\ndelete table ip portmap\n").await
 }
 
 #[cfg(test)]
@@ -106,6 +121,8 @@ mod tests {
         assert!(rendered.contains("table ip portmap"));
         assert!(rendered.contains("chain prerouting"));
         assert!(rendered.contains("priority -110"));
+        assert!(rendered.contains("chain forward"));
+        assert!(rendered.contains("priority -10"));
         // No DNAT rules when mappings is empty.
         assert!(!rendered.contains("dnat"));
     }
@@ -140,7 +157,12 @@ mod tests {
         assert_eq!(
             rendered.matches("dnat to").count(),
             2,
-            "two mappings produce two rules",
+            "two mappings produce two DNAT rules",
+        );
+        assert_eq!(
+            rendered.matches("ct status dnat accept").count(),
+            2,
+            "two mappings produce two forward-accept rules",
         );
     }
 }

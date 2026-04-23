@@ -125,7 +125,11 @@ fn generate_nat_rules(cfg: &NatConfig, wan_if: &str, wan_ip: Ipv4Addr) -> String
 
     let postrouting_priority = if use_fullcone_map { "srcnat" } else { "100" };
 
-    // APDF filter: only forward inbound packets matching existing conntrack flows.
+    // APDF filter: forward inbound packets only when they match an
+    // existing conntrack flow, a DNAT that the router itself installed
+    // (port mapping server), or a related flow. Static port forwards from
+    // the portmap table create `ct status dnat` packets that would
+    // otherwise be dropped by the blanket `iif "wan" drop` rule.
     let filter_table = if cfg.filtering == NatFiltering::AddressAndPortDependent {
         format!(
             r#"
@@ -133,6 +137,7 @@ table ip filter {{
     chain forward {{
         type filter hook forward priority 0; policy accept;
         iif "{wan}" ct state established,related accept
+        iif "{wan}" ct status dnat accept
         iif "{wan}" drop
     }}
 }}"#,

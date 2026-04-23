@@ -21,12 +21,10 @@ pub use config::{PortmapConfig, PortmapMode};
 
 mod config;
 #[allow(dead_code)]
+pub(crate) mod nat_pmp;
+#[allow(dead_code)]
 pub(crate) mod nft;
-// The registry is consumed by the nft module and by protocol servers. Its
-// public surface spans more than the nft module uses today; the allow will
-// go away once Step 3 wires in the NAT-PMP server.
 #[allow(dead_code)]
 pub(crate) mod registry;
-// Protocol-specific wire handling lands in later steps.
 #[allow(dead_code)]
-pub(crate) mod wire;
+pub(crate) mod server;

@@ -95,6 +95,8 @@ pub(crate) struct RouterConfig {
     pub ra_interval_secs: u64,
     /// Router Advertisement lifetime in seconds.
     pub ra_lifetime_secs: u64,
+    /// Port mapping server protocols enabled on this router.
+    pub portmap: crate::portmap::PortmapConfig,
 }
 
 impl RouterConfig {
@@ -280,6 +282,9 @@ pub(crate) struct RouterData {
     pub ra_runtime: Arc<RaRuntimeCfg>,
     /// Per-router operation lock — serializes multi-step mutations.
     pub op: Arc<tokio::sync::Mutex<()>>,
+    /// Running portmap server, if any. Started at build time when the
+    /// builder enables any protocol; dropped on router removal.
+    pub portmap_server: Option<crate::portmap::server::PortmapServer>,
 }
 
 impl RouterData {
@@ -784,6 +789,7 @@ impl NetworkCore {
                     ra_enabled: RA_DEFAULT_ENABLED,
                     ra_interval_secs: RA_DEFAULT_INTERVAL_SECS,
                     ra_lifetime_secs: RA_DEFAULT_LIFETIME_SECS,
+                    portmap: crate::portmap::PortmapConfig::default(),
                 },
                 downlink_bridge,
                 uplink: None,
@@ -802,6 +808,7 @@ impl NetworkCore {
                     RA_DEFAULT_LIFETIME_SECS,
                 )),
                 op: Arc::new(tokio::sync::Mutex::new(())),
+                portmap_server: None,
             },
         );
         id
