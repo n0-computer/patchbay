@@ -1029,6 +1029,7 @@ fn serialize_step_failure(step: &StepFailureInfo) -> String {
     )
 }
 
+#[allow(clippy::collapsible_match)]
 fn parse_step_failure(raw: &str) -> Option<StepFailureInfo> {
     let mut index = None;
     let mut action = None;

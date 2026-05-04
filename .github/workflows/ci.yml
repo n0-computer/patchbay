@@ -120,3 +120,20 @@ jobs:
       - name: UI E2E
         working-directory: ui
         run: npm run test:e2e
+
+
+  cargo_deny:
+    timeout-minutes: 30
+    name: cargo deny
+    runs-on: ubuntu-latest
+    # cargo-deny-action runs in a Docker container that does not have sccache
+    # installed, so override the workflow-wide RUSTC_WRAPPER env var.
+    env:
+      RUSTC_WRAPPER: ""
+    steps:
+      - uses: actions/checkout@v6
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          arguments: --workspace --all-features
+          command: check
+          command-arguments: "-Dwarnings"

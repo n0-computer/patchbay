@@ -154,7 +154,7 @@ brew install virtiofsd
 
 ```bash
 rustup target add aarch64-unknown-linux-musl
-brew install filosottile/musl-cross/musl-cross
+brew install messense/macos-cross-toolchains/aarch64-unknown-linux-musl
 ```
 
 Add to `.cargo/config.toml`:
@@ -193,11 +193,15 @@ which takes 1-2 minutes. Subsequent runs reuse the running VM.
 
 ### Installation
 
-1. Download the latest signed installer package from the
-   [container releases page](https://github.com/apple/container/releases).
+Install via Homebrew (recommended):
 
-2. Double-click the package and follow the prompts. The installer places
-   binaries under `/usr/local`.
+```bash
+brew install container
+```
+
+Alternatively, download the latest signed installer package from the
+[container releases page](https://github.com/apple/container/releases)
+and double-click to install.
 
 3. Start the system service:
 
@@ -220,7 +224,7 @@ must be cross-compiled for `aarch64-unknown-linux-musl`.
 
 ```bash
 rustup target add aarch64-unknown-linux-musl
-brew install filosottile/musl-cross/musl-cross
+brew install messense/macos-cross-toolchains/aarch64-unknown-linux-musl
 ```
 
 2. Tell Cargo which linker to use. Add to `.cargo/config.toml` (create

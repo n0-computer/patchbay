@@ -2,6 +2,15 @@
 
 use super::*;
 
+/// First A record in a hickory-resolver `Lookup`, as `Ipv4Addr`.
+fn first_a(lookup: &hickory_resolver::lookup::Lookup) -> Option<Ipv4Addr> {
+    use hickory_proto::rr::RData;
+    lookup.answers().iter().find_map(|r| match &r.data {
+        RData::A(a) => Some(a.0),
+        _ => None,
+    })
+}
+
 /// DNS server entry is visible via getent in a spawned command.
 #[tokio::test(flavor = "current_thread")]
 #[traced_test]
@@ -343,7 +352,7 @@ async fn hickory_resolver() -> Result<()> {
     dns.set_host("hickorytest.patchbay.", IpAddr::V4(dc_ip))?;
 
     let jh = dev.spawn(move |_dev| async move {
-        let resolver = TokioResolver::builder_tokio().ok()?.build();
+        let resolver = TokioResolver::builder_tokio().ok()?.build().ok()?;
         let lookup = resolver.lookup_ip("hickorytest.patchbay").await.ok()?;
         lookup.iter().next()
     });
@@ -372,17 +381,13 @@ async fn hickory_ipv4_lookup() -> Result<()> {
     dns.set_host("ipv4test.patchbay.", IpAddr::V4(dc_ip))?;
 
     let jh = dev.spawn(move |_dev| async move {
-        let (config, options) =
-            hickory_resolver::system_conf::read_system_conf().expect("system conf");
-        let mut builder = TokioResolver::builder_with_config(
-            config,
-            hickory_resolver::name_server::TokioConnectionProvider::default(),
-        );
-        *builder.options_mut() = options;
-        let resolver = builder.build();
+        let resolver = TokioResolver::builder_tokio()
+            .expect("system conf")
+            .build()
+            .expect("build resolver");
 
         match resolver.ipv4_lookup("ipv4test.patchbay").await {
-            Ok(lookup) => lookup.iter().next().copied().map(Ipv4Addr::from),
+            Ok(lookup) => first_a(&lookup),
             Err(e) => {
                 tracing::error!("ipv4_lookup failed: {e}");
                 None
@@ -428,17 +433,13 @@ async fn hickory_resolve_stress() -> Result<()> {
             let hostname = format!("stress{lab_idx}.patchbay");
             let expected = dc_ip;
             let jh = dev.spawn(move |_dev| async move {
-                let (config, options) =
-                    hickory_resolver::system_conf::read_system_conf().expect("system conf");
-                let mut builder = TokioResolver::builder_with_config(
-                    config,
-                    hickory_resolver::name_server::TokioConnectionProvider::default(),
-                );
-                *builder.options_mut() = options;
-                let resolver = builder.build();
+                let resolver = TokioResolver::builder_tokio()
+                    .expect("system conf")
+                    .build()
+                    .expect("build resolver");
 
                 match resolver.ipv4_lookup(&hostname).await {
-                    Ok(lookup) => lookup.iter().next().copied().map(Ipv4Addr::from),
+                    Ok(lookup) => first_a(&lookup),
                     Err(e) => {
                         tracing::error!("ipv4_lookup failed: {e}");
                         None
@@ -493,18 +494,14 @@ async fn hickory_resolve_relay_setup() -> Result<()> {
         let label_owned = label.to_string();
         let jh = dev.spawn(move |_dev| async move {
             let label = label_owned;
-            let (config, options) =
-                hickory_resolver::system_conf::read_system_conf().expect("system conf");
-            let mut builder = TokioResolver::builder_with_config(
-                config,
-                hickory_resolver::name_server::TokioConnectionProvider::default(),
-            );
-            *builder.options_mut() = options;
-            let resolver = builder.build();
+            let resolver = TokioResolver::builder_tokio()
+                .expect("system conf")
+                .build()
+                .expect("build resolver");
 
             match resolver.ipv4_lookup("relay.test").await {
                 Ok(lookup) => {
-                    let first = lookup.iter().next().copied().map(Ipv4Addr::from);
+                    let first = first_a(&lookup);
                     info!(%label, ?first, "resolved relay.test");
                     first
                 }
