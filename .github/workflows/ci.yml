@@ -120,3 +120,16 @@ jobs:
       - name: UI E2E
         working-directory: ui
         run: npm run test:e2e
+
+
+  cargo_deny:
+    timeout-minutes: 30
+    name: cargo deny
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          arguments: --workspace --all-features
+          command: check
+          command-arguments: "-Dwarnings"
