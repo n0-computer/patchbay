@@ -153,7 +153,7 @@ impl DnsServer {
         for rtype in [RecordType::A, RecordType::AAAA] {
             if let Some(recs) = store.get(&(lower.clone(), rtype)) {
                 for r in recs {
-                    match r.data() {
+                    match &r.data {
                         RData::A(a) => return Some(IpAddr::V4((*a).into())),
                         RData::AAAA(aaaa) => return Some(IpAddr::V6((*aaaa).into())),
                         _ => {}
@@ -187,23 +187,19 @@ async fn serve(records: Arc<RwLock<RecordStore>>, socket: tokio::net::UdpSocket)
 
 fn handle_query(records: &RwLock<RecordStore>, buf: &[u8]) -> Option<Vec<u8>> {
     let query = Message::from_bytes(buf).ok()?;
-    if query.message_type() != MessageType::Query {
+    if query.message_type != MessageType::Query {
         return None;
     }
 
-    let mut response = Message::new();
-    response.set_id(query.id());
-    response.set_message_type(MessageType::Response);
-    response.set_op_code(query.op_code());
-    response.set_recursion_desired(query.recursion_desired());
-    response.set_recursion_available(false);
-    response.set_authoritative(true);
-    response.add_queries(query.queries().iter().cloned());
+    let mut response = Message::response(query.id, query.op_code);
+    response.metadata.recursion_desired = query.recursion_desired;
+    response.metadata.authoritative = true;
+    response.add_queries(query.queries.iter().cloned());
 
     let store = records.read().expect("poisoned");
     let mut found = false;
     let mut name_exists = false;
-    for q in query.queries() {
+    for q in &query.queries {
         let qname: LowerName = q.name().into();
         if !name_exists {
             name_exists = store.keys().any(|(n, _)| *n == qname);
@@ -211,7 +207,7 @@ fn handle_query(records: &RwLock<RecordStore>, buf: &[u8]) -> Option<Vec<u8>> {
         if let Some(recs) = store.get(&(qname, q.query_type())) {
             for r in recs {
                 let mut answer = r.clone();
-                answer.set_dns_class(DNSClass::IN);
+                answer.dns_class = DNSClass::IN;
                 response.add_answer(answer);
                 found = true;
             }
@@ -225,7 +221,7 @@ fn handle_query(records: &RwLock<RecordStore>, buf: &[u8]) -> Option<Vec<u8>> {
         } else {
             ResponseCode::NXDomain
         };
-        response.set_response_code(code);
+        response.metadata.response_code = code;
     }
 
     response.to_bytes().ok()
