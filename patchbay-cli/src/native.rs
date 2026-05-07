@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 
 /// Bootstrap user namespaces before main() — required for test binaries
 /// where main() is not our code (nextest spawns each test as a process).
-#[ctor::ctor]
+#[ctor::ctor(unsafe)]
 fn _init_userns() {
     // Safety: called from .init_array before main() and before any threads.
     unsafe { patchbay::init_userns_for_ctor() };

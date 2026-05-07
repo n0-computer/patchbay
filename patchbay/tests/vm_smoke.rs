@@ -8,7 +8,7 @@ use patchbay::{Lab, Nat, OutDir};
 use testdir::testdir;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-#[ctor::ctor]
+#[ctor::ctor(unsafe)]
 fn init() {
     patchbay::init_userns().expect("user namespace");
 }
