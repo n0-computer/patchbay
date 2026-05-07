@@ -54,7 +54,7 @@ mod smoke;
 
 // ── Shared test infrastructure ──────────────────────────────────────
 
-#[ctor::ctor]
+#[ctor::ctor(unsafe)]
 fn init() {
     let _ = init_userns();
 }

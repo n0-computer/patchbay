@@ -16,7 +16,7 @@ path = "src/main.rs"
 axum = { version = "0.8", features = ["tokio"] }
 tokio = { version = "1", features = ["rt-multi-thread", "rt", "macros", "sync", "time", "fs", "io-util", "signal"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
-tokio-rustls-acme = { version = "0.7", features = ["axum"] }
+tokio-rustls-acme = { version = "0.9.1", features = ["axum"] }
 anyhow = "1"
 async-stream = "0.3"
 clap = { version = "4", features = ["derive", "env"] }
@@ -30,7 +30,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["v4"] }
 chrono = "0.4"
 patchbay-utils = { path = "../patchbay-utils" }
-axum-server = "0.7"
+axum-server = "0.8"
 rustls = "0.23"
 
 [package.metadata.binstall]

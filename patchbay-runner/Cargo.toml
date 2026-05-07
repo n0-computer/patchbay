@@ -16,7 +16,7 @@ comfy-table = "7"
 flate2 = "1"
 patchbay = { workspace = true }
 patchbay-utils = { workspace = true }
-nix = { version = "0.30", features = ["signal", "process"] }
+nix = { version = "0.31", features = ["signal", "process"] }
 rcgen = "0.14"
 regex = "1"
 serde = { version = "1", features = ["derive"] }

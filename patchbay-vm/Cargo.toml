@@ -15,7 +15,7 @@ anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 dirs = "6"
 patchbay-utils = { workspace = true }
-nix = { version = "0.30", features = ["signal", "process"] }
+nix = { version = "0.31", features = ["signal", "process"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "1.0"
