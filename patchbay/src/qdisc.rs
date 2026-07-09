@@ -34,6 +34,26 @@ pub struct LinkLimits {
     /// Bit-error corruption percentage (0.0–100.0).
     #[serde(deserialize_with = "coerce::f32_or_string")]
     pub corrupt_pct: f32,
+    /// tbf queue depth in milliseconds -- how long a packet may wait in the rate
+    /// limiter's buffer before it is dropped. Only applies when `rate_kbit > 0`.
+    /// `0` (the default) keeps the historical 400ms buffer. Sizing this near the
+    /// link's RTT makes packet loss emerge from buffer overflow (congestion),
+    /// as on a real bottleneck, rather than only from `loss_pct`.
+    #[serde(default, deserialize_with = "coerce::u32_or_string")]
+    pub buffer_ms: u32,
+    /// Mean loss-burst length, in packets, for the `loss_pct` random loss.
+    ///
+    /// `0` or `1` (the default) uses `tc netem`'s independent per-packet
+    /// (Bernoulli) loss -- `loss <pct>%`. A value `>= 2` switches to the
+    /// Gilbert-Elliott model (`loss gemodel`), a two-state (good/bad) Markov
+    /// chain that drops packets in bursts of this mean length while holding the
+    /// long-run loss rate at `loss_pct`. Real links (wifi fades, cellular
+    /// handovers) lose in bursts, and the same loss rate concentrated into
+    /// bursts hurts congestion control more than when it is spread out, so this
+    /// is the more faithful model; it is also more variable run to run, so keep
+    /// bursts short when repeatability matters.
+    #[serde(default, deserialize_with = "coerce::u32_or_string")]
+    pub loss_burst_pkts: u32,
 }
 
 /// Serde helpers that accept both native types and string representations.
@@ -75,7 +95,7 @@ pub(crate) async fn apply_impair(ifname: &str, limits: LinkLimits) -> Result<()>
     let qdisc = Qdisc::new(ifname);
     qdisc.add_netem_root(limits).await?;
     if limits.rate_kbit > 0 {
-        qdisc.add_tbf(limits.rate_kbit).await?;
+        qdisc.add_tbf(limits.rate_kbit, limits.buffer_ms).await?;
     }
     Ok(())
 }
@@ -121,7 +141,23 @@ impl<'a> Qdisc<'a> {
         }
         if limits.loss_pct > 0.0 {
             args.push("loss".into());
-            args.push(format!("{:.3}%", limits.loss_pct));
+            if limits.loss_burst_pkts >= 2 {
+                // Gilbert-Elliott: a good state (no loss) and a bad state
+                // (always lose), so losses arrive in bursts. With `p` = good->bad
+                // and `r` = bad->good transition probabilities, the mean bad run
+                // (burst length) is 1/r and the long-run loss rate is p/(p+r).
+                // Invert for a target loss L and mean burst length B:
+                //   r = 1/B,  p = L / (B * (1 - L)).
+                let l = (limits.loss_pct as f64 / 100.0).clamp(0.0, 0.999);
+                let b = limits.loss_burst_pkts as f64;
+                let r = 100.0 / b;
+                let p = 100.0 * l / (b * (1.0 - l));
+                args.push("gemodel".into());
+                args.push(format!("{p:.4}%"));
+                args.push(format!("{r:.4}%"));
+            } else {
+                args.push(format!("{:.3}%", limits.loss_pct));
+            }
         }
         if limits.reorder_pct > 0.0 {
             args.push("reorder".into());
@@ -142,7 +178,11 @@ impl<'a> Qdisc<'a> {
         Ok(())
     }
 
-    async fn add_tbf(&self, rate_kbit: u32) -> Result<()> {
+    async fn add_tbf(&self, rate_kbit: u32, buffer_ms: u32) -> Result<()> {
+        // `buffer_ms = 0` keeps the historical 400ms buffer; a smaller value
+        // makes the rate limiter drop on overflow near one RTT, so loss emerges
+        // from congestion as on a real bottleneck link.
+        let latency = if buffer_ms == 0 { 400 } else { buffer_ms };
         let mut cmd = Command::new("tc");
         cmd.args([
             "qdisc",
@@ -159,7 +199,7 @@ impl<'a> Qdisc<'a> {
             "burst",
             "32kbit",
             "latency",
-            "400ms",
+            &format!("{}ms", latency),
         ]);
         ensure_success(cmd, "tc qdisc tbf add").await?;
         Ok(())

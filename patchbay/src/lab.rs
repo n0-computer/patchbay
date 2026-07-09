@@ -83,10 +83,19 @@ pub enum LinkDirection {
     Ingress,
 }
 
-/// Link-layer impairment profile applied via `tc netem`.
+/// Link-layer impairment profile applied via `tc netem` (and `tc tbf` for a rate
+/// cap).
 ///
 /// Named presets model common last-mile conditions. Use [`LinkCondition::Manual`]
-/// with [`LinkLimits`] for full control over all `tc netem` parameters.
+/// with [`LinkLimits`] for full control over all parameters.
+///
+/// The presets model loss as independent per-packet (Bernoulli) loss on an
+/// uncapped link (except the rate-limited ones). For a more faithful and more
+/// repeatable link, [`LinkLimits`] additionally exposes
+/// [`buffer_ms`](LinkLimits::buffer_ms) -- an RTT-sized rate-limiter buffer, so
+/// loss emerges from congestion (buffer overflow) as on a real bottleneck -- and
+/// [`loss_burst_pkts`](LinkLimits::loss_burst_pkts) -- bursty Gilbert-Elliott
+/// loss instead of Bernoulli, matching how real links (fades, handovers) drop.
 #[derive(Clone, Copy, Debug, PartialEq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LinkCondition {
