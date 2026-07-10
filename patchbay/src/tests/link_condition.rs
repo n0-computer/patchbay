@@ -858,13 +858,18 @@ async fn latency_dynamic_add_remove() -> Result<()> {
 #[tokio::test(flavor = "current_thread")]
 #[traced_test]
 async fn presets_rtt_and_loss() -> Result<()> {
+    // (preset, min one-way latency ms, loss % to smoke-test). The presets now
+    // use bursty Gilbert-Elliott loss, which concentrates drops into rare bursts,
+    // so a small sample can see zero loss even at a few percent. We only
+    // smoke-test loss on the two presets whose rate is high enough to fire
+    // reliably over the sample below, and use a large sample for those.
     let cases: Vec<(LinkCondition, u64, f32)> = vec![
         (LinkCondition::Lan, 0, 0.0),
-        (LinkCondition::Wifi, 5, 0.0),
-        (LinkCondition::WifiBad, 40, 2.0),
+        (LinkCondition::Wifi, 4, 0.0),
+        (LinkCondition::WifiBad, 25, 1.5),
         (LinkCondition::Mobile4G, 25, 0.0),
-        (LinkCondition::Mobile3G, 100, 2.0),
-        (LinkCondition::Satellite, 40, 1.0),
+        (LinkCondition::Mobile3G, 80, 2.0),
+        (LinkCondition::Satellite, 22, 0.0),
         (LinkCondition::SatelliteGeo, 300, 0.0),
     ];
     let mut port_base = 19_100u16;
@@ -889,14 +894,17 @@ async fn presets_rtt_and_loss() -> Result<()> {
                 bail!("preset {preset:?}: expected RTT ≥ {min_latency_ms}ms, got {rtt:?}");
             }
             if loss_pct > 0.0 {
+                // Large enough that bursty loss at ~1.5% or more reliably drops at
+                // least one packet (P(zero loss) is well under 0.1%).
+                let total = 5000usize;
                 let (_, received) = dev
                     .spawn(move |_| async move {
-                        test_utils::udp_send_recv_count(r, 1000, 64, Duration::from_secs(5)).await
+                        test_utils::udp_send_recv_count(r, total, 64, Duration::from_secs(8)).await
                     })?
                     .await??;
-                if received == 1000 {
+                if received == total {
                     bail!(
-                        "preset {preset:?}: expected some loss at {loss_pct}%, got {received}/1000"
+                        "preset {preset:?}: expected some loss at {loss_pct}%, got {received}/{total}"
                     );
                 }
             }
