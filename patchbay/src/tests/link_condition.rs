@@ -952,6 +952,8 @@ fn presets_to_limits_roundtrip() {
         reorder_pct: 1.0,
         duplicate_pct: 0.5,
         corrupt_pct: 0.1,
+        buffer_ms: 200,
+        loss_burst_pkts: 4,
     };
     assert_eq!(LinkCondition::Manual(custom).to_limits(), custom);
 }
