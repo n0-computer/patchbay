@@ -281,7 +281,7 @@ async fn mixed_nat_region() -> Result<()> {
     let home_eu = lab
         .add_router("home-eu")
         .region(&eu)
-        .nat(Nat::Easy)
+        .nat(Nat::Moderate)
         .build()
         .await?;
 

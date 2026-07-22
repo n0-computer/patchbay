@@ -798,7 +798,7 @@ mod tests {
                 state: Box::new(RouterState {
                     ns: "ns-r1".into(),
                     region: None,
-                    nat: crate::Nat::Easy.into(),
+                    nat: crate::Nat::Moderate.into(),
                     nat_v6: NatV6Mode::None,
                     firewall: Firewall::None,
                     ip_support: IpSupport::V4Only,
@@ -838,7 +838,7 @@ mod tests {
             },
             LabEventKind::NatChanged {
                 router: "r1".into(),
-                nat: crate::Nat::Hard.into(),
+                nat: crate::Nat::Strict.into(),
             },
             LabEventKind::DeviceRemoved { name: "d1".into() },
             LabEventKind::RouterRemoved { name: "r1".into() },
@@ -888,7 +888,7 @@ mod tests {
                     state: Box::new(RouterState {
                         ns: "ns-r1".into(),
                         region: None,
-                        nat: crate::Nat::Easy.into(),
+                        nat: crate::Nat::Moderate.into(),
                         nat_v6: NatV6Mode::None,
                         firewall: Firewall::None,
                         ip_support: IpSupport::V4Only,

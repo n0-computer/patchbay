@@ -107,7 +107,7 @@ let lab = patchbay::Lab::new().await?;
 
 Routers connect to the IX bridge and provide network access to downstream
 devices. A router without any NAT configuration gives its devices public
-IP addresses, like a datacenter. Adding `.nat(Nat::Easy)` places a NAT in
+IP addresses, like a datacenter. Adding `.nat(Nat::Moderate)` places a NAT in
 front of the router's downstream, assigning devices private addresses and
 masquerading their traffic, like a typical home WiFi router.
 
@@ -118,7 +118,7 @@ use patchbay::{Nat, LinkCondition, LinkDirection};
 let dc = lab.add_router("dc").build().await?;
 
 // A home router whose devices sit behind NAT.
-let home = lab.add_router("home").nat(Nat::Easy).build().await?;
+let home = lab.add_router("home").nat(Nat::Moderate).build().await?;
 ```
 
 Devices attach to routers through named network interfaces. Each interface

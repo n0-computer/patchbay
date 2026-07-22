@@ -12,7 +12,7 @@ async fn ping_gateway() -> Result<()> {
     let home = lab
         .add_router("home1")
         .upstream(isp.id())
-        .nat(Nat::Easy)
+        .nat(Nat::Moderate)
         .build()
         .await?;
     let dev = lab
@@ -38,7 +38,7 @@ async fn udp_roundtrip() -> Result<()> {
     let home = lab
         .add_router("home1")
         .upstream(isp.id())
-        .nat(Nat::Easy)
+        .nat(Nat::Moderate)
         .build()
         .await?;
     let dev = lab
@@ -66,7 +66,7 @@ async fn tcp_roundtrip() -> Result<()> {
     let home = lab
         .add_router("home1")
         .upstream(isp.id())
-        .nat(Nat::Easy)
+        .nat(Nat::Moderate)
         .build()
         .await?;
     let dev = lab
@@ -99,7 +99,7 @@ async fn ping_router_to_isp() -> Result<()> {
     let home = lab
         .add_router("home1")
         .upstream(isp.id())
-        .nat(Nat::Easy)
+        .nat(Nat::Moderate)
         .build()
         .await?;
 
@@ -136,10 +136,14 @@ async fn ping_through_nat_to_relay() -> Result<()> {
     let dc = lab.add_router("dc").build().await?;
     let lan_provider = lab
         .add_router("lan-provider")
-        .nat(Nat::Easy)
+        .nat(Nat::Moderate)
         .build()
         .await?;
-    let lan_fetcher = lab.add_router("lan-fetcher").nat(Nat::Easy).build().await?;
+    let lan_fetcher = lab
+        .add_router("lan-fetcher")
+        .nat(Nat::Moderate)
+        .build()
+        .await?;
 
     let relay = lab
         .add_device("relay")
@@ -175,7 +179,7 @@ async fn ping_same_lan() -> Result<()> {
     let home = lab
         .add_router("home1")
         .upstream(isp.id())
-        .nat(Nat::Easy)
+        .nat(Nat::Moderate)
         .build()
         .await?;
     let dev1 = lab

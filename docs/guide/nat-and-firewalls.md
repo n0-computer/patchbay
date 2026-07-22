@@ -38,7 +38,7 @@ You configure NAT on the router builder with `.nat()`:
 ```rust
 use patchbay::Nat;
 
-let home = lab.add_router("home").nat(Nat::Easy).build().await?;
+let home = lab.add_router("home").nat(Nat::Moderate).build().await?;
 ```
 
 The `Nat` enum forms a three-tier gradient of hole-punching difficulty:
@@ -46,11 +46,11 @@ The `Nat` enum forms a three-tier gradient of hole-punching difficulty:
 | Mode | Mapping | Filtering | Real-world model |
 |------|---------|-----------|------------------|
 | `None` | n/a | n/a | Datacenter, public IPs |
-| `Easiest` | Endpoint-independent | Endpoint-independent | Full-cone router with UPnP or static forwarding |
-| `Easy` | Endpoint-independent | Address-and-port-dependent | Standard home WiFi router, RFC 6888 compliant CGNAT |
-| `Hard` | Endpoint-dependent | Address-and-port-dependent | Enterprise gateway, cloud NAT, mobile carrier, symmetric CGNAT |
+| `Open` | Endpoint-independent | Endpoint-independent | Full-cone router with UPnP or static forwarding |
+| `Moderate` | Endpoint-independent | Address-and-port-dependent | Standard home WiFi router, RFC 6888 compliant CGNAT |
+| `Strict` | Endpoint-dependent | Address-and-port-dependent | Enterprise gateway, cloud NAT, mobile carrier, symmetric CGNAT |
 
-`Hard` covers every symmetric NAT deployment: each destination gets a
+`Strict` covers every symmetric NAT deployment: each destination gets a
 fresh, random external port. Port-preserving symmetric NAT (SYMPP) is a
 real middle tier in the wild (punchable through port prediction) but
 patchbay does not model it distinctly. See
@@ -95,7 +95,7 @@ changes mid-session, for example simulating a network migration. Call
 new connections use the updated rules:
 
 ```rust
-router.set_nat(Nat::Hard).await?;
+router.set_nat(Nat::Strict).await?;
 router.flush_nat_state().await?;
 ```
 
@@ -232,7 +232,7 @@ typical compositions:
 ```rust
 // Home router: NAT + inbound firewall. The most common residential setup.
 let home = lab.add_router("home")
-    .nat(Nat::Easy)
+    .nat(Nat::Moderate)
     .firewall(Firewall::BlockInbound)
     .build().await?;
 
@@ -243,7 +243,7 @@ let dc = lab.add_router("dc")
 
 // Double NAT: ISP carrier-grade NAT in front of a home router. The
 // `IspCgnat` preset gives realistic defaults (EIM + APDF, v6 inbound
-// blocked); use `.nat(Nat::Easiest)` if you specifically want to model
+// blocked); use `.nat(Nat::Open)` if you specifically want to model
 // a full-cone CGNAT.
 let isp = lab.add_router("isp").preset(RouterPreset::IspCgnat).build().await?;
 let home = lab.add_router("home")

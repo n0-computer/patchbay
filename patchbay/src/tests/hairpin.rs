@@ -2,7 +2,7 @@
 //!
 //! Hairpinning lets a LAN device reach a peer on the same router via
 //! the router's public IP+port, rather than requiring a direct LAN
-//! connection. `Nat::Easy` leaves it disabled; opt in with a custom
+//! connection. `Nat::Moderate` leaves it disabled; opt in with a custom
 //! `NatConfig` setting `hairpin(true)`.
 
 use super::*;
@@ -68,7 +68,7 @@ async fn fullcone_allows() -> Result<()> {
 async fn home_nat_blocks() -> Result<()> {
     let lab = Lab::new().await?;
     let dc = lab.add_router("dc").build().await?;
-    let r = lab.add_router("r").nat(Nat::Easy).build().await?;
+    let r = lab.add_router("r").nat(Nat::Moderate).build().await?;
     let a = lab.add_device("a").iface("eth0", r.id()).build().await?;
     let b = lab.add_device("b").iface("eth0", r.id()).build().await?;
 

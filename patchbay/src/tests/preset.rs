@@ -126,7 +126,7 @@ async fn preset_corporate_blocks_udp() -> Result<()> {
     Ok(())
 }
 
-/// Preset with override: Home preset with Nat::Easiest overrides only NAT.
+/// Preset with override: Home preset with Nat::Open overrides only NAT.
 #[tokio::test(flavor = "current_thread")]
 #[traced_test]
 async fn preset_override() -> Result<()> {
@@ -144,7 +144,7 @@ async fn preset_override() -> Result<()> {
     let home = lab
         .add_router("home")
         .preset(RouterPreset::Home)
-        .nat(Nat::Easiest)
+        .nat(Nat::Open)
         .build()
         .await?;
 
@@ -187,7 +187,7 @@ fn preset_nat_snapshots() {
         (
             RouterPreset::Home,
             Expect {
-                nat_kind: Some(Nat::Easy),
+                nat_kind: Some(Nat::Moderate),
                 udp_stream: Some(300),
                 firewall: Firewall::BlockInbound,
                 ip_support: IpSupport::DualStack,
@@ -197,7 +197,7 @@ fn preset_nat_snapshots() {
         (
             RouterPreset::IspCgnat,
             Expect {
-                nat_kind: Some(Nat::Easy),
+                nat_kind: Some(Nat::Moderate),
                 udp_stream: Some(300),
                 firewall: Firewall::BlockInbound,
                 ip_support: IpSupport::DualStack,
@@ -207,7 +207,7 @@ fn preset_nat_snapshots() {
         (
             RouterPreset::IspCgnatSymmetric,
             Expect {
-                nat_kind: Some(Nat::Hard),
+                nat_kind: Some(Nat::Strict),
                 udp_stream: Some(180),
                 firewall: Firewall::BlockInbound,
                 ip_support: IpSupport::DualStack,
@@ -217,7 +217,7 @@ fn preset_nat_snapshots() {
         (
             RouterPreset::Corporate,
             Expect {
-                nat_kind: Some(Nat::Hard),
+                nat_kind: Some(Nat::Strict),
                 udp_stream: Some(120),
                 firewall: Firewall::Corporate,
                 ip_support: IpSupport::DualStack,
@@ -227,7 +227,7 @@ fn preset_nat_snapshots() {
         (
             RouterPreset::Hotel,
             Expect {
-                nat_kind: Some(Nat::Hard),
+                nat_kind: Some(Nat::Strict),
                 udp_stream: Some(120),
                 firewall: Firewall::CaptivePortal,
                 ip_support: IpSupport::V4Only,
@@ -237,7 +237,7 @@ fn preset_nat_snapshots() {
         (
             RouterPreset::Cloud,
             Expect {
-                nat_kind: Some(Nat::Hard),
+                nat_kind: Some(Nat::Strict),
                 udp_stream: Some(350),
                 firewall: Firewall::None,
                 ip_support: IpSupport::DualStack,

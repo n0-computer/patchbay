@@ -716,7 +716,7 @@ impl Router {
 /// // Override NAT while keeping the rest of the Home preset:
 /// let home = lab.add_router("home")
 ///     .preset(RouterPreset::Home)
-///     .nat(Nat::Easiest)
+///     .nat(Nat::Open)
 ///     .build().await?;
 /// ```
 ///
@@ -772,7 +772,7 @@ pub enum RouterPreset {
     /// subscribers via CGNAT. RFC 6888 mandates endpoint-independent mapping
     /// (EIM). In practice most compliant deployments pair EIM with
     /// address-and-port-dependent filtering (APDF), matching
-    /// [`Nat::Easy`](crate::Nat::Easy), rather than the more permissive EIF
+    /// [`Nat::Moderate`](crate::Nat::Moderate), rather than the more permissive EIF
     /// that the original "full cone CGNAT" description implied. Standard
     /// UDP hole-punching succeeds. IPv6 addresses are globally routable but
     /// the firewall blocks unsolicited inbound.
@@ -797,7 +797,7 @@ pub enum RouterPreset {
     /// CGN. When testing keep-alive behavior for a specific carrier,
     /// override with `.udp_stream_timeout(secs)`.
     ///
-    /// patchbay simulates this as [`Nat::Hard`](crate::Nat::Hard) with
+    /// patchbay simulates this as [`Nat::Strict`](crate::Nat::Strict) with
     /// random port allocation. Real port-preserving symmetric CGNAT
     /// (SYMPP, punchable through port prediction) is not modeled
     /// distinctly; see [the NAT limits
@@ -880,16 +880,16 @@ impl RouterPreset {
         // Each preset starts from a `Nat::*` expansion and overrides only
         // timeouts. `Nat::*.to_config()` supplies the mapping and filtering.
         //
-        // `Nat::Hard` covers every symmetric-NAT preset. See
+        // `Nat::Strict` covers every symmetric-NAT preset. See
         // docs/reference/nat-limitations.md for why `IspCgnatSymmetric`
         // does not simulate port-preserving symmetric NAT (SYMPP)
         // distinctly from random-port symmetric NAT.
         let base = match self {
             Self::Public | Self::PublicV4 | Self::IspV6 => Nat::None,
             // RFC 6888 mandates EIM; most compliant deployments pair it
-            // with APDF rather than EIF, matching Nat::Easy.
-            Self::Home | Self::IspCgnat => Nat::Easy,
-            Self::IspCgnatSymmetric | Self::Corporate | Self::Hotel | Self::Cloud => Nat::Hard,
+            // with APDF rather than EIF, matching Nat::Moderate.
+            Self::Home | Self::IspCgnat => Nat::Moderate,
+            Self::IspCgnatSymmetric | Self::Corporate | Self::Hotel | Self::Cloud => Nat::Strict,
         };
         let mut cfg = base.to_config()?;
         // Override only the timeouts that differ from the home-router default
@@ -1053,7 +1053,7 @@ impl RouterBuilder {
     /// // Home router with full-cone NAT instead of default port-restricted:
     /// lab.add_router("home")
     ///     .preset(RouterPreset::Home)
-    ///     .nat(Nat::Easiest)
+    ///     .nat(Nat::Open)
     ///     .build().await?;
     /// ```
     pub fn preset(mut self, p: RouterPreset) -> Self {
@@ -1073,7 +1073,7 @@ impl RouterBuilder {
     ///
     /// # Example
     /// ```ignore
-    /// lab.add_router("home").nat(Nat::Easy).build().await?;
+    /// lab.add_router("home").nat(Nat::Moderate).build().await?;
     /// lab.add_router("cfg").nat(NatConfig::builder().build()).build().await?;
     /// lab.add_router("direct").nat(None).build().await?;
     /// ```

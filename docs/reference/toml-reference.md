@@ -670,7 +670,7 @@ name = "dc"
 # A home NAT router (endpoint-independent mapping, port-restricted filtering)
 [[router]]
 name = "lan-client"
-nat  = "easy"
+nat  = "moderate"
 
 # A device with one interface behind the DC router
 [device.server.eth0]
@@ -715,9 +715,9 @@ RFC 3489 and RFC 4787 labels and the real-world deployments each models.
 |-------------|----------|
 | (absent)    | No NAT; device has a public IP on the upstream network. |
 | `"none"`    | Same as absent. |
-| `"easiest"` | EIM+EIF: any external host can reach the mapped port (full cone). |
-| `"easy"`    | EIM+APDF: same external port for all destinations (port-restricted cone). Default of most home routers. |
-| `"hard"`    | EDM+APDF with random ports: symmetric NAT that requires a relay. |
+| `"open"`     | EIM+EIF: any external host can reach the mapped port (full cone). |
+| `"moderate"` | EIM+APDF: same external port for all destinations (port-restricted cone). Default of most home routers. |
+| `"strict"`   | EDM+APDF with random ports: symmetric NAT that requires a relay. |
 
 **Region latency** can be added to introduce inter-router delays:
 

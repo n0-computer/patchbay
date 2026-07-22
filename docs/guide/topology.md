@@ -31,11 +31,11 @@ multi-layer topologies like ISP + home or corporate gateway + branch
 office:
 
 ```rust
-let isp = lab.add_router("isp").nat(Nat::Easiest).build().await?;
+let isp = lab.add_router("isp").nat(Nat::Open).build().await?;
 let home = lab
     .add_router("home")
     .upstream(isp.id())
-    .nat(Nat::Easy)
+    .nat(Nat::Moderate)
     .build()
     .await?;
 ```
@@ -66,19 +66,19 @@ the preset configures:
 
 | Preset | NAT | Firewall | IP support | Pool |
 |--------|-----|----------|------------|------|
-| `Home` | `Easy` (EIM+APDF) | BlockInbound | DualStack | Private |
+| `Home` | `Moderate` (EIM+APDF) | BlockInbound | DualStack | Private |
 | `Public` | None | None | DualStack | Public |
 | `PublicV4` | None | None | V4Only | Public |
-| `IspCgnat` | `Easy` (EIM+APDF) | BlockInbound | DualStack | Private |
-| `IspCgnatSymmetric` | `Hard` (EDM+APDF, random) | BlockInbound | DualStack | Private |
+| `IspCgnat` | `Moderate` (EIM+APDF) | BlockInbound | DualStack | Private |
+| `IspCgnatSymmetric` | `Strict` (EDM+APDF, random) | BlockInbound | DualStack | Private |
 | `IspV6` | None (v4), NAT64 (v6) | BlockInbound | V6Only | Public |
-| `Corporate` | `Hard` (EDM+APDF, random) | Corporate | DualStack | Private |
-| `Hotel` | `Hard` (EDM+APDF, random) | CaptivePortal | V4Only | Private |
-| `Cloud` | `Hard` (EDM+APDF, random) | None | DualStack | Private |
+| `Corporate` | `Strict` (EDM+APDF, random) | Corporate | DualStack | Private |
+| `Hotel` | `Strict` (EDM+APDF, random) | CaptivePortal | V4Only | Private |
+| `Cloud` | `Strict` (EDM+APDF, random) | None | DualStack | Private |
 
 Methods called after `.preset()` override the preset's defaults, so you
 can use a preset as a starting point and customize individual settings.
-For example, `RouterPreset::Home` with `.nat(Nat::Easiest)` gives you a
+For example, `RouterPreset::Home` with `.nat(Nat::Open)` gives you a
 home topology with full-cone NAT instead of the default
 port-restricted filtering.
 

@@ -4,9 +4,17 @@ use serde::{Deserialize, Serialize};
 
 /// NAT behavior for IPv4.
 ///
-/// The variants form a gradient of hole-punching difficulty. `Easiest` and
-/// `Easy` are reachable with standard UDP hole-punching. `Hard` requires a
-/// relay like TURN.
+/// The variants form a gradient of hole-punching difficulty, named after the
+/// console NAT-type scale (`Open` / `Moderate` / `Strict`). `Open` and
+/// `Moderate` are reachable with standard UDP hole-punching; `Strict` requires
+/// a relay like TURN. Each maps to a classic RFC 3489 cone type and a precise
+/// RFC 4787 mapping-and-filtering pair, documented per variant below:
+///
+/// | Variant | RFC 3489 | RFC 4787 |
+/// |----------|----------|----------|
+/// | `Open` | Full Cone | EIM + EIF |
+/// | `Moderate` | Port-Restricted Cone | EIM + APDF |
+/// | `Strict` | Symmetric | EDM (random ports) + APDF |
 ///
 /// Each preset expands to a [`NatConfig`] via [`Nat::to_config`]. Timeouts
 /// and hairpin behavior come from [`ConntrackTimeouts::default`] and
@@ -17,7 +25,7 @@ use serde::{Deserialize, Serialize};
 ///
 /// Real-world "port-preserving symmetric" (SYMPP) hardware exists and is
 /// hole-punchable with port prediction, forming a middle tier between
-/// `Easy` and `Hard`. patchbay does not model it distinctly: Linux
+/// `Moderate` and `Strict`. patchbay does not model it distinctly: Linux
 /// `nftables` cannot produce true per-destination port allocation that
 /// preserves the source port, and simulating SYMPP through plain
 /// `masquerade` converges on EIM-like behavior under light load. See
@@ -51,7 +59,7 @@ pub enum Nat {
     /// RFC 3489: Full Cone.
     /// RFC 4787: Endpoint-Independent Mapping, Endpoint-Independent
     /// Filtering.
-    Easiest,
+    Open,
 
     /// Moderately restrictive NAT.
     ///
@@ -65,7 +73,7 @@ pub enum Nat {
     /// RFC 3489: Port Restricted Cone.
     /// RFC 4787: Endpoint-Independent Mapping, Address-and-Port-Dependent
     /// Filtering.
-    Easy,
+    Moderate,
 
     /// Most restrictive NAT.
     ///
@@ -77,7 +85,7 @@ pub enum Nat {
     /// RFC 3489: Symmetric.
     /// RFC 4787: Endpoint-Dependent Mapping with random ports,
     /// Address-and-Port-Dependent Filtering.
-    Hard,
+    Strict,
 
     /// Fully custom NAT configuration.
     ///
@@ -108,15 +116,15 @@ impl From<Nat> for Option<NatConfig> {
     fn from(nat: Nat) -> Self {
         let (mapping, filtering) = match nat {
             Nat::None => return None,
-            Nat::Easiest => (
+            Nat::Open => (
                 NatMapping::EndpointIndependent,
                 NatFiltering::EndpointIndependent,
             ),
-            Nat::Easy => (
+            Nat::Moderate => (
                 NatMapping::EndpointIndependent,
                 NatFiltering::AddressAndPortDependent,
             ),
-            Nat::Hard => (
+            Nat::Strict => (
                 NatMapping::EndpointDependent,
                 NatFiltering::AddressAndPortDependent,
             ),
@@ -254,7 +262,7 @@ impl std::error::Error for NatConfigError {}
 
 /// Expanded NAT configuration produced from a [`Nat`] preset or the builder.
 ///
-/// Each preset ([`Nat::Easy`], [`Nat::Hard`], etc.) expands via
+/// Each preset ([`Nat::Moderate`], [`Nat::Strict`], etc.) expands via
 /// [`Nat::to_config`]. Custom configurations are built with
 /// [`NatConfig::builder`], which validates cross-field invariants at
 /// construction time.
@@ -518,7 +526,7 @@ mod tests {
 
     #[test]
     fn nat_to_config_covers_every_preset() {
-        for nat in [Nat::None, Nat::Easiest, Nat::Easy, Nat::Hard] {
+        for nat in [Nat::None, Nat::Open, Nat::Moderate, Nat::Strict] {
             let cfg = nat.to_config();
             assert_eq!(cfg.is_none(), nat == Nat::None);
         }
@@ -526,21 +534,21 @@ mod tests {
 
     #[test]
     fn nat_easiest_is_eim_eif() {
-        let cfg = Nat::Easiest.to_config().unwrap();
+        let cfg = Nat::Open.to_config().unwrap();
         assert_eq!(cfg.mapping, NatMapping::EndpointIndependent);
         assert_eq!(cfg.filtering, NatFiltering::EndpointIndependent);
     }
 
     #[test]
     fn nat_easy_is_eim_apdf() {
-        let cfg = Nat::Easy.to_config().unwrap();
+        let cfg = Nat::Moderate.to_config().unwrap();
         assert_eq!(cfg.mapping, NatMapping::EndpointIndependent);
         assert_eq!(cfg.filtering, NatFiltering::AddressAndPortDependent);
     }
 
     #[test]
     fn nat_hard_is_edm_apdf() {
-        let cfg = Nat::Hard.to_config().unwrap();
+        let cfg = Nat::Strict.to_config().unwrap();
         assert_eq!(cfg.mapping, NatMapping::EndpointDependent);
         assert_eq!(cfg.filtering, NatFiltering::AddressAndPortDependent);
     }

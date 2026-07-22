@@ -26,12 +26,12 @@ simulates:
 
 | Preset | Mapping | Filtering | Port preservation | Hole-punch? | Real-world examples |
 |--------|---------|-----------|-------------------|-------------|---------------------|
-| `Nat::Easiest` | EIM | EIF | Always | Older consumer routers, routers with UPnP or static forwarding |
-| `Nat::Easy` | EIM | APDF | Yes, via UDP hole-punching with simultaneous send | Most home routers (FritzBox, Unifi, TP-Link, ASUS, OpenWRT); typical RFC 6888 compliant CGNAT |
-| `Nat::Hard` | EDM | APDF | No, requires a relay | Cisco ASA, Palo Alto, Fortinet, AWS/Azure/GCP NAT Gateway, mobile carriers, symmetric CGNAT |
+| `Nat::Open` | EIM | EIF | Always | Older consumer routers, routers with UPnP or static forwarding |
+| `Nat::Moderate` | EIM | APDF | Yes, via UDP hole-punching with simultaneous send | Most home routers (FritzBox, Unifi, TP-Link, ASUS, OpenWRT); typical RFC 6888 compliant CGNAT |
+| `Nat::Strict` | EDM | APDF | No, requires a relay | Cisco ASA, Palo Alto, Fortinet, AWS/Azure/GCP NAT Gateway, mobile carriers, symmetric CGNAT |
 
 A fourth class exists in the wild — port-preserving symmetric NAT
-(SYMPP) — but patchbay models it as `Hard`. See
+(SYMPP) — but patchbay models it as `Strict`. See
 [NAT simulation limits](nat-limitations.md) for the rationale.
 
 ## The fullcone dynamic map
@@ -83,7 +83,7 @@ by outbound traffic.
 
 ### Endpoint-independent filtering (full cone)
 
-`Nat::Easiest` uses the fullcone map above with no additional filtering.
+`Nat::Open` uses the fullcone map above with no additional filtering.
 The prerouting DNAT fires for any inbound packet whose destination port
 appears in the map, regardless of source address. Once an internal device
 sends one outbound packet, any external host can reach it on the mapped
@@ -99,7 +99,7 @@ APDF but documented on some consumer routers.
 
 ### Address-and-port-dependent filtering (port-restricted cone)
 
-`Nat::Easy` uses the same fullcone map for endpoint-independent mapping,
+`Nat::Moderate` uses the same fullcone map for endpoint-independent mapping,
 plus a forward filter that restricts inbound traffic to established
 connections:
 
@@ -132,7 +132,7 @@ no matching outbound conntrack entry exists, so the packet arrives with
 
 ### Endpoint-dependent mapping (symmetric NAT)
 
-`Nat::Hard` uses `masquerade random` without a fullcone map:
+`Nat::Strict` uses `masquerade random` without a fullcone map:
 
 ```nft
 table ip nat {
@@ -233,7 +233,7 @@ backend cannot express: `EndpointDependent` mapping paired with
 
 The `generate_nat_rules` function in `nft.rs` builds nftables rules from
 `NatConfig` alone, without matching on `Nat` variants. Users can either
-use the named presets (`router.nat(Nat::Easy)`) or build custom
+use the named presets (`router.nat(Nat::Moderate)`) or build custom
 configurations via `NatConfig::builder`.
 
 ## NPTv6 implementation notes

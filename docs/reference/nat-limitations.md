@@ -15,9 +15,9 @@ gradient:
 
 | Preset | RFC 3489 | RFC 4787 | Backend |
 |--------|----------|----------|---------|
-| `Easiest` | Full Cone | EIM + EIF | `@fullcone` map, no filter |
-| `Easy` | Port Restricted Cone | EIM + APDF | `@fullcone` map, APDF filter |
-| `Hard` | Symmetric | EDM + APDF (random ports) | `masquerade random` |
+| `Open` | Full Cone | EIM + EIF | `@fullcone` map, no filter |
+| `Moderate` | Port Restricted Cone | EIM + APDF | `@fullcone` map, APDF filter |
+| `Strict` | Symmetric | EDM + APDF (random ports) | `masquerade random` |
 
 RFC 4787's third mapping class (`Address-Dependent Mapping`) is not
 modeled: no real-world deployment we are aware of uses it, and dropping
@@ -29,7 +29,7 @@ it keeps the gradient honest. RFC 4787's third filtering class
 
 ### What it is
 
-Some real-world hardware sits between `Easy` and `Hard`: endpoint-
+Some real-world hardware sits between `Moderate` and `Strict`: endpoint-
 dependent mapping (fresh mapping per destination, so STUN's reflexive
 address does not generalize) combined with port preservation (the
 external port matches the internal source port when free). The hole-
@@ -66,17 +66,17 @@ behavior:
   purposes.
 
 An earlier iteration of this library tried to simulate SYMPP with
-`masquerade` (no flag) and presented it as a separate `Nat::Hard` tier
+`masquerade` (no flag) and presented it as a separate `Nat::Strict` tier
 distinct from random symmetric NAT. The empirical test confirmed that
 in single-flow tests the two are indistinguishable. Shipping a preset
 that promises a distinction the backend cannot produce would mislead
 users writing hole-punching test suites; the library now models SYMPP
-as `Hard` (random) to keep simulation pessimistic and honest.
+as `Strict` (random) to keep simulation pessimistic and honest.
 
 ### Impact
 
 `RouterPreset::IspCgnatSymmetric` (which also represents the cellular
-CGNAT case) resolves to `Nat::Hard` (random symmetric NAT).
+CGNAT case) resolves to `Nat::Strict` (random symmetric NAT).
 Hole-punching tests against this preset will fail, as they would
 against any symmetric NAT without port prediction. Applications that
 rely on port-prediction-based traversal to reach peers behind real
@@ -131,7 +131,7 @@ conntrack UDP timeouts, fullcone UDP map). TCP goes through conntrack
 and SNAT normally, so outbound TCP works, but:
 
 - There is no TCP equivalent of the `@fullcone` map, so TCP "fullcone"
-  semantics are not distinctly modeled. TCP through `Nat::Easiest`
+  semantics are not distinctly modeled. TCP through `Nat::Open`
   behaves as whatever conntrack does for TCP, which in practice is
   closer to APDF.
 - TCP-specific NAT behaviors such as RST-on-expired-flow or SYN-cookies

@@ -140,8 +140,8 @@ table.
 ### NAT
 
 The `Nat` enum describes IPv4 NAT behavior on a difficulty gradient:
-`None`, `Easiest` (EIM + EIF), `Easy` (EIM + APDF), `Hard` (EDM with
-port preservation), `Hardest` (EDM with random ports), and `Custom`.
+`None`, `Open` (EIM + EIF), `Moderate` (EIM + APDF), `Strict` (EDM with random
+ports), and `Custom`.
 IPv6 has four modes: `None`, `Nptv6`, `Masquerade`, `Nat64`. Both are
 implemented with nftables. Build custom NAT configs from mapping plus
 filtering plus timeout parameters with `NatConfig::builder()`.
@@ -292,7 +292,7 @@ dev.iface("wlan0").unwrap().set_condition(LinkCondition::Manual(LinkLimits {
 }), LinkDirection::Both).await?;
 
 // Change NAT mode at runtime.
-router.set_nat(Nat::Hardest).await?;
+router.set_nat(Nat::Strict).await?;
 router.flush_nat_state().await?;
 ```
 
@@ -321,7 +321,7 @@ region = "eu"
 
 [[router]]
 name = "home"
-nat = "easy"
+nat = "moderate"
 
 [device.laptop.eth0]
 gateway = "home"

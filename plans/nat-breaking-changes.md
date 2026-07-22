@@ -9,13 +9,13 @@ gradient:
 
 | Old | New |
 |-----|-----|
-| `Nat::Home` | `Nat::Easy` |
-| `Nat::Cgnat` | `Nat::Easiest` |
-| `Nat::Corporate`, `Nat::CloudNat` | `Nat::Hard` |
-| `Nat::FullCone` | `Nat::Easiest` plus `hairpin(true)` if needed |
+| `Nat::Home` | `Nat::Moderate` |
+| `Nat::Cgnat` | `Nat::Open` |
+| `Nat::Corporate`, `Nat::CloudNat` | `Nat::Strict` |
+| `Nat::FullCone` | `Nat::Open` plus `hairpin(true)` if needed |
 | `Nat::None`, `Nat::Custom` | unchanged |
 
-The new variants: `None`, `Easiest` (EIM+EIF), `Easy` (EIM+APDF), `Hard`
+The new variants: `None`, `Open` (EIM+EIF), `Moderate` (EIM+APDF), `Strict`
 (EDM+APDF with random ports), and `Custom(NatConfig)`.
 
 ## `NatMapping`
@@ -57,7 +57,7 @@ builder validation and is documented as caller responsibility.
 - `IspCgnatHard` renamed to `IspCgnatSymmetric`, RFC 7753 citation
   dropped (that RFC is a PCP extension, not a PBA RFC; the preset does
   not model Port Block Allocation). Firewall `None` to `BlockInbound`.
-- `IspCgnatSymmetric` resolves to `Nat::Hard` (symmetric NAT with
+- `IspCgnatSymmetric` resolves to `Nat::Strict` (symmetric NAT with
   random ports) and covers both fixed-line symmetric CGN and cellular
   carriers. The docstring notes that published measurement data
   (Richter et al. IMC 2016) reports much shorter real-world UDP
@@ -98,7 +98,7 @@ disable NAT.
 
 ## TOML
 
-`[[router]] nat = "..."` accepts `none`, `easiest`, `easy`, `hard`,
+`[[router]] nat = "..."` accepts `none`, `open`, `moderate`, `strict`,
 `custom`. Old strings (`home`, `corporate`, `cgnat`, `cloud-nat`,
 `full-cone`, `hardest`) fail to parse.
 

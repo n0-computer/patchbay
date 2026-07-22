@@ -483,8 +483,8 @@ async fn hickory_resolve_relay_setup() -> Result<()> {
     dns.set_host("relay.test.", IpAddr::V4(relay_v4))?;
     dns.set_host("relay.test.", IpAddr::V6(relay_v6))?;
 
-    let nat1 = lab.add_router("nat1").nat(Nat::Easy).build().await?;
-    let nat2 = lab.add_router("nat2").nat(Nat::Easy).build().await?;
+    let nat1 = lab.add_router("nat1").nat(Nat::Moderate).build().await?;
+    let nat2 = lab.add_router("nat2").nat(Nat::Moderate).build().await?;
     let server = lab.add_device("server").uplink(nat1.id()).build().await?;
     let client = lab.add_device("client").uplink(nat2.id()).build().await?;
 
