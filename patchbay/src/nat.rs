@@ -300,6 +300,26 @@ impl NatConfig {
     pub fn builder() -> NatConfigBuilder {
         NatConfigBuilder::default()
     }
+
+    /// Checks the cross-field invariants that [`NatConfigBuilder::build`]
+    /// enforces.
+    ///
+    /// [`NatConfig`] exposes `pub` fields, so mutating one after construction
+    /// can produce a combination the nftables backend cannot express, such as
+    /// switching `mapping` to [`NatMapping::EndpointDependent`] while `hairpin`
+    /// is set. The apply path re-runs this check so such a config surfaces as a
+    /// [`NatConfigError`] instead of panicking in rule generation. See
+    /// [`NatConfigError`] for the specific rules.
+    pub fn validate(&self) -> Result<(), NatConfigError> {
+        let eim = matches!(self.mapping, NatMapping::EndpointIndependent);
+        if !eim && matches!(self.filtering, NatFiltering::AddressDependent) {
+            return Err(NatConfigError::AdfRequiresEim);
+        }
+        if !eim && self.hairpin {
+            return Err(NatConfigError::HairpinRequiresEim);
+        }
+        Ok(())
+    }
 }
 
 /// Builder for [`NatConfig`].
@@ -372,19 +392,14 @@ impl NatConfigBuilder {
     /// hairpin cannot be expressed in nftables. See [`NatConfigError`] for
     /// the specific rules.
     pub fn build(self) -> Result<NatConfig, NatConfigError> {
-        let eim = matches!(self.mapping, NatMapping::EndpointIndependent);
-        if !eim && matches!(self.filtering, NatFiltering::AddressDependent) {
-            return Err(NatConfigError::AdfRequiresEim);
-        }
-        if !eim && self.hairpin {
-            return Err(NatConfigError::HairpinRequiresEim);
-        }
-        Ok(NatConfig {
+        let cfg = NatConfig {
             mapping: self.mapping,
             filtering: self.filtering,
             timeouts: self.timeouts,
             hairpin: self.hairpin,
-        })
+        };
+        cfg.validate()?;
+        Ok(cfg)
     }
 }
 
@@ -486,6 +501,19 @@ mod tests {
             .build()
             .unwrap();
         assert_eq!(cfg.mapping, NatMapping::EndpointDependent);
+    }
+
+    #[test]
+    fn validate_catches_mutated_edm_hairpin() {
+        // Fields are public, so a caller can mutate a valid config into an
+        // invalid one. `validate` (run again on apply) must catch it.
+        let mut cfg = NatConfig::builder()
+            .mapping(NatMapping::EndpointIndependent)
+            .hairpin(true)
+            .build()
+            .unwrap();
+        cfg.mapping = NatMapping::EndpointDependent;
+        assert_eq!(cfg.validate(), Err(NatConfigError::HairpinRequiresEim));
     }
 
     #[test]

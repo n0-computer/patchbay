@@ -892,26 +892,24 @@ impl RouterPreset {
             Self::IspCgnatSymmetric | Self::Corporate | Self::Hotel | Self::Cloud => Nat::Hard,
         };
         let mut cfg = base.to_config()?;
+        // Override only the timeouts that differ from the home-router default
+        // (udp 30, udp_stream 300, tcp_established 7200).
         cfg.timeouts = match self {
-            Self::Home | Self::IspCgnat => ConntrackTimeouts {
-                udp: 30,
-                udp_stream: 300,
-                tcp_established: 7200,
-            },
+            Self::Home | Self::IspCgnat => ConntrackTimeouts::default(),
             Self::IspCgnatSymmetric => ConntrackTimeouts {
-                udp: 30,
                 udp_stream: 180,
                 tcp_established: 3600,
+                ..Default::default()
             },
             Self::Corporate | Self::Hotel => ConntrackTimeouts {
-                udp: 30,
                 udp_stream: 120,
                 tcp_established: 3600,
+                ..Default::default()
             },
             Self::Cloud => ConntrackTimeouts {
-                udp: 30,
                 udp_stream: 350,
                 tcp_established: 3600,
+                ..Default::default()
             },
             Self::Public | Self::PublicV4 | Self::IspV6 => {
                 unreachable!("presets without NAT returned via Nat::None above")
@@ -1509,5 +1507,24 @@ impl RouterBuilder {
             router.set_downlink_condition(Some(cond)).await?;
         }
         Ok(router)
+    }
+}
+
+#[cfg(test)]
+mod inference_guards {
+    //! Compile-only guards: a bare `None` must infer `Option<NatConfig>`
+    //! through the `Into<Option<NatConfig>>` bound with no turbofish, matching
+    //! the documented `nat(None)` and `set_nat(None)` examples. These functions
+    //! are never called; they exist to fail the build if inference regresses.
+    use super::*;
+
+    #[allow(dead_code)]
+    fn nat_none_infers(b: RouterBuilder) -> RouterBuilder {
+        b.nat(None)
+    }
+
+    #[allow(dead_code)]
+    async fn set_nat_none_infers(r: &Router) {
+        let _ = r.set_nat(None).await;
     }
 }

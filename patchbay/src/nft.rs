@@ -61,8 +61,8 @@ pub(crate) async fn run_nft_in(netns: &netns::NetnsManager, ns: &str, rules: &st
 /// Generates nftables rules for a [`NatConfig`].
 ///
 /// EIM uses a dynamic fullcone map to preserve source ports across destinations.
-/// EDM uses `masquerade` with or without the `random` flag depending on the
-/// always `masquerade random` (true symmetric NAT).
+/// EDM always uses `masquerade random`, allocating a fresh random external port
+/// per destination 4-tuple (true symmetric NAT).
 /// EIF produces an unconditional fullcone DNAT in prerouting.
 /// ADF and APDF add a forward filter that only allows established/related
 /// flows. ADF additionally permits packets from any port on a
@@ -103,9 +103,9 @@ fn generate_nat_rules(cfg: &NatConfig, wan_if: &str, wan_ip: Ipv4Addr) -> String
         }
     } else if hairpin {
         unreachable!(
-            "NatConfigBuilder rejects EndpointDependent + hairpin \
-             (NatConfigError::HairpinRequiresEim); reaching this branch \
-             would mean an invalid NatConfig slipped past validation"
+            "EndpointDependent + hairpin is rejected by NatConfigBuilder::build \
+             and re-checked by NatConfig::validate in apply_nat_config \
+             (NatConfigError::HairpinRequiresEim), so this branch is unreachable"
         )
     } else {
         String::new()
@@ -174,12 +174,16 @@ table ip filter {{
             wan = wan_if
         ),
         NatFiltering::AddressDependent => format!(
+            // The contacted-address entry lives as long as the flow that
+            // created it, so track the UDP stream timeout rather than a fixed
+            // 300s (which happens to be the default). A shorter per-config
+            // timeout then closes the address filter in step with conntrack.
             r#"
 table ip filter {{
     set contacted {{
         type ipv4_addr
         flags dynamic,timeout
-        timeout 300s
+        timeout {stream}s
         size 8192
     }}
     chain forward {{
@@ -193,7 +197,8 @@ table ip filter {{
         oif "{wan}" update @contacted {{ ip daddr }}
     }}
 }}"#,
-            wan = wan_if
+            wan = wan_if,
+            stream = cfg.timeouts.udp_stream,
         ),
     };
 
@@ -223,6 +228,12 @@ pub(crate) async fn apply_nat_config(
     wan_if: &str,
     wan_ip: Ipv4Addr,
 ) -> Result<()> {
+    // Re-validate cross-field invariants before generating rules. `NatConfig`
+    // has public fields, so a caller can mutate a built config into a
+    // combination the backend cannot express (EDM + hairpin, EDM + ADF).
+    // Surface that as an error here rather than as a panic in
+    // `generate_nat_rules`.
+    cfg.validate().map_err(anyhow::Error::new)?;
     let rules = generate_nat_rules(cfg, wan_if, wan_ip);
     run_nft_in(netns, ns, &rules).await?;
     apply_conntrack_timeouts_from_config(netns, ns, &cfg.timeouts)
