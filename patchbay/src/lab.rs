@@ -83,10 +83,19 @@ pub enum LinkDirection {
     Ingress,
 }
 
-/// Link-layer impairment profile applied via `tc netem`.
+/// Link-layer impairment profile applied via `tc netem` (and `tc tbf` for a rate
+/// cap).
 ///
 /// Named presets model common last-mile conditions. Use [`LinkCondition::Manual`]
-/// with [`LinkLimits`] for full control over all `tc netem` parameters.
+/// with [`LinkLimits`] for full control over all parameters.
+///
+/// The presets model loss as independent per-packet (Bernoulli) loss on an
+/// uncapped link (except the rate-limited ones). For a more faithful and more
+/// repeatable link, [`LinkLimits`] additionally exposes
+/// [`buffer_ms`](LinkLimits::buffer_ms) -- an RTT-sized rate-limiter buffer, so
+/// loss emerges from congestion (buffer overflow) as on a real bottleneck -- and
+/// [`loss_burst_pkts`](LinkLimits::loss_burst_pkts) -- bursty Gilbert-Elliott
+/// loss instead of Bernoulli, matching how real links (fades, handovers) drop.
 #[derive(Clone, Copy, Debug, PartialEq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LinkCondition {
@@ -96,27 +105,30 @@ pub enum LinkCondition {
     Lan,
     /// Good WiFi — 5 GHz band, close to AP, low contention.
     ///
-    /// 5 ms one-way delay, 2 ms jitter, 0.1 % loss.
+    /// 200 Mbit, 4 ms one-way delay, 2 ms jitter, 0.1 % bursty loss, 15 ms buffer.
     Wifi,
     /// Congested WiFi — 2.4 GHz, far from AP, interference.
     ///
-    /// 40 ms one-way delay, 15 ms jitter, 2 % loss, 20 Mbit.
+    /// 25 Mbit, 25 ms one-way delay, 15 ms jitter, 1.5 % bursty loss, 60 ms buffer.
     WifiBad,
     /// 4G/LTE good signal.
     ///
-    /// 25 ms one-way delay, 8 ms jitter, 0.5 % loss.
+    /// 40 Mbit, 25 ms one-way delay (~50 ms RTT), 10 ms jitter, 0.3 % bursty loss,
+    /// 100 ms buffer.
     Mobile4G,
     /// 3G or degraded 4G.
     ///
-    /// 100 ms one-way delay, 30 ms jitter, 2 % loss, 2 Mbit.
+    /// 3 Mbit, 80 ms one-way delay, 25 ms jitter, 0.5 % bursty loss, 250 ms buffer.
     Mobile3G,
     /// LEO satellite (Starlink-class).
     ///
-    /// 40 ms one-way delay, 7 ms jitter, 1 % loss.
+    /// 100 Mbit, 22 ms one-way delay (~45 ms RTT), 10 ms jitter, 0.5 % bursty
+    /// loss, 50 ms buffer.
     Satellite,
     /// GEO satellite (HughesNet/Viasat).
     ///
-    /// 300 ms one-way delay, 20 ms jitter, 0.5 % loss, 25 Mbit.
+    /// 25 Mbit, 300 ms one-way delay (~600 ms RTT), 20 ms jitter, 0.3 % bursty
+    /// loss, 600 ms buffer.
     SatelliteGeo,
     /// Fully custom impairment parameters.
     Manual(LinkLimits),
@@ -158,42 +170,57 @@ impl LinkCondition {
         match self {
             LinkCondition::Lan => LinkLimits::default(),
             LinkCondition::Wifi => LinkLimits {
-                latency_ms: 5,
+                latency_ms: 4,
                 jitter_ms: 2,
                 loss_pct: 0.1,
+                loss_burst_pkts: 5,
+                rate_kbit: 200_000,
+                buffer_ms: 15,
                 ..Default::default()
             },
             LinkCondition::WifiBad => LinkLimits {
-                latency_ms: 40,
+                latency_ms: 25,
                 jitter_ms: 15,
-                loss_pct: 2.0,
-                rate_kbit: 20_000,
+                loss_pct: 1.5,
+                loss_burst_pkts: 8,
+                rate_kbit: 25_000,
+                buffer_ms: 60,
                 ..Default::default()
             },
             LinkCondition::Mobile4G => LinkLimits {
                 latency_ms: 25,
-                jitter_ms: 8,
-                loss_pct: 0.5,
+                jitter_ms: 10,
+                loss_pct: 0.3,
+                loss_burst_pkts: 6,
+                rate_kbit: 40_000,
+                buffer_ms: 100,
                 ..Default::default()
             },
             LinkCondition::Mobile3G => LinkLimits {
-                latency_ms: 100,
-                jitter_ms: 30,
-                loss_pct: 2.0,
-                rate_kbit: 2_000,
+                latency_ms: 80,
+                jitter_ms: 25,
+                loss_pct: 0.5,
+                loss_burst_pkts: 6,
+                rate_kbit: 3_000,
+                buffer_ms: 250,
                 ..Default::default()
             },
             LinkCondition::Satellite => LinkLimits {
-                latency_ms: 40,
-                jitter_ms: 7,
-                loss_pct: 1.0,
+                latency_ms: 22,
+                jitter_ms: 10,
+                loss_pct: 0.5,
+                loss_burst_pkts: 4,
+                rate_kbit: 100_000,
+                buffer_ms: 50,
                 ..Default::default()
             },
             LinkCondition::SatelliteGeo => LinkLimits {
                 latency_ms: 300,
                 jitter_ms: 20,
-                loss_pct: 0.5,
+                loss_pct: 0.3,
+                loss_burst_pkts: 4,
                 rate_kbit: 25_000,
+                buffer_ms: 600,
                 ..Default::default()
             },
             LinkCondition::Manual(limits) => limits,
