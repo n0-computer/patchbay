@@ -533,21 +533,21 @@ mod tests {
     }
 
     #[test]
-    fn nat_easiest_is_eim_eif() {
+    fn nat_open_is_eim_eif() {
         let cfg = Nat::Open.to_config().unwrap();
         assert_eq!(cfg.mapping, NatMapping::EndpointIndependent);
         assert_eq!(cfg.filtering, NatFiltering::EndpointIndependent);
     }
 
     #[test]
-    fn nat_easy_is_eim_apdf() {
+    fn nat_moderate_is_eim_apdf() {
         let cfg = Nat::Moderate.to_config().unwrap();
         assert_eq!(cfg.mapping, NatMapping::EndpointIndependent);
         assert_eq!(cfg.filtering, NatFiltering::AddressAndPortDependent);
     }
 
     #[test]
-    fn nat_hard_is_edm_apdf() {
+    fn nat_strict_is_edm_apdf() {
         let cfg = Nat::Strict.to_config().unwrap();
         assert_eq!(cfg.mapping, NatMapping::EndpointDependent);
         assert_eq!(cfg.filtering, NatFiltering::AddressAndPortDependent);
