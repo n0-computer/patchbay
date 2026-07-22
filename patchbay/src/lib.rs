@@ -100,13 +100,15 @@
 //!
 //! | Preset | NAT | Firewall | IP | Use case |
 //! |--------|-----|----------|----|----------|
-//! | [`Home`](RouterPreset::Home) | EIM + APDF | Block inbound | Dual | Consumer router (FritzBox, UniFi) |
+//! | [`Home`](RouterPreset::Home) | `Moderate` (EIM+APDF) | Block inbound | Dual | Consumer router (FritzBox, UniFi) |
 //! | [`Public`](RouterPreset::Public) | None | None | Dual | Datacenter switch, ISP handoff |
-//! | [`IspCgnat`](RouterPreset::IspCgnat) | CGNAT (EIM) | None | Dual | Carrier with shared IPv4 |
+//! | [`PublicV4`](RouterPreset::PublicV4) | None | None | V4 | Legacy v4-only hosting |
+//! | [`IspCgnat`](RouterPreset::IspCgnat) | `Moderate` (EIM+APDF) | Block inbound | Dual | RFC 6888 compliant CGNAT |
+//! | [`IspCgnatSymmetric`](RouterPreset::IspCgnatSymmetric) | `Strict` (EDM+APDF, random) | Block inbound | Dual | Symmetric CGNAT, including cellular |
 //! | [`IspV6`](RouterPreset::IspV6) | NAT64 | Block inbound | V6 | T-Mobile, Jio-style IPv6-only |
-//! | [`Corporate`](RouterPreset::Corporate) | Symmetric | TCP 80/443 only | Dual | Enterprise firewall |
-//! | [`Hotel`](RouterPreset::Hotel) | Symmetric | No UDP | V4 | Guest WiFi |
-//! | [`Cloud`](RouterPreset::Cloud) | Symmetric | None | Dual | AWS/GCP NAT gateway |
+//! | [`Corporate`](RouterPreset::Corporate) | `Strict` (EDM+APDF, random) | TCP 80/443, UDP 53 only | Dual | Enterprise firewall |
+//! | [`Hotel`](RouterPreset::Hotel) | `Strict` (EDM+APDF, random) | Captive portal (no UDP) | V4 | Guest WiFi |
+//! | [`Cloud`](RouterPreset::Cloud) | `Strict` (EDM+APDF, random) | None | Dual | AWS/GCP/Azure NAT gateway |
 //!
 //! # Link conditions
 //!
@@ -177,7 +179,7 @@
 //! dev.set_default_route("eth0").await?;
 //! dev.iface("wlan0").unwrap().link_down().await?;
 //! dev.iface("wlan0").unwrap().link_up().await?;
-//! router.set_nat_mode(Nat::Corporate).await?;
+//! router.set_nat(Nat::Strict).await?;
 //! router.flush_nat_state().await?;
 //! # Ok(())
 //! # }
@@ -242,8 +244,8 @@ pub use ipnet::Ipv4Net;
 pub use lab::{
     ConntrackTimeouts, DefaultRegions, Firewall, FirewallConfig, FirewallConfigBuilder, IpSupport,
     Ipv6DadMode, Ipv6Profile, Ipv6ProvisioningMode, Ix, Lab, LabBuilder, LinkCondition,
-    LinkDirection, LinkLimits, Nat, NatConfig, NatConfigBuilder, NatFiltering, NatMapping,
-    NatV6Mode, OutDir, Region, RegionLink, TestGuard,
+    LinkDirection, LinkLimits, Nat, NatConfig, NatConfigBuilder, NatConfigError, NatFiltering,
+    NatMapping, NatV6Mode, OutDir, Region, RegionLink, TestGuard,
 };
 pub use metrics::MetricsBuilder;
 pub use router::{Router, RouterBuilder, RouterIface, RouterPreset};

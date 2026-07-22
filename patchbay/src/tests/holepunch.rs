@@ -13,7 +13,7 @@ use super::*;
 #[traced_test]
 async fn fullcone_holepunch() -> Result<()> {
     let lab = Lab::new().await?;
-    let nat_mode = Nat::FullCone;
+    let nat_mode = Nat::Open;
     let dc = lab.add_router("dc").build().await?;
     let nat1 = lab.add_router("nat1").nat(nat_mode).build().await?;
     let nat2 = lab.add_router("nat2").nat(nat_mode).build().await?;
@@ -95,8 +95,8 @@ async fn home_nat_holepunch() -> Result<()> {
         info!("--- {label} ---");
         let lab = Lab::new().await?;
         let dc = lab.add_router("dc").build().await?;
-        let nat1 = lab.add_router("nat1").nat(Nat::Home).build().await?;
-        let nat2 = lab.add_router("nat2").nat(Nat::Home).build().await?;
+        let nat1 = lab.add_router("nat1").nat(Nat::Moderate).build().await?;
+        let nat2 = lab.add_router("nat2").nat(Nat::Moderate).build().await?;
         let stun = lab.add_device("stun").uplink(dc.id()).build().await?;
         let dev1 = lab.add_device("dev1").uplink(nat1.id()).build().await?;
         let dev2 = lab.add_device("dev2").uplink(nat2.id()).build().await?;

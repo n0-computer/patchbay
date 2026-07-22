@@ -33,7 +33,7 @@ async fn simple_lab_for_e2e() -> Result<()> {
     let home = lab
         .add_router("home")
         .upstream(isp.id())
-        .nat(Nat::Home)
+        .nat(Nat::Moderate)
         .build()
         .await?;
 

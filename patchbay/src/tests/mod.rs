@@ -329,7 +329,7 @@ async fn build_nat_case(
     let upstream = match wiring {
         UplinkWiring::DirectIx => None,
         UplinkWiring::ViaPublicIsp => Some(lab.add_router("isp").build().await?),
-        UplinkWiring::ViaCgnatIsp => Some(lab.add_router("isp").nat(Nat::Cgnat).build().await?),
+        UplinkWiring::ViaCgnatIsp => Some(lab.add_router("isp").nat(Nat::Open).build().await?),
     };
     let nat = {
         let mut rb = lab.add_router("nat").nat(nat_mode);
@@ -431,7 +431,7 @@ async fn build_single_nat_case(
     let upstream = match wiring {
         UplinkWiring::DirectIx => None,
         UplinkWiring::ViaPublicIsp => Some(lab.add_router("isp").build().await?),
-        UplinkWiring::ViaCgnatIsp => Some(lab.add_router("isp").nat(Nat::Cgnat).build().await?),
+        UplinkWiring::ViaCgnatIsp => Some(lab.add_router("isp").nat(Nat::Open).build().await?),
     };
     let nat = {
         let mut rb = lab.add_router("nat").nat(nat_mode);

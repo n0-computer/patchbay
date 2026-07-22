@@ -14,7 +14,7 @@ async fn corporate_blocks_udp() -> Result<()> {
 
     let corp = lab
         .add_router("corp")
-        .nat(Nat::Home)
+        .nat(Nat::Moderate)
         .firewall(Firewall::Corporate)
         .build()
         .await?;
@@ -56,7 +56,7 @@ async fn captive_portal_blocks_udp() -> Result<()> {
 
     let portal = lab
         .add_router("portal")
-        .nat(Nat::Home)
+        .nat(Nat::Moderate)
         .firewall(Firewall::CaptivePortal)
         .build()
         .await?;
@@ -96,7 +96,7 @@ async fn none_allows_all() -> Result<()> {
     let dc = lab.add_router("dc").build().await?;
     let dc_ip = dc.uplink_ip().context("no dc uplink ip")?;
 
-    let home = lab.add_router("home").nat(Nat::Home).build().await?;
+    let home = lab.add_router("home").nat(Nat::Moderate).build().await?;
 
     let dev = lab
         .add_device("laptop")
@@ -128,7 +128,7 @@ async fn custom_selective() -> Result<()> {
 
     let fw = lab
         .add_router("fw")
-        .nat(Nat::Home)
+        .nat(Nat::Moderate)
         .firewall_custom(|f| f.allow_udp(&[5000]).block_tcp())
         .build()
         .await?;
@@ -276,7 +276,7 @@ async fn runtime_change() -> Result<()> {
     let dc = lab.add_router("dc").build().await?;
     let dc_ip = dc.uplink_ip().context("no dc uplink ip")?;
 
-    let home = lab.add_router("home").nat(Nat::Home).build().await?;
+    let home = lab.add_router("home").nat(Nat::Moderate).build().await?;
 
     let dev = lab
         .add_device("laptop")

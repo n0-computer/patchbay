@@ -25,7 +25,7 @@ region = "eu"
 [[router]]
 name     = "lan1"
 upstream = "isp1"
-nat      = "home"
+nat      = "moderate"
 
 [device.dev1.eth0]
 gateway = "lan1"
@@ -68,7 +68,7 @@ async fn custom_downstream_cidr() -> Result<()> {
     let dc = lab.add_router("dc").build().await?;
     let custom = lab
         .add_router("custom")
-        .nat(Nat::Home)
+        .nat(Nat::Moderate)
         .downstream_cidr("172.30.99.0/24".parse()?)
         .build()
         .await?;

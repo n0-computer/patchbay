@@ -126,7 +126,7 @@ async fn preset_corporate_blocks_udp() -> Result<()> {
     Ok(())
 }
 
-/// Preset with override: Home preset with Nat::FullCone overrides only NAT.
+/// Preset with override: Home preset with Nat::Open overrides only NAT.
 #[tokio::test(flavor = "current_thread")]
 #[traced_test]
 async fn preset_override() -> Result<()> {
@@ -140,11 +140,11 @@ async fn preset_override() -> Result<()> {
         .await?;
     let dc_ip = dc.uplink_ip().context("no dc uplink ip")?;
 
-    // Home preset + FullCone NAT override.
+    // Home preset with full-cone NAT override.
     let home = lab
         .add_router("home")
         .preset(RouterPreset::Home)
-        .nat(Nat::FullCone)
+        .nat(Nat::Open)
         .build()
         .await?;
 
@@ -167,6 +167,155 @@ async fn preset_override() -> Result<()> {
     Ok(())
 }
 
+/// Snapshot of each preset's NAT config, firewall, IP support, and IPv6
+/// NAT mode. Changes here are intentional and should be matched by a
+/// corresponding update in the docs (`docs/guide/nat-and-firewalls.md`
+/// preset table) and in `plans/nat-breaking-changes.md`.
+#[test]
+fn preset_nat_snapshots() {
+    use crate::{Firewall, IpSupport, Nat, NatV6Mode};
+
+    struct Expect {
+        nat_kind: Option<Nat>,
+        udp_stream: Option<u32>,
+        firewall: Firewall,
+        ip_support: IpSupport,
+        nat_v6: NatV6Mode,
+    }
+
+    let cases: &[(RouterPreset, Expect)] = &[
+        (
+            RouterPreset::Home,
+            Expect {
+                nat_kind: Some(Nat::Moderate),
+                udp_stream: Some(300),
+                firewall: Firewall::BlockInbound,
+                ip_support: IpSupport::DualStack,
+                nat_v6: NatV6Mode::None,
+            },
+        ),
+        (
+            RouterPreset::IspCgnat,
+            Expect {
+                nat_kind: Some(Nat::Moderate),
+                udp_stream: Some(300),
+                firewall: Firewall::BlockInbound,
+                ip_support: IpSupport::DualStack,
+                nat_v6: NatV6Mode::None,
+            },
+        ),
+        (
+            RouterPreset::IspCgnatSymmetric,
+            Expect {
+                nat_kind: Some(Nat::Strict),
+                udp_stream: Some(180),
+                firewall: Firewall::BlockInbound,
+                ip_support: IpSupport::DualStack,
+                nat_v6: NatV6Mode::None,
+            },
+        ),
+        (
+            RouterPreset::Corporate,
+            Expect {
+                nat_kind: Some(Nat::Strict),
+                udp_stream: Some(120),
+                firewall: Firewall::Corporate,
+                ip_support: IpSupport::DualStack,
+                nat_v6: NatV6Mode::None,
+            },
+        ),
+        (
+            RouterPreset::Hotel,
+            Expect {
+                nat_kind: Some(Nat::Strict),
+                udp_stream: Some(120),
+                firewall: Firewall::CaptivePortal,
+                ip_support: IpSupport::V4Only,
+                nat_v6: NatV6Mode::None,
+            },
+        ),
+        (
+            RouterPreset::Cloud,
+            Expect {
+                nat_kind: Some(Nat::Strict),
+                udp_stream: Some(350),
+                firewall: Firewall::None,
+                ip_support: IpSupport::DualStack,
+                nat_v6: NatV6Mode::None,
+            },
+        ),
+        (
+            RouterPreset::Public,
+            Expect {
+                nat_kind: None,
+                udp_stream: None,
+                firewall: Firewall::None,
+                ip_support: IpSupport::DualStack,
+                nat_v6: NatV6Mode::None,
+            },
+        ),
+        (
+            RouterPreset::PublicV4,
+            Expect {
+                nat_kind: None,
+                udp_stream: None,
+                firewall: Firewall::None,
+                ip_support: IpSupport::V4Only,
+                nat_v6: NatV6Mode::None,
+            },
+        ),
+        (
+            RouterPreset::IspV6,
+            Expect {
+                nat_kind: None,
+                udp_stream: None,
+                firewall: Firewall::BlockInbound,
+                ip_support: IpSupport::V6Only,
+                nat_v6: NatV6Mode::Nat64,
+            },
+        ),
+    ];
+    for (preset, expect) in cases {
+        let preset = *preset;
+        let cfg = preset.nat_config();
+        match (cfg, expect.nat_kind) {
+            (None, None) => {}
+            (Some(actual), Some(kind)) => {
+                let expected_cfg = kind.to_config().expect("kind is not Nat::None");
+                assert_eq!(actual.mapping, expected_cfg.mapping, "{preset:?}: mapping");
+                assert_eq!(
+                    actual.filtering, expected_cfg.filtering,
+                    "{preset:?}: filtering"
+                );
+                assert!(!actual.hairpin, "{preset:?}: hairpin must default to false");
+                let udp_stream = expect.udp_stream.expect("set when kind is Some");
+                assert_eq!(
+                    actual.timeouts.udp_stream, udp_stream,
+                    "{preset:?}: udp_stream"
+                );
+            }
+            (actual, expected) => {
+                panic!("{preset:?}: nat mismatch: actual={actual:?}, expected={expected:?}");
+            }
+        }
+        assert_eq!(
+            preset.firewall_for_tests(),
+            expect.firewall,
+            "{preset:?}: firewall"
+        );
+        assert_eq!(
+            preset.ip_support_for_tests(),
+            expect.ip_support,
+            "{preset:?}: ip_support"
+        );
+        assert_eq!(
+            preset.nat_v6_for_tests(),
+            expect.nat_v6,
+            "{preset:?}: nat_v6"
+        );
+    }
+}
+
 /// All presets recommend Ipv6Profile::Realistic.
 #[tokio::test(flavor = "current_thread")]
 #[traced_test]
@@ -176,6 +325,7 @@ async fn preset_recommended_ipv6_profiles() -> Result<()> {
         RouterPreset::Public,
         RouterPreset::PublicV4,
         RouterPreset::IspCgnat,
+        RouterPreset::IspCgnatSymmetric,
         RouterPreset::IspV6,
         RouterPreset::Corporate,
         RouterPreset::Hotel,

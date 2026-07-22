@@ -50,7 +50,7 @@ async fn tcp_through_nat() -> Result<()> {
     let dc = lab.add_router("dc").build().await?;
     let home = lab
         .add_router("home")
-        .nat(Nat::Home)
+        .nat(Nat::Moderate)
         .build()
         .await?;
 

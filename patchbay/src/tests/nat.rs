@@ -8,12 +8,12 @@ use super::*;
 async fn cgnat_reflexive_ip() -> Result<()> {
     check_caps()?;
     let lab = Lab::new().await?;
-    let isp = lab.add_router("isp1").nat(Nat::Cgnat).build().await?;
+    let isp = lab.add_router("isp1").nat(Nat::Open).build().await?;
     let dc = lab.add_router("dc1").build().await?;
     let home = lab
         .add_router("home1")
         .upstream(isp.id())
-        .nat(Nat::Home)
+        .nat(Nat::Moderate)
         .build()
         .await?;
     lab.add_device("dev1")
@@ -45,17 +45,17 @@ async fn cgnat_shared_reflexive_ip() -> Result<()> {
     check_caps()?;
     let lab = Lab::new().await?;
     let dc = lab.add_router("dc").build().await?;
-    let isp = lab.add_router("isp").nat(Nat::Cgnat).build().await?;
+    let isp = lab.add_router("isp").nat(Nat::Open).build().await?;
     let lan_provider = lab
         .add_router("lan-provider")
         .upstream(isp.id())
-        .nat(Nat::Home)
+        .nat(Nat::Moderate)
         .build()
         .await?;
     let lan_fetcher = lab
         .add_router("lan-fetcher")
         .upstream(isp.id())
-        .nat(Nat::Home)
+        .nat(Nat::Moderate)
         .build()
         .await?;
     lab.add_device("provider")
@@ -127,13 +127,13 @@ async fn matrix_connectivity_and_reflexive_ip() -> Result<()> {
     check_caps()?;
     let cases = [
         (Nat::None, UplinkWiring::DirectIx),
-        (Nat::Cgnat, UplinkWiring::DirectIx),
-        (Nat::Home, UplinkWiring::DirectIx),
-        (Nat::Home, UplinkWiring::ViaPublicIsp),
-        (Nat::Home, UplinkWiring::ViaCgnatIsp),
-        (Nat::Corporate, UplinkWiring::DirectIx),
-        (Nat::Corporate, UplinkWiring::ViaPublicIsp),
-        (Nat::Corporate, UplinkWiring::ViaCgnatIsp),
+        (Nat::Open, UplinkWiring::DirectIx),
+        (Nat::Moderate, UplinkWiring::DirectIx),
+        (Nat::Moderate, UplinkWiring::ViaPublicIsp),
+        (Nat::Moderate, UplinkWiring::ViaCgnatIsp),
+        (Nat::Strict, UplinkWiring::DirectIx),
+        (Nat::Strict, UplinkWiring::ViaPublicIsp),
+        (Nat::Strict, UplinkWiring::ViaCgnatIsp),
     ];
 
     let mut case_idx = 0u16;
@@ -165,8 +165,8 @@ async fn private_isolation_public_reachable() -> Result<()> {
     check_caps()?;
     let lab = Lab::new().await?;
     let dc = lab.add_router("dc").build().await?;
-    let nat_a = lab.add_router("nat-a").nat(Nat::Home).build().await?;
-    let nat_b = lab.add_router("nat-b").nat(Nat::Home).build().await?;
+    let nat_a = lab.add_router("nat-a").nat(Nat::Moderate).build().await?;
+    let nat_b = lab.add_router("nat-b").nat(Nat::Moderate).build().await?;
 
     let relay = lab
         .add_device("relay")
@@ -235,17 +235,17 @@ async fn wan_pool_selection() -> Result<()> {
     check_caps()?;
     let lab = Lab::new().await?;
     let isp_public = lab.add_router("isp-public").build().await?;
-    let isp_cgnat = lab.add_router("isp-cgnat").nat(Nat::Cgnat).build().await?;
+    let isp_cgnat = lab.add_router("isp-cgnat").nat(Nat::Open).build().await?;
     let home_public = lab
         .add_router("home-public")
         .upstream(isp_public.id())
-        .nat(Nat::Home)
+        .nat(Nat::Moderate)
         .build()
         .await?;
     let home_cgnat = lab
         .add_router("home-cgnat")
         .upstream(isp_cgnat.id())
-        .nat(Nat::Home)
+        .nat(Nat::Moderate)
         .build()
         .await?;
 
@@ -328,7 +328,7 @@ async fn port_mapping_eim_stable() -> Result<()> {
     let mut failures = Vec::new();
     for wiring in UplinkWiring::iter() {
         let result: Result<()> = async {
-            let (lab, ctx) = build_nat_case(Nat::Home, wiring, port_base).await?;
+            let (lab, ctx) = build_nat_case(Nat::Moderate, wiring, port_base).await?;
             let dev = lab.device_by_name("dev").unwrap();
             let o1 = dev.probe_udp_mapping(ctx.r_dc)?;
             let o2 = dev.probe_udp_mapping(ctx.r_ix)?;
@@ -353,7 +353,10 @@ async fn port_mapping_eim_stable() -> Result<()> {
     Ok(())
 }
 
-/// EDM (Corporate NAT): external port differs between two reflectors.
+/// EDM (Nat::Strict, symmetric NAT): external port differs between two
+/// reflectors. The nftables backend uses `masquerade random`, which
+/// assigns a fresh, random port per flow regardless of source-port
+/// availability.
 #[tokio::test(flavor = "current_thread")]
 #[traced_test]
 async fn port_mapping_edm_changes() -> Result<()> {
@@ -362,7 +365,7 @@ async fn port_mapping_edm_changes() -> Result<()> {
     let mut failures = Vec::new();
     for wiring in UplinkWiring::iter() {
         let result: Result<()> = async {
-            let (lab, ctx) = build_nat_case(Nat::Corporate, wiring, port_base).await?;
+            let (lab, ctx) = build_nat_case(Nat::Strict, wiring, port_base).await?;
             let dev = lab.device_by_name("dev").unwrap();
             let o1 = dev.probe_udp_mapping(ctx.r_dc)?;
             let o2 = dev.probe_udp_mapping(ctx.r_ix)?;
@@ -393,7 +396,7 @@ async fn port_mapping_edm_changes() -> Result<()> {
 async fn same_nat_shared_ip() -> Result<()> {
     let lab = Lab::new().await?;
     let dc = lab.add_router("dc").build().await?;
-    let nat = lab.add_router("nat").nat(Nat::Home).build().await?;
+    let nat = lab.add_router("nat").nat(Nat::Moderate).build().await?;
     let dev_a = lab
         .add_device("dev-a")
         .iface("eth0", nat.id())
@@ -426,8 +429,8 @@ async fn same_nat_shared_ip() -> Result<()> {
 async fn different_nat_isolation() -> Result<()> {
     let lab = Lab::new().await?;
     let dc = lab.add_router("dc").build().await?;
-    let nat_a = lab.add_router("nat-a").nat(Nat::Home).build().await?;
-    let nat_b = lab.add_router("nat-b").nat(Nat::Home).build().await?;
+    let nat_a = lab.add_router("nat-a").nat(Nat::Moderate).build().await?;
+    let nat_b = lab.add_router("nat-b").nat(Nat::Moderate).build().await?;
     let dev_a = lab
         .add_device("dev-a")
         .iface("eth0", nat_a.id())
@@ -484,7 +487,7 @@ async fn v6_masquerade() -> Result<()> {
     let home = lab
         .add_router("nat")
         .upstream(isp.id())
-        .nat(Nat::Home)
+        .nat(Nat::Moderate)
         .ip_support(IpSupport::DualStack)
         .nat_v6(NatV6Mode::Masquerade)
         .build()
@@ -528,7 +531,7 @@ async fn v6_no_translation() -> Result<()> {
     let home = lab
         .add_router("home")
         .upstream(isp.id())
-        .nat(Nat::Home)
+        .nat(Nat::Moderate)
         .ip_support(IpSupport::DualStack)
         .nat_v6(NatV6Mode::None)
         .build()
@@ -554,6 +557,124 @@ async fn v6_no_translation() -> Result<()> {
     Ok(())
 }
 
+/// Address-Dependent Filtering (RFC 4787 ADF, "Restricted Cone") admits
+/// packets from any port on a previously-contacted external address.
+///
+/// After the device contacts the DC on one port, the DC sends from a
+/// different source port to the mapping. ADF permits the packet because the
+/// source IP is in the `@contacted` set. APDF (the default for `Nat::Moderate`)
+/// would drop it because the source port does not match the outbound flow.
+#[tokio::test(flavor = "current_thread")]
+#[traced_test]
+async fn adf_allows_different_port_from_contacted_host() -> Result<()> {
+    check_caps()?;
+    let lab = Lab::new().await?;
+    let dc = lab.add_router("dc").build().await?;
+    let router = lab
+        .add_router("r")
+        .nat(
+            NatConfig::builder()
+                .mapping(NatMapping::EndpointIndependent)
+                .filtering(NatFiltering::AddressDependent)
+                .build()?,
+        )
+        .build()
+        .await?;
+    let dev = lab
+        .add_device("dev")
+        .iface("eth0", router.id())
+        .build()
+        .await?;
+
+    let dc_ip = dc.uplink_ip().context("no dc uplink ip")?;
+    let reflector = SocketAddr::new(IpAddr::V4(dc_ip), 21_000);
+    let _r = dc.spawn_reflector(reflector).await?;
+
+    // Device contacts DC, creating a mapping and populating @contacted.
+    let mapped = dev.probe_udp_mapping(reflector)?;
+
+    // Device listens on the internal port matching the mapping.
+    let dev_listen = SocketAddr::new(IpAddr::V4(dev.ip().unwrap()), mapped.port());
+    let _d = dev.spawn_reflector(dev_listen).await?;
+
+    // DC sends from a *different* source port to the mapped address.
+    let reply = dc.run_sync(move || {
+        let sock = std::net::UdpSocket::bind("0.0.0.0:0").context("bind")?;
+        sock.set_read_timeout(Some(Duration::from_secs(2)))?;
+        sock.send_to(b"HELLO", mapped)?;
+        let mut buf = [0u8; 512];
+        let (n, _) = sock.recv_from(&mut buf)?;
+        Ok(String::from_utf8_lossy(&buf[..n]).to_string())
+    })?;
+    assert!(
+        reply.starts_with("OBSERVED "),
+        "ADF must accept inbound from a contacted IP on any source port; got: {reply:?}"
+    );
+    Ok(())
+}
+
+/// Address-Dependent Filtering drops packets from uncontacted external
+/// addresses.
+///
+/// A second external host that the device never contacted sends to the
+/// mapped address. ADF must drop the packet because the source IP is not in
+/// `@contacted`.
+#[tokio::test(flavor = "current_thread")]
+#[traced_test]
+async fn adf_drops_from_uncontacted_host() -> Result<()> {
+    check_caps()?;
+    let lab = Lab::new().await?;
+    let dc_a = lab.add_router("dc-a").build().await?;
+    let dc_b = lab.add_router("dc-b").build().await?;
+    let router = lab
+        .add_router("r")
+        .nat(
+            NatConfig::builder()
+                .mapping(NatMapping::EndpointIndependent)
+                .filtering(NatFiltering::AddressDependent)
+                .build()?,
+        )
+        .build()
+        .await?;
+    let dev = lab
+        .add_device("dev")
+        .iface("eth0", router.id())
+        .build()
+        .await?;
+
+    let dc_a_ip = dc_a.uplink_ip().context("no dc-a uplink ip")?;
+    let dc_b_ip = dc_b.uplink_ip().context("no dc-b uplink ip")?;
+    let reflector = SocketAddr::new(IpAddr::V4(dc_a_ip), 21_100);
+    let _r = dc_a.spawn_reflector(reflector).await?;
+
+    // Device contacts dc-a only. dc-b is not in @contacted.
+    let mapped = dev.probe_udp_mapping(reflector)?;
+
+    let dev_listen = SocketAddr::new(IpAddr::V4(dev.ip().unwrap()), mapped.port());
+    let _d = dev.spawn_reflector(dev_listen).await?;
+
+    // dc-b sends unsolicited to the mapped address.
+    let _ = dc_b_ip;
+    let result = dc_b.run_sync(move || {
+        let sock = std::net::UdpSocket::bind("0.0.0.0:0").context("bind")?;
+        sock.set_read_timeout(Some(Duration::from_millis(500)))?;
+        sock.send_to(b"UNSOLICITED", mapped)?;
+        let mut buf = [0u8; 512];
+        match sock.recv_from(&mut buf) {
+            Ok(_) => bail!("ADF must drop packets from uncontacted source IP"),
+            Err(e)
+                if e.kind() == std::io::ErrorKind::WouldBlock
+                    || e.kind() == std::io::ErrorKind::TimedOut =>
+            {
+                Ok(())
+            }
+            Err(e) => Err(e.into()),
+        }
+    });
+    assert!(result.is_ok(), "expected timeout (drop), got: {result:?}");
+    Ok(())
+}
+
 /// FullCone NAT allows unsolicited inbound: external host sends to mapped
 /// address and device receives it without prior outbound to that sender.
 #[tokio::test(flavor = "current_thread")]
@@ -562,7 +683,7 @@ async fn fullcone_external_reachable() -> Result<()> {
     check_caps()?;
     let lab = Lab::new().await?;
     let dc = lab.add_router("dc").build().await?;
-    let fc = lab.add_router("fc").nat(Nat::FullCone).build().await?;
+    let fc = lab.add_router("fc").nat(Nat::Open).build().await?;
     let dev = lab.add_device("dev").iface("eth0", fc.id()).build().await?;
 
     let dc_ip = dc.uplink_ip().context("no dc uplink ip")?;
@@ -606,7 +727,7 @@ async fn cgnat_external_reachable() -> Result<()> {
     check_caps()?;
     let lab = Lab::new().await?;
     let dc = lab.add_router("dc").build().await?;
-    let isp = lab.add_router("isp").nat(Nat::Cgnat).build().await?;
+    let isp = lab.add_router("isp").nat(Nat::Open).build().await?;
     // Device directly behind CGNAT (no Home NAT layer) to test CGNAT EIF in isolation.
     let dev = lab
         .add_device("dev")
@@ -663,11 +784,11 @@ async fn cgnat_port_mapping_eim() -> Result<()> {
     let lab = Lab::new().await?;
     let dc1 = lab.add_router("dc1").build().await?;
     let dc2 = lab.add_router("dc2").build().await?;
-    let isp = lab.add_router("isp").nat(Nat::Cgnat).build().await?;
+    let isp = lab.add_router("isp").nat(Nat::Open).build().await?;
     let home = lab
         .add_router("home")
         .upstream(isp.id())
-        .nat(Nat::Home)
+        .nat(Nat::Moderate)
         .build()
         .await?;
     let dev = lab
@@ -710,7 +831,7 @@ async fn v6_masquerade_port_mapping() -> Result<()> {
     let nat = lab
         .add_router("nat")
         .ip_support(IpSupport::DualStack)
-        .nat(Nat::Home)
+        .nat(Nat::Moderate)
         .nat_v6(NatV6Mode::Masquerade)
         .build()
         .await?;

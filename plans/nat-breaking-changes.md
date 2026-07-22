@@ -1,0 +1,132 @@
+# NAT refactor: breaking changes
+
+Tracks every breaking change for the final PR description.
+
+## `Nat` enum
+
+Replaced deployment-flavored variants with a three-tier behavior
+gradient:
+
+| Old | New |
+|-----|-----|
+| `Nat::Home` | `Nat::Moderate` |
+| `Nat::Cgnat` | `Nat::Open` |
+| `Nat::Corporate`, `Nat::CloudNat` | `Nat::Strict` |
+| `Nat::FullCone` | `Nat::Open` plus `hairpin(true)` if needed |
+| `Nat::None`, `Nat::Custom` | unchanged |
+
+The new variants: `None`, `Open` (EIM+EIF), `Moderate` (EIM+APDF), `Strict`
+(EDM+APDF with random ports), and `Custom(NatConfig)`.
+
+## `NatMapping`
+
+`EndpointIndependent` and `EndpointDependent`, both unit variants. An
+earlier draft of this PR carried a `PortPreservation` payload on
+`EndpointDependent` to distinguish port-preserving symmetric NAT from
+random symmetric NAT. That distinction was dropped because Linux
+`nftables` cannot produce port-preserving symmetric NAT distinguishably
+from EIM-under-light-load. See `docs/reference/nat-limitations.md`.
+
+## `NatFiltering`
+
+Gained `AddressDependent` variant for RFC 4787 ADF (RFC 3489 "Restricted
+Cone"). Only supported with `NatMapping::EndpointIndependent`; the
+builder rejects `EDM + AddressDependent`.
+
+## `NatConfigBuilder::build()`
+
+Now returns `Result<NatConfig, NatConfigError>`. Rejects:
+
+- `EndpointDependent` mapping with `AddressDependent` filtering
+- `EndpointDependent` mapping with `hairpin = true`
+
+Previously both combinations compiled and produced subtly wrong
+nftables rules.
+
+## `NatConfig` and `ConntrackTimeouts`
+
+Both are `#[non_exhaustive]`. Construction is through
+`NatConfig::builder()` only. `NatConfig` has public fields for ergonomic
+read access and pattern matching; mutating fields post-build bypasses
+builder validation and is documented as caller responsibility.
+
+## `RouterPreset`
+
+- `IspCgnat` changed from EIM+EIF to EIM+APDF (most RFC 6888 compliant
+  CGNATs use APDF, not EIF), firewall `None` to `BlockInbound`.
+- `IspCgnatHard` renamed to `IspCgnatSymmetric`, RFC 7753 citation
+  dropped (that RFC is a PCP extension, not a PBA RFC; the preset does
+  not model Port Block Allocation). Firewall `None` to `BlockInbound`.
+- `IspCgnatSymmetric` resolves to `Nat::Strict` (symmetric NAT with
+  random ports) and covers both fixed-line symmetric CGN and cellular
+  carriers. The docstring notes that published measurement data
+  (Richter et al. IMC 2016) reports much shorter real-world UDP
+  timeouts (cellular median 65s, non-cellular 35s) than the 180s
+  vendor-default the preset uses; tune with `.udp_stream_timeout()`
+  for specific carriers.
+
+## `Router` API
+
+- `Router::nat_mode` renamed to `Router::nat_config`, returns
+  `Option<NatConfig>` (flattened). Matches peer accessors.
+- `Router::set_nat_mode` renamed to `Router::set_nat`. Matches
+  `Router::set_firewall`. Accepts `impl Into<Option<NatConfig>>`.
+
+## `RouterBuilder::nat`
+
+Accepts `impl Into<Option<NatConfig>>`. `Nat::None` and `None` both
+disable NAT.
+
+## Wire format
+
+`RouterState.nat` and `LabEventKind::NatChanged.nat` serialize as
+`Option<NatConfig>`:
+
+```
+// before
+"nat": "home"
+// after
+"nat": {
+  "mapping": "endpoint_dependent",
+  "filtering": "address_and_port_dependent",
+  "timeouts": { "udp": 30, "udp_stream": 300, "tcp_established": 7200 },
+  "hairpin": false
+}
+// or when NAT is disabled
+"nat": null
+```
+
+## TOML
+
+`[[router]] nat = "..."` accepts `none`, `open`, `moderate`, `strict`,
+`custom`. Old strings (`home`, `corporate`, `cgnat`, `cloud-nat`,
+`full-cone`, `hardest`) fail to parse.
+
+## TypeScript devtools bindings
+
+`ui/src/devtools-types.ts`: `Nat = NatConfig | null`; `NatMapping` is a
+union of unit string literals; `NatFiltering` gained
+`"address_dependent"`.
+
+## Test coverage added
+
+- `adf_allows_different_port_from_contacted_host` (positive) and
+  `adf_drops_from_uncontacted_host` (negative): validate ADF
+  semantics.
+- `preset_nat_snapshots`: pins mapping, filtering, UDP stream timeout,
+  firewall, IP support, v6 NAT mode, and `hairpin = false` for every
+  preset.
+- `builder_rejects_edm_with_adf`, `builder_rejects_edm_with_hairpin`,
+  plus matching positive cases.
+- `nat_open_is_eim_eif`, `nat_moderate_is_eim_apdf`,
+  `nat_strict_is_edm_apdf`: pin the `Nat::*` conversions.
+
+## Documentation
+
+- New `docs/reference/nat-limitations.md` explaining what classes of
+  NAT patchbay does not simulate faithfully (SYMPP, sequential port
+  allocation, vendor quirks, behavior under load, IPv6 corner cases)
+  and how a future backend could close each gap.
+- Preset tables updated in `docs/guide/topology.md`, `lib.rs`,
+  `docs/guide/nat-and-firewalls.md`, `docs/reference/holepunching.md`,
+  and `docs/reference/toml-reference.md`.

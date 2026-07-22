@@ -21,7 +21,7 @@ use crate::{
     event::{LabEventKind, RouterState},
     firewall::{Firewall, FirewallConfigBuilder},
     lab::{Ipv6ProvisioningMode, LabInner, LinkCondition},
-    nat::{IpSupport, Nat, NatV6Mode},
+    nat::{ConntrackTimeouts, IpSupport, Nat, NatConfig, NatV6Mode},
     netlink::Netlink,
     nft::{
         apply_firewall, apply_nat_for_router, apply_nat_v6, apply_or_remove_impair,
@@ -241,9 +241,14 @@ impl Router {
             .flatten()
     }
 
-    /// Returns the NAT mode, or `None` if the router has been removed.
-    pub fn nat_mode(&self) -> Option<Nat> {
-        self.lab.with_router(self.id, |r| r.cfg.nat)
+    /// Returns the effective NAT configuration for this router.
+    ///
+    /// Returns `None` when NAT is disabled, when the router has been
+    /// removed, or when no config is set. Matches the pattern used by
+    /// other router accessors ([`mtu`](Self::mtu),
+    /// [`uplink_ip`](Self::uplink_ip), etc.).
+    pub fn nat_config(&self) -> Option<NatConfig> {
+        self.lab.with_router(self.id, |r| r.cfg.nat).flatten()
     }
 
     /// Returns the configured MTU, if set.
@@ -428,7 +433,8 @@ impl Router {
     /// # Errors
     ///
     /// Returns an error if the router has been removed or nftables commands fail.
-    pub async fn set_nat_mode(&self, mode: Nat) -> Result<()> {
+    pub async fn set_nat<T: Into<Option<NatConfig>>>(&self, mode: T) -> Result<()> {
+        let mode = mode.into();
         let op = self
             .lab
             .with_router(self.id, |r| Arc::clone(&r.op))
@@ -441,10 +447,13 @@ impl Router {
             let nat_params = inner.router_nat_params(self.id)?;
             (nat_params, cfg)
         };
-        run_nft_in(&self.lab.netns, &nat_params.ns, "flush table ip nat")
+        // Delete the whole tables rather than flushing: `flush` leaves named
+        // sets (`@contacted` for ADF) in place across transitions, which
+        // would bleed previous ADF state into the new config.
+        run_nft_in(&self.lab.netns, &nat_params.ns, "delete table ip nat")
             .await
             .ok();
-        run_nft_in(&self.lab.netns, &nat_params.ns, "flush table ip filter")
+        run_nft_in(&self.lab.netns, &nat_params.ns, "delete table ip filter")
             .await
             .ok();
         apply_nat_for_router(
@@ -512,7 +521,7 @@ impl Router {
     /// Flushes the conntrack table, forcing all active NAT mappings to expire.
     ///
     /// Subsequent flows get new external port assignments. Pair with
-    /// [`set_nat_mode`](Self::set_nat_mode) when testing mode transitions.
+    /// [`set_nat`](Self::set_nat) when testing mode transitions.
     ///
     /// # Errors
     ///
@@ -692,11 +701,10 @@ impl Router {
 /// on the [`RouterBuilder`] override the preset's defaults, so you can start
 /// from a known configuration and adjust only what your test needs.
 ///
-/// The ISP presets (`IspCgnat`, `IspV6`) cover both fixed-line and mobile
-/// carriers. Most mobile networks (T-Mobile, Vodafone, AT&T) use the same
-/// CGNAT or NAT64 infrastructure as their fixed-line counterparts, and
-/// real-world measurements confirm that hole-punching succeeds on the
-/// majority of them.
+/// The ISP presets cover different shapes of carrier-grade NAT. `IspCgnat`
+/// is the RFC 6888 compliant fixed-line case. `IspCgnatSymmetric` covers
+/// symmetric CGNAT, including typical cellular carriers. `IspV6` is the
+/// IPv6-only case with NAT64.
 ///
 /// # Example
 ///
@@ -708,7 +716,21 @@ impl Router {
 /// // Override NAT while keeping the rest of the Home preset:
 /// let home = lab.add_router("home")
 ///     .preset(RouterPreset::Home)
-///     .nat(Nat::FullCone)
+///     .nat(Nat::Open)
+///     .build().await?;
+/// ```
+///
+/// # Double NAT
+///
+/// Double NAT (a home router behind ISP CGNAT, or a phone hotspot) is not
+/// a single preset; it is a topology composed from two routers. Chain them
+/// with [`upstream`](RouterBuilder::upstream):
+///
+/// ```ignore
+/// let isp = lab.add_router("isp").preset(RouterPreset::IspCgnat).build().await?;
+/// let home = lab.add_router("home")
+///     .preset(RouterPreset::Home)
+///     .upstream(isp.id())
 ///     .build().await?;
 /// ```
 #[derive(Clone, Copy, Debug)]
@@ -744,18 +766,45 @@ pub enum RouterPreset {
     /// V4-only, public downstream pool.
     PublicV4,
 
-    /// ISP or mobile carrier with carrier-grade NAT.
+    /// ISP with RFC 6888 compliant carrier-grade NAT.
     ///
-    /// Models any provider that shares a pool of public IPv4 addresses
-    /// across subscribers via CGNAT: budget fiber, fixed-wireless,
-    /// satellite (Starlink), and dual-stack mobile carriers (Vodafone, O2,
-    /// AT&T). The CGNAT uses endpoint-independent mapping and filtering
-    /// per RFC 6888, so hole-punching works — inbound packets reach
-    /// mapped ports. No additional firewall beyond the NAT. IPv6 addresses
-    /// are globally routable.
+    /// Models a provider that shares a pool of public IPv4 addresses across
+    /// subscribers via CGNAT. RFC 6888 mandates endpoint-independent mapping
+    /// (EIM). In practice most compliant deployments pair EIM with
+    /// address-and-port-dependent filtering (APDF), matching
+    /// [`Nat::Moderate`](crate::Nat::Moderate), rather than the more permissive EIF
+    /// that the original "full cone CGNAT" description implied. Standard
+    /// UDP hole-punching succeeds. IPv6 addresses are globally routable but
+    /// the firewall blocks unsolicited inbound.
     ///
     /// Dual-stack, private downstream pool.
     IspCgnat,
+
+    /// ISP with symmetric CGNAT.
+    ///
+    /// Models carrier-grade NAT that uses endpoint-dependent mapping.
+    /// Covers both fixed-line symmetric CGN deployments (where operators
+    /// disable EIM) and cellular carriers on LTE or 5G, which in
+    /// published measurement studies overwhelmingly deploy symmetric
+    /// NAT. Hole-punching requires a relay. IPv6 inbound is blocked by
+    /// a stateful firewall.
+    ///
+    /// The UDP stream timeout defaults to 180 seconds, which is close
+    /// to common vendor defaults (Cisco ASR CGNAT, A10 Thunder CGN,
+    /// Fortinet FortiGate CGNAT). Real deployments often run lower:
+    /// Richter et al. (IMC 2016) report a median mapping timeout of
+    /// 65 seconds on cellular networks and 35 seconds on non-cellular
+    /// CGN. When testing keep-alive behavior for a specific carrier,
+    /// override with `.udp_stream_timeout(secs)`.
+    ///
+    /// patchbay simulates this as [`Nat::Strict`](crate::Nat::Strict) with
+    /// random port allocation. Real port-preserving symmetric CGNAT
+    /// (SYMPP, punchable through port prediction) is not modeled
+    /// distinctly; see [the NAT limits
+    /// reference](https://github.com/n0-computer/patchbay/blob/main/docs/reference/nat-limitations.md).
+    ///
+    /// Dual-stack, private downstream pool.
+    IspCgnatSymmetric,
 
     /// IPv6-only ISP or mobile carrier with NAT64.
     ///
@@ -807,14 +856,66 @@ pub enum RouterPreset {
 }
 
 impl RouterPreset {
-    fn nat(self) -> Nat {
-        match self {
-            Self::Home => Nat::Home,
+    #[cfg(test)]
+    pub(crate) fn nat_config(self) -> Option<NatConfig> {
+        self.nat()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn firewall_for_tests(self) -> Firewall {
+        self.firewall()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn nat_v6_for_tests(self) -> NatV6Mode {
+        self.nat_v6()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn ip_support_for_tests(self) -> IpSupport {
+        self.ip_support()
+    }
+
+    fn nat(self) -> Option<NatConfig> {
+        // Each preset starts from a `Nat::*` expansion and overrides only
+        // timeouts. `Nat::*.to_config()` supplies the mapping and filtering.
+        //
+        // `Nat::Strict` covers every symmetric-NAT preset. See
+        // docs/reference/nat-limitations.md for why `IspCgnatSymmetric`
+        // does not simulate port-preserving symmetric NAT (SYMPP)
+        // distinctly from random-port symmetric NAT.
+        let base = match self {
             Self::Public | Self::PublicV4 | Self::IspV6 => Nat::None,
-            Self::IspCgnat => Nat::Cgnat,
-            Self::Corporate | Self::Hotel => Nat::Corporate,
-            Self::Cloud => Nat::CloudNat,
-        }
+            // RFC 6888 mandates EIM; most compliant deployments pair it
+            // with APDF rather than EIF, matching Nat::Moderate.
+            Self::Home | Self::IspCgnat => Nat::Moderate,
+            Self::IspCgnatSymmetric | Self::Corporate | Self::Hotel | Self::Cloud => Nat::Strict,
+        };
+        let mut cfg = base.to_config()?;
+        // Override only the timeouts that differ from the home-router default
+        // (udp 30, udp_stream 300, tcp_established 7200).
+        cfg.timeouts = match self {
+            Self::Home | Self::IspCgnat => ConntrackTimeouts::default(),
+            Self::IspCgnatSymmetric => ConntrackTimeouts {
+                udp_stream: 180,
+                tcp_established: 3600,
+                ..Default::default()
+            },
+            Self::Corporate | Self::Hotel => ConntrackTimeouts {
+                udp_stream: 120,
+                tcp_established: 3600,
+                ..Default::default()
+            },
+            Self::Cloud => ConntrackTimeouts {
+                udp_stream: 350,
+                tcp_established: 3600,
+                ..Default::default()
+            },
+            Self::Public | Self::PublicV4 | Self::IspV6 => {
+                unreachable!("presets without NAT returned via Nat::None above")
+            }
+        };
+        Some(cfg)
     }
 
     fn nat_v6(self) -> NatV6Mode {
@@ -825,9 +926,14 @@ impl RouterPreset {
     }
 
     fn firewall(self) -> Firewall {
+        // S5: fixed-line CGNAT deployments block unsolicited inbound on v6
+        // (Swisscom, Deutsche Telekom, Starlink), matching cellular. Only
+        // the explicitly-public presets get Firewall::None.
         match self {
-            Self::Home | Self::IspV6 => Firewall::BlockInbound,
-            Self::Public | Self::PublicV4 | Self::IspCgnat | Self::Cloud => Firewall::None,
+            Self::Home | Self::IspV6 | Self::IspCgnat | Self::IspCgnatSymmetric => {
+                Firewall::BlockInbound
+            }
+            Self::Public | Self::PublicV4 | Self::Cloud => Firewall::None,
             Self::Corporate => Firewall::Corporate,
             Self::Hotel => Firewall::CaptivePortal,
         }
@@ -869,7 +975,7 @@ pub struct RouterBuilder {
     pub(crate) name: String,
     pub(crate) region: Option<Arc<str>>,
     pub(crate) upstream: Option<NodeId>,
-    pub(crate) nat: Nat,
+    pub(crate) nat: Option<NatConfig>,
     pub(crate) ip_support: IpSupport,
     pub(crate) nat_v6: NatV6Mode,
     pub(crate) downstream_pool: Option<DownstreamPool>,
@@ -898,7 +1004,7 @@ impl RouterBuilder {
             name: name.to_string(),
             region: None,
             upstream: None,
-            nat: Nat::None,
+            nat: None,
             ip_support: IpSupport::V4Only,
             nat_v6: NatV6Mode::None,
             downstream_pool: None,
@@ -947,7 +1053,7 @@ impl RouterBuilder {
     /// // Home router with full-cone NAT instead of default port-restricted:
     /// lab.add_router("home")
     ///     .preset(RouterPreset::Home)
-    ///     .nat(Nat::FullCone)
+    ///     .nat(Nat::Open)
     ///     .build().await?;
     /// ```
     pub fn preset(mut self, p: RouterPreset) -> Self {
@@ -961,10 +1067,19 @@ impl RouterBuilder {
         self
     }
 
-    /// Sets the NAT mode. Defaults to [`Nat::None`] (no NAT, public addressing).
-    pub fn nat(mut self, mode: Nat) -> Self {
+    /// Sets the NAT mode.
+    ///
+    /// Accepts [`Nat`] presets, a [`NatConfig`], or `None` to disable NAT.
+    ///
+    /// # Example
+    /// ```ignore
+    /// lab.add_router("home").nat(Nat::Moderate).build().await?;
+    /// lab.add_router("cfg").nat(NatConfig::builder().build()).build().await?;
+    /// lab.add_router("direct").nat(None).build().await?;
+    /// ```
+    pub fn nat<T: Into<Option<NatConfig>>>(mut self, mode: T) -> Self {
         if self.result.is_ok() {
-            self.nat = mode;
+            self.nat = mode.into();
         }
         self
     }
@@ -1097,7 +1212,7 @@ impl RouterBuilder {
         let (id, setup_data) = {
             let mut inner = self.inner.core.lock().unwrap();
             let nat = self.nat;
-            let downstream_pool = self.downstream_pool.unwrap_or(if nat == Nat::None {
+            let downstream_pool = self.downstream_pool.unwrap_or(if nat.is_none() {
                 DownstreamPool::Public
             } else {
                 DownstreamPool::Private
@@ -1392,5 +1507,24 @@ impl RouterBuilder {
             router.set_downlink_condition(Some(cond)).await?;
         }
         Ok(router)
+    }
+}
+
+#[cfg(test)]
+mod inference_guards {
+    //! Compile-only guards: a bare `None` must infer `Option<NatConfig>`
+    //! through the `Into<Option<NatConfig>>` bound with no turbofish, matching
+    //! the documented `nat(None)` and `set_nat(None)` examples. These functions
+    //! are never called; they exist to fail the build if inference regresses.
+    use super::*;
+
+    #[allow(dead_code)]
+    fn nat_none_infers(b: RouterBuilder) -> RouterBuilder {
+        b.nat(None)
+    }
+
+    #[allow(dead_code)]
+    async fn set_nat_none_infers(r: &Router) {
+        let _ = r.set_nat(None).await;
     }
 }

@@ -20,7 +20,7 @@ async fn switch_default_reflexive_ip() -> Result<()> {
         reflector,
         dc: _,
         _reflector_guard,
-    } = build_dual_nat_lab(Nat::Home, Nat::Corporate, 16_200).await?;
+    } = build_dual_nat_lab(Nat::Moderate, Nat::Strict, 16_200).await?;
 
     let wan_a = nat_a.uplink_ip().context("no uplink ip")?;
     let wan_b = nat_b.uplink_ip().context("no uplink ip")?;
@@ -77,7 +77,7 @@ async fn switch_default_multiple_times() -> Result<()> {
         nat_b,
         reflector,
         _reflector_guard,
-    } = build_dual_nat_lab(Nat::Home, Nat::Home, 16_300).await?;
+    } = build_dual_nat_lab(Nat::Moderate, Nat::Moderate, 16_300).await?;
 
     let wan_a = nat_a.uplink_ip().context("no uplink ip")?;
     let wan_b = nat_b.uplink_ip().context("no uplink ip")?;
@@ -115,7 +115,7 @@ async fn switch_default_tcp_roundtrip() -> Result<()> {
         nat_b: _,
         reflector: _,
         _reflector_guard,
-    } = build_dual_nat_lab(Nat::Home, Nat::Corporate, 16_400).await?;
+    } = build_dual_nat_lab(Nat::Moderate, Nat::Strict, 16_400).await?;
 
     let dc_ip = dc.uplink_ip().context("no dc uplink ip")?;
 
@@ -143,8 +143,8 @@ async fn switch_default_tcp_roundtrip() -> Result<()> {
 async fn replug_iface_udp() -> Result<()> {
     let lab = Lab::new().await?;
     let dc = lab.add_router("dc").build().await?;
-    let nat_a = lab.add_router("nat-a").nat(Nat::Home).build().await?;
-    let nat_b = lab.add_router("nat-b").nat(Nat::Home).build().await?;
+    let nat_a = lab.add_router("nat-a").nat(Nat::Moderate).build().await?;
+    let nat_b = lab.add_router("nat-b").nat(Nat::Moderate).build().await?;
     let dev = lab
         .add_device("dev")
         .iface("eth0", nat_a.id())
@@ -176,8 +176,8 @@ async fn replug_iface_udp() -> Result<()> {
 async fn replug_iface_reflexive_ip() -> Result<()> {
     let lab = Lab::new().await?;
     let dc = lab.add_router("dc").build().await?;
-    let nat_a = lab.add_router("nat-a").nat(Nat::Home).build().await?;
-    let nat_b = lab.add_router("nat-b").nat(Nat::Home).build().await?;
+    let nat_a = lab.add_router("nat-a").nat(Nat::Moderate).build().await?;
+    let nat_b = lab.add_router("nat-b").nat(Nat::Moderate).build().await?;
     let dev = lab
         .add_device("dev")
         .iface("eth0", nat_a.id())
@@ -228,7 +228,7 @@ async fn proc_net_route_shows_namespace_routes() -> Result<()> {
     let home = lab
         .add_router("home1")
         .upstream(isp.id())
-        .nat(Nat::Home)
+        .nat(Nat::Moderate)
         .build()
         .await?;
     let dev = lab

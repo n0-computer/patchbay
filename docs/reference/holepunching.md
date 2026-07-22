@@ -24,13 +24,15 @@ the internal client has already contacted.
 Combined, these axes produce the real-world NAT profiles that patchbay
 simulates:
 
-| Preset | Mapping | Filtering | Hole-punch? | Real-world examples |
-|--------|---------|-----------|-------------|---------------------|
-| `Nat::Home` | EIM | APDF | Yes, simultaneous open | FritzBox, Unifi, TP-Link, ASUS RT, OpenWRT |
-| `Nat::FullCone` | EIM | EIF | Always | Old FritzBox firmware, some CGNAT |
-| `Nat::Corporate` | EDM | APDF | Never (need relay) | Cisco ASA, Palo Alto, Fortinet, Juniper SRX |
-| `Nat::CloudNat` | EDM | APDF | Never (need relay) | AWS/Azure/GCP NAT Gateway |
-| `Nat::Cgnat` | -- | -- | Varies | ISP-level, stacks with home NAT |
+| Preset | Mapping | Filtering | Port preservation | Hole-punch? | Real-world examples |
+|--------|---------|-----------|-------------------|-------------|---------------------|
+| `Nat::Open` | EIM | EIF | Always | Older consumer routers, routers with UPnP or static forwarding |
+| `Nat::Moderate` | EIM | APDF | Yes, via UDP hole-punching with simultaneous send | Most home routers (FritzBox, Unifi, TP-Link, ASUS, OpenWRT); typical RFC 6888 compliant CGNAT |
+| `Nat::Strict` | EDM | APDF | No, requires a relay | Cisco ASA, Palo Alto, Fortinet, AWS/Azure/GCP NAT Gateway, mobile carriers, symmetric CGNAT |
+
+A fourth class exists in the wild — port-preserving symmetric NAT
+(SYMPP) — but patchbay models it as `Strict`. See
+[NAT simulation limits](nat-limitations.md) for the rationale.
 
 ## The fullcone dynamic map
 
@@ -79,17 +81,25 @@ by outbound traffic.
 
 ## Filtering modes
 
-### Endpoint-independent filtering (fullcone)
+### Endpoint-independent filtering (full cone)
 
-`Nat::FullCone` uses the fullcone map above with no additional filtering.
+`Nat::Open` uses the fullcone map above with no additional filtering.
 The prerouting DNAT fires for any inbound packet whose destination port
 appears in the map, regardless of source address. Once an internal device
 sends one outbound packet, any external host can reach it on the mapped
 port.
 
-### Address-and-port-dependent filtering (home NAT)
+### Address-dependent filtering (restricted cone)
 
-`Nat::Home` uses the same fullcone map for endpoint-independent mapping,
+`Nat::Custom` with `NatFiltering::AddressDependent` uses the fullcone map
+for mapping, plus a `@contacted` dynamic set of external IPs the internal
+side has sent to. The forward chain accepts inbound packets from those
+addresses regardless of source port. This is less common in the wild than
+APDF but documented on some consumer routers.
+
+### Address-and-port-dependent filtering (port-restricted cone)
+
+`Nat::Moderate` uses the same fullcone map for endpoint-independent mapping,
 plus a forward filter that restricts inbound traffic to established
 connections:
 
@@ -120,10 +130,9 @@ An unsolicited packet from an unknown host also gets DNATed in step 2, but
 no matching outbound conntrack entry exists, so the packet arrives with
 `ct state new` and the filter drops it.
 
-### Endpoint-dependent mapping (corporate and cloud NAT)
+### Endpoint-dependent mapping (symmetric NAT)
 
-`Nat::Corporate` and `Nat::CloudNat` use plain `masquerade random`
-without a fullcone map:
+`Nat::Strict` uses `masquerade random` without a fullcone map:
 
 ```nft
 table ip nat {
@@ -134,10 +143,15 @@ table ip nat {
 }
 ```
 
-The `random` flag randomizes the source port for each conntrack entry.
-Without a fullcone map and without a prerouting chain, hole-punching is
-impossible because the peer cannot predict the mapped port from a STUN
-probe.
+The `random` flag assigns a fresh, unpredictable external port per
+conntrack entry, so the peer cannot predict the mapped port from a
+STUN probe. Hole-punching fails without a relay.
+
+Port-preserving symmetric NAT (SYMPP) exists in real hardware and is
+punchable through port prediction; patchbay does not model it as a
+distinct tier because Linux `nftables` cannot produce SYMPP-like
+behavior distinguishably from EIM. See
+[NAT simulation limits](nat-limitations.md).
 
 ## nftables pitfalls
 
@@ -198,26 +212,29 @@ directions.
 
 ## NatConfig architecture
 
-The `Nat` enum provides named presets. Each preset expands via
-`Nat::to_config()` to a `NatConfig` struct that drives rule generation:
+The `Nat` enum provides named presets. Each preset converts into an
+`Option<NatConfig>` via `Nat::to_config` that drives rule generation:
 
 ```rust
 pub struct NatConfig {
-    pub mapping: NatMapping,           // EIM or EDM
-    pub filtering: NatFiltering,       // EIF or APDF
-    pub timeouts: ConntrackTimeouts,   // udp, udp_stream, tcp_established
+    pub mapping: NatMapping,         // EndpointIndependent | EndpointDependent
+    pub filtering: NatFiltering,     // EIF, ADF, or APDF
+    pub timeouts: ConntrackTimeouts, // udp, udp_stream, tcp_established
+    pub hairpin: bool,               // loopback NAT; EIM only
 }
 ```
 
-The `generate_nat_rules()` function in `core.rs` builds nftables rules
-from `NatConfig` alone, without matching on `Nat` variants. This means
-users can either use the named presets (`router.nat(Nat::Home)`) or build
-custom configurations with arbitrary mapping and filtering combinations.
+EIM always preserves the source port via the fullcone map. EDM always
+allocates a random port via `masquerade random`. Port-preserving EDM
+(SYMPP) is not modeled; see [NAT simulation limits](nat-limitations.md).
+`NatConfigBuilder::build` returns a `Result` and rejects combinations the
+backend cannot express: `EndpointDependent` mapping paired with
+`AddressDependent` filtering or with `hairpin = true`.
 
-CGNAT is a special case: `Nat::Cgnat` is applied at the ISP router level
-via `apply_isp_cgnat()` rather than through `NatConfig`. It uses plain
-`masquerade` (without the `random` flag) on the IX-facing interface and
-stacks with the downstream home router's NAT.
+The `generate_nat_rules` function in `nft.rs` builds nftables rules from
+`NatConfig` alone, without matching on `Nat` variants. Users can either
+use the named presets (`router.nat(Nat::Moderate)`) or build custom
+configurations via `NatConfig::builder`.
 
 ## NPTv6 implementation notes
 
@@ -259,10 +276,8 @@ port space.
 
 ## Future work
 
-- **Address-restricted cone** (EIM + address-dependent filtering): extend
-  the fullcone map to track contacted remote IPs.
-- **Hairpin NAT**: add a prerouting rule for LAN packets addressed to the
-  router's own WAN IP.
 - **TCP fullcone**: extend `@fullcone` to TCP for a complete NAT model.
 - **Port-conflict-safe fullcone**: two-stage postrouting to read
   `ct reply proto-dst` after conntrack finalizes the mapping.
+- **Sequential port allocation** for Port-Block-Allocated CGNAT
+  simulation.

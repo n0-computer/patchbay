@@ -25,31 +25,37 @@ gets a different external port, so the address learned from STUN is
 useless for other peers.
 
 *Filtering* determines which inbound packets the router forwards.
-Endpoint-independent filtering (fullcone) accepts packets from any
-external host, as long as a mapping exists. Endpoint-dependent filtering
-only forwards packets from hosts the internal device has already
-contacted — unsolicited packets from unknown hosts are dropped even if
-the port is mapped.
+Endpoint-independent filtering (full cone) accepts packets from any
+external host, as long as a mapping exists. Address-dependent filtering
+accepts packets from any port on an address the internal device has
+already contacted. Address-and-port-dependent filtering only forwards
+packets from the exact address and port the internal device has
+already contacted; unsolicited packets are dropped even if the port is
+mapped.
 
 You configure NAT on the router builder with `.nat()`:
 
 ```rust
 use patchbay::Nat;
 
-let home = lab.add_router("home").nat(Nat::Home).build().await?;
+let home = lab.add_router("home").nat(Nat::Moderate).build().await?;
 ```
 
-Each preset combines a mapping and filtering mode to match a real-world
-device class:
+The `Nat` enum forms a three-tier gradient of hole-punching difficulty:
 
 | Mode | Mapping | Filtering | Real-world model |
 |------|---------|-----------|------------------|
 | `None` | n/a | n/a | Datacenter, public IPs |
-| `Home` | Endpoint-independent | Endpoint-dependent | Home WiFi router |
-| `Corporate` | Endpoint-independent | Endpoint-dependent | Enterprise gateway |
-| `FullCone` | Endpoint-independent | Endpoint-independent | Gaming router, fullcone VPN |
-| `CloudNat` | Endpoint-dependent | Endpoint-dependent | AWS/GCP cloud NAT |
-| `Cgnat` | Endpoint-dependent | Endpoint-dependent | Carrier-grade NAT at the ISP |
+| `Open` | Endpoint-independent | Endpoint-independent | Full-cone router with UPnP or static forwarding |
+| `Moderate` | Endpoint-independent | Address-and-port-dependent | Standard home WiFi router, RFC 6888 compliant CGNAT |
+| `Strict` | Endpoint-dependent | Address-and-port-dependent | Enterprise gateway, cloud NAT, mobile carrier, symmetric CGNAT |
+
+`Strict` covers every symmetric NAT deployment: each destination gets a
+fresh, random external port. Port-preserving symmetric NAT (SYMPP) is a
+real middle tier in the wild (punchable through port prediction) but
+patchbay does not model it distinctly. See
+[NAT simulation limits](../reference/nat-limitations.md) for the
+reason.
 
 For a deep dive into how these modes are implemented in nftables and how
 hole-punching works across them, see the
@@ -62,16 +68,23 @@ directly and choose the mapping, filtering, and timeout behavior
 independently:
 
 ```rust
-use patchbay::nat::{NatConfig, NatMapping, NatFiltering};
+use patchbay::{NatConfig, NatFiltering, NatMapping};
 
-let custom = Nat::Custom(NatConfig {
-    mapping: NatMapping::EndpointIndependent,
-    filtering: NatFiltering::EndpointIndependent,
-    ..Default::default()
-});
+let custom = NatConfig::builder()
+    .mapping(NatMapping::EndpointIndependent)
+    .filtering(NatFiltering::EndpointIndependent)
+    .hairpin(true)
+    .build()?;
 
 let router = lab.add_router("custom").nat(custom).build().await?;
 ```
+
+`NatConfigBuilder::build` returns `Result<NatConfig, NatConfigError>`.
+The builder rejects unsupported combinations up front: `EndpointDependent`
+mapping paired with `AddressDependent` filtering or with
+`hairpin = true` both return an error because the backend cannot
+express them. The textbook NAT shapes (EIM with any filtering, EDM with
+APDF) all succeed.
 
 ### Changing NAT at runtime
 
@@ -82,7 +95,7 @@ changes mid-session, for example simulating a network migration. Call
 new connections use the updated rules:
 
 ```rust
-router.set_nat_mode(Nat::Corporate).await?;
+router.set_nat(Nat::Strict).await?;
 router.flush_nat_state().await?;
 ```
 
@@ -219,7 +232,7 @@ typical compositions:
 ```rust
 // Home router: NAT + inbound firewall. The most common residential setup.
 let home = lab.add_router("home")
-    .nat(Nat::Home)
+    .nat(Nat::Moderate)
     .firewall(Firewall::BlockInbound)
     .build().await?;
 
@@ -228,11 +241,14 @@ let dc = lab.add_router("dc")
     .firewall(Firewall::Corporate)
     .build().await?;
 
-// Double NAT: ISP carrier-grade NAT in front of a home router.
-let isp = lab.add_router("isp").nat(Nat::Cgnat).build().await?;
+// Double NAT: ISP carrier-grade NAT in front of a home router. The
+// `IspCgnat` preset gives realistic defaults (EIM + APDF, v6 inbound
+// blocked); use `.nat(Nat::Open)` if you specifically want to model
+// a full-cone CGNAT.
+let isp = lab.add_router("isp").preset(RouterPreset::IspCgnat).build().await?;
 let home = lab.add_router("home")
+    .preset(RouterPreset::Home)
     .upstream(isp.id())
-    .nat(Nat::Home)
     .build().await?;
 ```
 
