@@ -118,8 +118,8 @@ union of unit string literals; `NatFiltering` gained
   preset.
 - `builder_rejects_edm_with_adf`, `builder_rejects_edm_with_hairpin`,
   plus matching positive cases.
-- `nat_easiest_is_eim_eif`, `nat_easy_is_eim_apdf`,
-  `nat_hard_is_edm_apdf`: pin the `Nat::*` conversions.
+- `nat_open_is_eim_eif`, `nat_moderate_is_eim_apdf`,
+  `nat_strict_is_edm_apdf`: pin the `Nat::*` conversions.
 
 ## Documentation
 
