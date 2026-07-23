@@ -120,19 +120,17 @@
 //! // Switch from WiFi to a degraded 3G link at runtime.
 //! dev.iface("wlan0")
 //!     .unwrap()
-//!     .set_condition(LinkCondition::Mobile3G, LinkDirection::Both)
+//!     .set_condition(LinkCondition::mobile_3g(), LinkDirection::Both)
 //!     .await?;
 //!
 //! // Or use fully custom parameters.
 //! dev.iface("wlan0")
 //!     .unwrap()
 //!     .set_condition(
-//!         LinkCondition::Manual(LinkLimits {
-//!             latency_ms: 200,
-//!             loss_pct: 5.0,
-//!             rate_kbit: 500,
-//!             ..Default::default()
-//!         }),
+//!         LinkCondition::new()
+//!             .latency_ms(200)
+//!             .loss_pct(5.0)
+//!             .rate_kbit(500),
 //!         LinkDirection::Both,
 //!     )
 //!     .await?;
@@ -242,8 +240,8 @@ pub use ipnet::Ipv4Net;
 pub use lab::{
     ConntrackTimeouts, DefaultRegions, Firewall, FirewallConfig, FirewallConfigBuilder, IpSupport,
     Ipv6DadMode, Ipv6Profile, Ipv6ProvisioningMode, Ix, Lab, LabBuilder, LinkCondition,
-    LinkDirection, LinkLimits, Nat, NatConfig, NatConfigBuilder, NatFiltering, NatMapping,
-    NatV6Mode, OutDir, Region, RegionLink, TestGuard,
+    LinkDirection, Nat, NatConfig, NatConfigBuilder, NatFiltering, NatMapping, NatV6Mode, OutDir,
+    Region, RegionLink, TestGuard,
 };
 pub use metrics::MetricsBuilder;
 pub use router::{Router, RouterBuilder, RouterIface, RouterPreset};

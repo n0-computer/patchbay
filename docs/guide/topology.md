@@ -141,8 +141,8 @@ let phone = lab
     .default_via("wlan0")
     .build()
     .await?;
-phone.iface("wlan0").unwrap().set_condition(LinkCondition::Wifi, LinkDirection::Both).await?;
-phone.iface("cell0").unwrap().set_condition(LinkCondition::Mobile4G, LinkDirection::Both).await?;
+phone.iface("wlan0").unwrap().set_condition(LinkCondition::wifi(), LinkDirection::Both).await?;
+phone.iface("cell0").unwrap().set_condition(LinkCondition::mobile_4g(), LinkDirection::Both).await?;
 ```
 
 The `.default_via("wlan0")` call sets which interface carries the default
@@ -166,10 +166,10 @@ The built-in presets model common access technologies:
 
 | Preset | Loss | Latency | Jitter | Rate |
 |--------|------|---------|--------|------|
-| `Wifi` | 2% | 5 ms | 1 ms | 54 Mbit/s |
-| `Mobile4G` | 1% | 30 ms | 10 ms | 50 Mbit/s |
-| `Mobile3G` | 3% | 100 ms | 30 ms | 2 Mbit/s |
-| `Satellite` | 0.5% | 600 ms | 50 ms | 10 Mbit/s |
+| `wifi()` | 2% | 5 ms | 1 ms | 54 Mbit/s |
+| `mobile_4g()` | 1% | 30 ms | 10 ms | 50 Mbit/s |
+| `mobile_3g()` | 3% | 100 ms | 30 ms | 2 Mbit/s |
+| `satellite()` | 0.5% | 600 ms | 50 ms | 10 Mbit/s |
 
 Apply a preset after building the device:
 
@@ -177,29 +177,37 @@ Apply a preset after building the device:
 let dev = lab.add_device("laptop")
     .iface("eth0", home.id())
     .build().await?;
-dev.iface("eth0").unwrap().set_condition(LinkCondition::Wifi, LinkDirection::Both).await?;
+dev.iface("eth0").unwrap().set_condition(LinkCondition::wifi(), LinkDirection::Both).await?;
 ```
 
 ### Custom parameters
 
-When the presets do not match your scenario, build a `LinkLimits` struct
-directly:
+When the presets do not match your scenario, chain setters onto
+`LinkCondition::new()`. For a link defined by bandwidth and round-trip
+time, `rate_mbit` and `rtt_ms` cover the common case directly:
 
 ```rust
-use patchbay::{LinkCondition, LinkLimits};
+use patchbay::{LinkCondition, LinkDirection};
 
-let degraded = LinkCondition::Manual(LinkLimits {
-    rate_kbit: 1000,    // 1 Mbit/s
-    loss_pct: 10.0,     // 10% packet loss
-    latency_ms: 50,     // 50 ms one-way delay
-    jitter_ms: 20,      // 20 ms jitter
-    ..Default::default()
-});
+let degraded = LinkCondition::new().rate_mbit(1).rtt_ms(100).loss_pct(10.0);
 
 let dev = lab.add_device("laptop")
     .iface("eth0", home.id())
     .build().await?;
 dev.iface("eth0").unwrap().set_condition(degraded, LinkDirection::Both).await?;
+```
+
+`rtt_ms` sets the one-way latency to half the given value and, if you have
+not set a buffer explicitly, sizes the rate-limiter buffer to hold a full
+RTT of data. When you need to control latency and jitter independently
+instead, set the fields directly:
+
+```rust
+let degraded = LinkCondition::new()
+    .rate_kbit(1000)   // 1 Mbit/s
+    .loss_pct(10.0)    // 10% packet loss
+    .latency_ms(50)    // 50 ms one-way delay
+    .jitter_ms(20);    // 20 ms jitter
 ```
 
 ### Runtime changes
@@ -210,7 +218,7 @@ for example switching from WiFi to a congested 3G link and verifying that
 your application adapts:
 
 ```rust
-dev.iface("eth0").unwrap().set_condition(LinkCondition::Mobile3G, LinkDirection::Both).await?;
+dev.iface("eth0").unwrap().set_condition(LinkCondition::mobile_3g(), LinkDirection::Both).await?;
 
 // Later, restore a clean link.
 dev.iface("eth0").unwrap().clear_condition(LinkDirection::Both).await?;

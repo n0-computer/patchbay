@@ -18,7 +18,7 @@ use serde::Deserialize;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, debug_span};
 
-pub use crate::qdisc::LinkLimits;
+pub use crate::qdisc::LinkCondition;
 use crate::{
     config::LabConfig,
     core::{
@@ -81,151 +81,6 @@ pub enum LinkDirection {
     Egress,
     /// Apply impairment only to the bridge-side veth (incoming traffic).
     Ingress,
-}
-
-/// Link-layer impairment profile applied via `tc netem` (and `tc tbf` for a rate
-/// cap).
-///
-/// Named presets model common last-mile conditions. Use [`LinkCondition::Manual`]
-/// with [`LinkLimits`] for full control over all parameters.
-///
-/// The presets model loss as independent per-packet (Bernoulli) loss on an
-/// uncapped link (except the rate-limited ones). For a more faithful and more
-/// repeatable link, [`LinkLimits`] additionally exposes
-/// [`buffer_ms`](LinkLimits::buffer_ms) -- an RTT-sized rate-limiter buffer, so
-/// loss emerges from congestion (buffer overflow) as on a real bottleneck -- and
-/// [`loss_burst_pkts`](LinkLimits::loss_burst_pkts) -- bursty Gilbert-Elliott
-/// loss instead of Bernoulli, matching how real links (fades, handovers) drop.
-#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum LinkCondition {
-    /// Wired LAN (1G Ethernet). No impairment.
-    ///
-    /// Use for datacenter-local, same-rack communication.
-    Lan,
-    /// Good WiFi — 5 GHz band, close to AP, low contention.
-    ///
-    /// 200 Mbit, 4 ms one-way delay, 2 ms jitter, 0.1 % bursty loss, 15 ms buffer.
-    Wifi,
-    /// Congested WiFi — 2.4 GHz, far from AP, interference.
-    ///
-    /// 25 Mbit, 25 ms one-way delay, 15 ms jitter, 1.5 % bursty loss, 60 ms buffer.
-    WifiBad,
-    /// 4G/LTE good signal.
-    ///
-    /// 40 Mbit, 25 ms one-way delay (~50 ms RTT), 10 ms jitter, 0.3 % bursty loss,
-    /// 100 ms buffer.
-    Mobile4G,
-    /// 3G or degraded 4G.
-    ///
-    /// 3 Mbit, 80 ms one-way delay, 25 ms jitter, 0.5 % bursty loss, 250 ms buffer.
-    Mobile3G,
-    /// LEO satellite (Starlink-class).
-    ///
-    /// 100 Mbit, 22 ms one-way delay (~45 ms RTT), 10 ms jitter, 0.5 % bursty
-    /// loss, 50 ms buffer.
-    Satellite,
-    /// GEO satellite (HughesNet/Viasat).
-    ///
-    /// 25 Mbit, 300 ms one-way delay (~600 ms RTT), 20 ms jitter, 0.3 % bursty
-    /// loss, 600 ms buffer.
-    SatelliteGeo,
-    /// Fully custom impairment parameters.
-    Manual(LinkLimits),
-}
-
-impl<'de> Deserialize<'de> for LinkCondition {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        #[derive(Deserialize)]
-        #[serde(untagged)]
-        enum Repr {
-            Preset(String),
-            Manual(LinkLimits),
-        }
-
-        match Repr::deserialize(deserializer)? {
-            Repr::Preset(s) => match s.as_str() {
-                "lan" => Ok(LinkCondition::Lan),
-                "wifi" => Ok(LinkCondition::Wifi),
-                "wifi-bad" => Ok(LinkCondition::WifiBad),
-                "mobile-4g" | "mobile" => Ok(LinkCondition::Mobile4G),
-                "mobile-3g" => Ok(LinkCondition::Mobile3G),
-                "satellite" => Ok(LinkCondition::Satellite),
-                "satellite-geo" => Ok(LinkCondition::SatelliteGeo),
-                _ => Err(serde::de::Error::custom(format!(
-                    "unknown link condition preset '{s}'"
-                ))),
-            },
-            Repr::Manual(limits) => Ok(LinkCondition::Manual(limits)),
-        }
-    }
-}
-
-impl LinkCondition {
-    /// Converts this preset (or manual config) into concrete [`LinkLimits`].
-    pub fn to_limits(self) -> LinkLimits {
-        match self {
-            LinkCondition::Lan => LinkLimits::default(),
-            LinkCondition::Wifi => LinkLimits {
-                latency_ms: 4,
-                jitter_ms: 2,
-                loss_pct: 0.1,
-                loss_burst_pkts: 5,
-                rate_kbit: 200_000,
-                buffer_ms: 15,
-                ..Default::default()
-            },
-            LinkCondition::WifiBad => LinkLimits {
-                latency_ms: 25,
-                jitter_ms: 15,
-                loss_pct: 1.5,
-                loss_burst_pkts: 8,
-                rate_kbit: 25_000,
-                buffer_ms: 60,
-                ..Default::default()
-            },
-            LinkCondition::Mobile4G => LinkLimits {
-                latency_ms: 25,
-                jitter_ms: 10,
-                loss_pct: 0.3,
-                loss_burst_pkts: 6,
-                rate_kbit: 40_000,
-                buffer_ms: 100,
-                ..Default::default()
-            },
-            LinkCondition::Mobile3G => LinkLimits {
-                latency_ms: 80,
-                jitter_ms: 25,
-                loss_pct: 0.5,
-                loss_burst_pkts: 6,
-                rate_kbit: 3_000,
-                buffer_ms: 250,
-                ..Default::default()
-            },
-            LinkCondition::Satellite => LinkLimits {
-                latency_ms: 22,
-                jitter_ms: 10,
-                loss_pct: 0.5,
-                loss_burst_pkts: 4,
-                rate_kbit: 100_000,
-                buffer_ms: 50,
-                ..Default::default()
-            },
-            LinkCondition::SatelliteGeo => LinkLimits {
-                latency_ms: 300,
-                jitter_ms: 20,
-                loss_pct: 0.3,
-                loss_burst_pkts: 4,
-                rate_kbit: 25_000,
-                buffer_ms: 600,
-                ..Default::default()
-            },
-            LinkCondition::Manual(limits) => limits,
-        }
-    }
 }
 
 // ─────────────────────────────────────────────
@@ -1477,17 +1332,13 @@ impl Lab {
 
         // Apply netem impairment on both veth ends.
         if link.latency_ms > 0 || link.jitter_ms > 0 || link.loss_pct > 0.0 {
-            let limits = LinkLimits {
-                latency_ms: link.latency_ms,
-                jitter_ms: link.jitter_ms,
-                loss_pct: link.loss_pct as f32,
-                rate_kbit: if link.rate_mbit > 0 {
-                    link.rate_mbit * 1000
-                } else {
-                    0
-                },
-                ..Default::default()
-            };
+            let mut limits = LinkCondition::new()
+                .latency_ms(link.latency_ms)
+                .jitter_ms(link.jitter_ms)
+                .loss_pct(link.loss_pct as f32);
+            if link.rate_mbit > 0 {
+                limits = limits.rate_mbit(link.rate_mbit);
+            }
             let veth_a4 = veth_a.clone();
             let limits_a = limits;
             let rt_a = netns.rt_handle_for(&s.a.ns)?;

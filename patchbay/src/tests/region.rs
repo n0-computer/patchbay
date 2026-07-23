@@ -129,13 +129,7 @@ async fn impair_stacks_with_latency() -> Result<()> {
 
     dev.iface("eth0")
         .unwrap()
-        .set_condition(
-            LinkCondition::Manual(LinkLimits {
-                latency_ms: 30,
-                ..Default::default()
-            }),
-            LinkDirection::Both,
-        )
+        .set_condition(LinkCondition::new().latency_ms(30), LinkDirection::Both)
         .await?;
 
     let us_ip = dc_us.uplink_ip().context("no uplink ip")?;

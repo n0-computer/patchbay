@@ -398,7 +398,7 @@ pub(crate) async fn apply_impair_in(
     impair: LinkCondition,
 ) {
     debug!(ns = %ns, ifname = %ifname, impair = ?impair, "tc: apply impairment");
-    let limits = impair.to_limits();
+    let limits = impair;
     let ifname = ifname.to_string();
     let rt = match netns.rt_handle_for(ns) {
         Ok(rt) => rt,

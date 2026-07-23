@@ -1,9 +1,29 @@
-import type { LabState } from '../devtools-types'
+import type { LabState, LinkCondition } from '../devtools-types'
 
 interface Props {
   state: LabState
   selectedNode: string
   selectedKind: 'router' | 'device' | 'ix'
+}
+
+// Formats a link condition for display. `label` carries the preset name (e.g.
+// "wifi") when the condition came from a preset, and is null for a hand-built
+// one. Shows the label with a short summary of the impairment, or just the
+// summary when there is no label.
+function formatCondition(cond: LinkCondition): string {
+  const parts: string[] = []
+  if (cond.rate_kbit != null) {
+    parts.push(
+      cond.rate_kbit % 1000 === 0
+        ? `${cond.rate_kbit / 1000} Mbit`
+        : `${cond.rate_kbit} kbit`,
+    )
+  }
+  if (cond.latency_ms > 0) parts.push(`${cond.latency_ms} ms`)
+  if (cond.loss_pct > 0) parts.push(`${cond.loss_pct}% loss`)
+  const summary = parts.join(', ')
+  if (cond.label != null) return summary ? `${cond.label} (${summary})` : cond.label
+  return summary || 'unimpaired'
 }
 
 function jsonField(label: string, value: unknown) {
@@ -58,7 +78,7 @@ export default function NodeDetail({ state, selectedNode, selectedKind }: Props)
             {router.downstream_cidr_v6 && jsonField('downstream_cidr_v6', router.downstream_cidr_v6)}
             {router.downstream_gw_v6 && jsonField('downstream_gw_v6', router.downstream_gw_v6)}
             {jsonField('downstream_bridge', router.downstream_bridge)}
-            {router.downlink_condition != null ? jsonField('downlink_condition', router.downlink_condition) : null}
+            {router.downlink_condition != null ? jsonField('downlink_condition', formatCondition(router.downlink_condition)) : null}
             {jsonField('devices', router.devices.join(', ') || '—')}
           </tbody>
         </table>
@@ -124,7 +144,7 @@ export default function NodeDetail({ state, selectedNode, selectedKind }: Props)
                 <td>{iface.router}</td>
                 <td>{iface.ip ?? '—'}</td>
                 <td>{iface.ip_v6 ?? '—'}</td>
-                <td>{iface.link_condition ? JSON.stringify(iface.link_condition) : '—'}</td>
+                <td>{iface.link_condition ? formatCondition(iface.link_condition) : '—'}</td>
               </tr>
             ))}
           </tbody>
