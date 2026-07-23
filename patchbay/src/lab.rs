@@ -578,6 +578,35 @@ impl LabBuilder {
         self
     }
 
+    /// Labels the lab with the current thread's name, if it has a meaningful one.
+    ///
+    /// The Rust test harness names each test thread after the test function, so
+    /// calling this in a `#[tokio::test]` (which defaults to the current-thread
+    /// runtime) labels the lab with the test name without threading it through
+    /// manually:
+    ///
+    /// ```no_run
+    /// # use patchbay::{Lab, OutDir};
+    /// # async fn f(dir: std::path::PathBuf) -> anyhow::Result<()> {
+    /// let lab = Lab::builder()
+    ///     .outdir(OutDir::Exact(dir))
+    ///     .label_from_thread()
+    ///     .build()
+    ///     .await?;
+    /// # Ok(()) }
+    /// ```
+    ///
+    /// Does nothing when the thread is unnamed or carries a generic runtime
+    /// name (`main`, `tokio-runtime-worker`), so it is safe to call
+    /// unconditionally. Note that `#[tokio::test(flavor = "multi_thread")]`
+    /// runs the test body on a worker thread, where no test name is available.
+    pub fn label_from_thread(self) -> Self {
+        match thread::current().name() {
+            Some(name) if !matches!(name, "main" | "tokio-runtime-worker") => self.label(name),
+            _ => self,
+        }
+    }
+
     /// Reads the output directory from the `PATCHBAY_OUTDIR` environment variable
     /// as [`OutDir::Nested`]. Does nothing if the variable is absent.
     pub fn outdir_from_env(mut self) -> Self {
@@ -680,6 +709,36 @@ impl Lab {
     /// Use [`Lab::builder()`] for explicit configuration.
     pub async fn new() -> Result<Self> {
         Self::builder().outdir_from_env().build().await
+    }
+
+    /// Builds a lab wired up for a test, returning it alongside its [`TestGuard`].
+    ///
+    /// This is the common setup for an integration test: it writes output
+    /// directly into `dir` ([`OutDir::Exact`]), labels the lab with the current
+    /// thread name via [`label_from_thread`](LabBuilder::label_from_thread), and
+    /// hands back the guard that records pass or fail. Pair it with a per-test
+    /// directory such as [`testdir!`](https://docs.rs/testdir):
+    ///
+    /// ```no_run
+    /// # use patchbay::Lab;
+    /// # async fn f() -> anyhow::Result<()> {
+    /// let (lab, guard) = Lab::for_test(testdir::testdir!()).await?;
+    /// // ... build the topology and run the test ...
+    /// guard.ok();
+    /// # Ok(()) }
+    /// ```
+    ///
+    /// The thread name only maps to the test function under the default
+    /// current-thread `#[tokio::test]` runtime; see
+    /// [`label_from_thread`](LabBuilder::label_from_thread) for the caveat.
+    pub async fn for_test(dir: impl Into<PathBuf>) -> Result<(Self, TestGuard)> {
+        let lab = Self::builder()
+            .outdir(OutDir::Exact(dir.into()))
+            .label_from_thread()
+            .build()
+            .await?;
+        let guard = lab.test_guard();
+        Ok((lab, guard))
     }
 
     /// Internal constructor used by [`LabBuilder::build`].
