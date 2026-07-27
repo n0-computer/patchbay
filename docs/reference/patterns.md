@@ -37,12 +37,12 @@ two VPN hops.
 ```rust
 // VPN exit node (NATs all clients behind server IP)
 let vpn_exit = lab.add_router("vpn-exit")
-    .nat(Nat::Home)
+    .nat(Nat::Moderate)
     .mtu(1420)          // WireGuard overhead
     .build().await?;
 
 // Before VPN: device on home network
-let home = lab.add_router("home").nat(Nat::Home).build().await?;
+let home = lab.add_router("home").nat(Nat::Moderate).build().await?;
 let device = lab.add_device("client").uplink(home.id()).build().await?;
 
 // Connect VPN: device moves to VPN router, gets new IP
@@ -121,13 +121,13 @@ NAT mapping that the peer's probe can traverse.
 
 ```rust
 // Both behind cone NATs: hole punching works
-let nat_a = lab.add_router("nat-a").nat(Nat::Home).build().await?;
-let nat_b = lab.add_router("nat-b").nat(Nat::Home).build().await?;
+let nat_a = lab.add_router("nat-a").nat(Nat::Moderate).build().await?;
+let nat_b = lab.add_router("nat-b").nat(Nat::Moderate).build().await?;
 // Assert: direct connection established
 
 // One side symmetric: hole punching fails, relay needed
-let nat_a = lab.add_router("nat-a").nat(Nat::Home).build().await?;
-let nat_b = lab.add_router("nat-b").nat(Nat::Corporate).build().await?;
+let nat_a = lab.add_router("nat-a").nat(Nat::Moderate).build().await?;
+let nat_b = lab.add_router("nat-b").nat(Nat::Strict).build().await?;
 // Assert: falls back to relay (TURN/DERP)
 ```
 
@@ -138,10 +138,10 @@ Port forwarding (UPnP) only works on the home router, not the CGNAT. Hole
 punching is more timing-sensitive.
 
 ```rust
-let cgnat = lab.add_router("cgnat").nat(Nat::Cgnat).build().await?;
+let cgnat = lab.add_router("cgnat").nat(Nat::Open).build().await?;
 let home = lab.add_router("home")
     .upstream(cgnat.id())
-    .nat(Nat::Home)
+    .nat(Nat::Moderate)
     .build().await?;
 let device = lab.add_device("client").uplink(home.id()).build().await?;
 ```
@@ -155,13 +155,13 @@ Test by waiting beyond the timeout period then verifying connectivity.
 ```rust
 // Custom short timeout for fast testing
 let nat = lab.add_router("nat")
-    .nat(Nat::Custom(
+    .nat(
         NatConfig::builder()
             .mapping(NatMapping::EndpointIndependent)
             .filtering(NatFiltering::AddressAndPortDependent)
-            .udp_timeout(5)  // seconds, short for testing
-            .build(),
-    ))
+            .udp_timeout(5) // seconds, short for testing
+            .build()?,
+    )
     .build().await?;
 
 // Wait for timeout, verify mapping expired
@@ -183,8 +183,11 @@ during the transition while the cellular radio attaches and the new
 address is assigned.
 
 ```rust
-let wifi_router = lab.add_router("wifi").nat(Nat::Home).build().await?;
-let cell_router = lab.add_router("cell").nat(Nat::Cgnat).build().await?;
+let wifi_router = lab.add_router("wifi").nat(Nat::Moderate).build().await?;
+let cell_router = lab
+    .add_router("cell")
+    .preset(RouterPreset::IspCgnatSymmetric)
+    .build().await?;
 
 let device = lab.add_device("phone")
     .iface("eth0", wifi_router.id())
@@ -210,7 +213,7 @@ through: UDP direct -> UDP relay (TURN) -> TCP relay -> TLS/TCP relay on 443.
 
 ```rust
 let corp = lab.add_router("corp")
-    .nat(Nat::Corporate)
+    .nat(Nat::Strict)
     .firewall(Firewall::Corporate)  // TCP 80,443 + UDP 53 only
     .build().await?;
 
@@ -235,7 +238,7 @@ calls, each direction is limited by the sender's upload.
 ```rust
 // 20 Mbps down, 2 Mbps up (10:1 ratio)
 let router = lab.add_router("isp")
-    .nat(Nat::Home)
+    .nat(Nat::Moderate)
     .downlink_condition(LinkCondition::new().rate_mbit(20))
     .build().await?;
 
@@ -262,7 +265,7 @@ connections skip NAT traversal entirely if both peers have public v6 addresses.
 ```rust
 let router = lab.add_router("dual")
     .ip_support(IpSupport::DualStack)
-    .nat(Nat::Home)
+    .nat(Nat::Moderate)
     .build().await?;
 ```
 
@@ -367,8 +370,8 @@ for _ in 0..3 {
 | VPN split tunnel | Two interfaces on different routers + `set_default_route` |
 | WiFi to cellular | `iface.replug()` + `iface.set_condition()` |
 | Network goes down briefly | `iface.link_down()`, sleep, `iface.link_up()` |
-| Cone NAT | `Nat::Home` |
-| Symmetric NAT | `Nat::Corporate` |
+| Cone NAT | `Nat::Moderate` |
+| Symmetric NAT | `Nat::Strict` |
 | Double NAT / CGNAT | Chain routers: `home.upstream(cgnat.id())` |
 | Corporate UDP block | `Firewall::Corporate` on router |
 | Captive portal | Router with no upstream |

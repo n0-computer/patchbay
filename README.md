@@ -131,18 +131,20 @@ let dc   = lab.add_router("dc").preset(RouterPreset::Public).build().await?;
 let corp = lab.add_router("corp").preset(RouterPreset::Corporate).build().await?;
 ```
 
-Available presets: `Home`, `Public`, `PublicV4`, `IspCgnat`, `IspV6`,
-`Corporate`, `Hotel`, `Cloud`. Individual methods called after
-`preset()` override preset values. See
+Available presets: `Home`, `Public`, `PublicV4`, `IspCgnat`,
+`IspCgnatSymmetric`, `IspV6`, `Corporate`, `Hotel`, `Cloud`. Individual
+methods called after `preset()` override preset values. See
 [docs/reference/ipv6.md](docs/reference/ipv6.md) for the full reference
 table.
 
 ### NAT
 
-Routers support six IPv4 NAT presets (`None`, `Home`, `Corporate`,
-`CloudNat`, `FullCone`, `Cgnat`) and four IPv6 modes (`None`, `Nptv6`,
-`Masquerade`, `Nat64`), all configured via nftables rules. You can also
-build custom NAT configs from mapping + filtering + timeout parameters.
+The `Nat` enum describes IPv4 NAT behavior on a difficulty gradient:
+`None`, `Open` (EIM + EIF), `Moderate` (EIM + APDF), `Strict` (EDM with random
+ports), and `Custom`.
+IPv6 has four modes: `None`, `Nptv6`, `Masquerade`, `Nat64`. Both are
+implemented with nftables. Build custom NAT configs from mapping plus
+filtering plus timeout parameters with `NatConfig::builder()`.
 
 **NAT64** provides IPv4 access for IPv6-only devices via the well-known
 prefix `64:ff9b::/96`. A userspace SIIT translator on the router converts
@@ -288,7 +290,7 @@ dev.iface("wlan0").unwrap().set_condition(
 ).await?;
 
 // Change NAT mode at runtime.
-router.set_nat_mode(Nat::Corporate).await?;
+router.set_nat(Nat::Strict).await?;
 router.flush_nat_state().await?;
 ```
 
@@ -317,7 +319,7 @@ region = "eu"
 
 [[router]]
 name = "home"
-nat = "home"
+nat = "moderate"
 
 [device.laptop.eth0]
 gateway = "home"

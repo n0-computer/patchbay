@@ -31,11 +31,11 @@ multi-layer topologies like ISP + home or corporate gateway + branch
 office:
 
 ```rust
-let isp = lab.add_router("isp").nat(Nat::Cgnat).build().await?;
+let isp = lab.add_router("isp").nat(Nat::Open).build().await?;
 let home = lab
     .add_router("home")
     .upstream(isp.id())
-    .nat(Nat::Home)
+    .nat(Nat::Moderate)
     .build()
     .await?;
 ```
@@ -66,20 +66,21 @@ the preset configures:
 
 | Preset | NAT | Firewall | IP support | Pool |
 |--------|-----|----------|------------|------|
-| `Home` | Home (EIM+APDF) | BlockInbound | DualStack | Private |
+| `Home` | `Moderate` (EIM+APDF) | BlockInbound | DualStack | Private |
 | `Public` | None | None | DualStack | Public |
 | `PublicV4` | None | None | V4Only | Public |
-| `IspCgnat` | Cgnat (EIM+EIF) | None | DualStack | Private |
-| `IspV6` | None (v4) / Nat64 (v6) | BlockInbound | V6Only | Public |
-| `Corporate` | Corporate (sym) | Corporate | DualStack | Private |
-| `Hotel` | Corporate (sym) | CaptivePortal | V4Only | Private |
-| `Cloud` | CloudNat (sym) | None | DualStack | Private |
+| `IspCgnat` | `Moderate` (EIM+APDF) | BlockInbound | DualStack | Private |
+| `IspCgnatSymmetric` | `Strict` (EDM+APDF, random) | BlockInbound | DualStack | Private |
+| `IspV6` | None (v4), NAT64 (v6) | BlockInbound | V6Only | Public |
+| `Corporate` | `Strict` (EDM+APDF, random) | Corporate | DualStack | Private |
+| `Hotel` | `Strict` (EDM+APDF, random) | CaptivePortal | V4Only | Private |
+| `Cloud` | `Strict` (EDM+APDF, random) | None | DualStack | Private |
 
 Methods called after `.preset()` override the preset's defaults, so you
 can use a preset as a starting point and customize individual settings.
-For example, `RouterPreset::Home` with `.nat(Nat::FullCone)` gives you a
-home-style topology with fullcone NAT instead of the default
-endpoint-dependent filtering.
+For example, `RouterPreset::Home` with `.nat(Nat::Open)` gives you a
+home topology with full-cone NAT instead of the default
+port-restricted filtering.
 
 ### Address families
 

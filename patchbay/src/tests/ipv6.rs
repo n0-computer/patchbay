@@ -198,7 +198,7 @@ async fn dual_stack_home_nat_udp() -> Result<()> {
     // Home NAT router: dual-stack with NPTv6.
     let nat = lab
         .add_router("nat")
-        .nat(Nat::Home)
+        .nat(Nat::Moderate)
         .nat_v6(NatV6Mode::Nptv6)
         .ip_support(IpSupport::DualStack)
         .build()

@@ -294,7 +294,7 @@ async fn rate_multihop_bottleneck() -> Result<()> {
     let nat = lab
         .add_router("nat")
         .upstream(isp.id())
-        .nat(Nat::Home)
+        .nat(Nat::Moderate)
         .build()
         .await?;
     let dev = lab
@@ -555,7 +555,7 @@ async fn latency_multihop_chain() -> Result<()> {
     let nat = lab
         .add_router("nat")
         .upstream(isp.id())
-        .nat(Nat::Home)
+        .nat(Nat::Moderate)
         .build()
         .await?;
     let dev = lab

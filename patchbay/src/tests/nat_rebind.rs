@@ -6,17 +6,19 @@
 
 use super::*;
 
-/// Changing NAT mode between Home (EIM) and Corporate (EDM) flips port stability.
+/// Switching between `Nat::Moderate` (EIM, stable port) and `Nat::Strict`
+/// (EDM with random port allocation) flips observed port stability.
 ///
-/// Home → Corporate: previously stable external port now varies per destination.
-/// Corporate → Home: previously varying port now stays stable.
+/// Moderate to Strict: the previously stable external port now varies per
+/// destination because random port allocation kicks in.
+/// Strict to Moderate: the previously varying port stabilises because EIM
+/// assigns the same external port for all destinations.
 #[tokio::test(flavor = "current_thread")]
 #[traced_test]
 async fn mode_port_change() -> Result<()> {
-    // Home→Corporate: port changes (EIM→EDM); Corporate→Home: port stabilises.
     let cases: &[(Nat, Nat, bool)] = &[
-        (Nat::Home, Nat::Corporate, false),
-        (Nat::Corporate, Nat::Home, true),
+        (Nat::Moderate, Nat::Strict, false),
+        (Nat::Strict, Nat::Moderate, true),
     ];
     let mut port_base = 16_800u16;
     let mut failures = Vec::new();
@@ -24,7 +26,7 @@ async fn mode_port_change() -> Result<()> {
         let result: Result<()> = async {
             let (lab, ctx) = build_nat_case(from, UplinkWiring::DirectIx, port_base).await?;
             let nat_handle = lab.router_by_name("nat").context("missing nat")?;
-            nat_handle.set_nat_mode(to).await?;
+            nat_handle.set_nat(to).await?;
             tokio::time::sleep(Duration::from_millis(50)).await;
             let dev = lab.device_by_name("dev").unwrap();
             let o1 = dev.probe_udp_mapping(ctx.r_dc)?;
@@ -60,7 +62,7 @@ async fn mode_ip_change() -> Result<()> {
     // Home→None is omitted: with NAT=None, the device's private IP appears
     // as the packet source; the DC has no return route, so the UDP probe
     // times out rather than completing.
-    let cases: &[(Nat, Nat)] = &[(Nat::None, Nat::Home)];
+    let cases: &[(Nat, Nat)] = &[(Nat::None, Nat::Moderate)];
     let mut port_base = 16_900u16;
     let mut failures = Vec::new();
     for &(from, to) in cases {
@@ -68,7 +70,7 @@ async fn mode_ip_change() -> Result<()> {
             let (lab, ctx) = build_nat_case(from, UplinkWiring::DirectIx, port_base).await?;
             let nat_handle = lab.router_by_name("nat").context("missing nat")?;
             let wan_ip = nat_handle.uplink_ip().context("no uplink ip")?;
-            nat_handle.set_nat_mode(to).await?;
+            nat_handle.set_nat(to).await?;
             tokio::time::sleep(Duration::from_millis(50)).await;
             let bind = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0);
             let r_dc = ctx.r_dc;
@@ -76,7 +78,7 @@ async fn mode_ip_change() -> Result<()> {
                 test_utils::probe_udp(r_dc, Duration::from_millis(500), Some(bind))
             })?;
             let expected = match to {
-                Nat::Home => IpAddr::V4(wan_ip),
+                Nat::Moderate => IpAddr::V4(wan_ip),
                 Nat::None => IpAddr::V4(ctx.dev_ip),
                 _ => unreachable!(),
             };
@@ -111,7 +113,7 @@ async fn conntrack_flush() -> Result<()> {
         eprintln!("skipping nat_rebind_conntrack_flush: conntrack not found");
         return Ok(());
     }
-    let (lab, ctx) = build_nat_case(Nat::Corporate, UplinkWiring::DirectIx, 17_000).await?;
+    let (lab, ctx) = build_nat_case(Nat::Strict, UplinkWiring::DirectIx, 17_000).await?;
     let nat_handle = lab.router_by_name("nat").context("missing nat")?;
     let bind = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0);
     let r_dc = ctx.r_dc;

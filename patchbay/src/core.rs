@@ -14,7 +14,7 @@ use ipnet::{Ipv4Net, Ipv6Net};
 use crate::{
     nft::nptv6_wan_prefix,
     wiring::{add_host, link_local_from_seed, seed2, seed3},
-    Firewall, IpSupport, Ipv6ProvisioningMode, LinkCondition, Nat, NatConfig, NatV6Mode,
+    Firewall, IpSupport, Ipv6ProvisioningMode, LinkCondition, NatConfig, NatV6Mode,
 };
 
 pub(crate) const RA_DEFAULT_ENABLED: bool = true;
@@ -75,8 +75,8 @@ pub(crate) enum DownstreamPool {
 /// Configures per-router NAT and downstream behavior.
 #[derive(Clone, Debug)]
 pub(crate) struct RouterConfig {
-    /// Selects router NAT behavior. Use [`Nat::Custom`] for a custom config.
-    pub nat: Nat,
+    /// NAT configuration. `None` disables NAT entirely.
+    pub nat: Option<NatConfig>,
     /// Selects which pool to allocate downstream subnets from.
     pub downstream_pool: DownstreamPool,
     /// Selects router IPv6 NAT behavior.
@@ -95,14 +95,6 @@ pub(crate) struct RouterConfig {
     pub ra_interval_secs: u64,
     /// Router Advertisement lifetime in seconds.
     pub ra_lifetime_secs: u64,
-}
-
-impl RouterConfig {
-    /// Returns the effective NAT config by expanding the preset (or returning
-    /// the custom config). Returns `None` for `Nat::None`.
-    pub(crate) fn effective_nat_config(&self) -> Option<NatConfig> {
-        self.nat.to_config()
-    }
 }
 
 /// Parameters needed to (re-)configure NAT on a router.
@@ -707,7 +699,11 @@ impl NetworkCore {
     }
 
     /// Stores an updated NAT mode on the router record.
-    pub(crate) fn set_router_nat_mode(&mut self, id: NodeId, mode: Nat) -> Result<()> {
+    pub(crate) fn set_router_nat_mode(
+        &mut self,
+        id: NodeId,
+        mode: Option<NatConfig>,
+    ) -> Result<()> {
         let router = self.routers.get_mut(&id).context("unknown router id")?;
         router.cfg.nat = mode;
         Ok(())
@@ -756,7 +752,7 @@ impl NetworkCore {
     pub(crate) fn add_router(
         &mut self,
         name: &str,
-        nat: Nat,
+        nat: Option<NatConfig>,
         downstream_pool: DownstreamPool,
         region: Option<Arc<str>>,
         ip_support: IpSupport,
