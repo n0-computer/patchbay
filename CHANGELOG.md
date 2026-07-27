@@ -1,5 +1,35 @@
 # Changelog
 
+## [0.7.0](https://github.com/n0-computer/patchbay/compare/patchbay-v0.6.0..0.7.0) - 2026-07-27
+
+### ⛰️  Features
+
+- Add test setup helpers to Lab builder ([#44](https://github.com/n0-computer/patchbay/issues/44)) - ([9f0d703](https://github.com/n0-computer/patchbay/commit/9f0d703fc821ba1957928b01cf7221470bba5450))
+- [**breaking**] Realistic link emulation (congestion-buffer and bursty-loss knobs) ([#43](https://github.com/n0-computer/patchbay/issues/43)) - ([7014aaa](https://github.com/n0-computer/patchbay/commit/7014aaa542b4aa61a8c212dcac85116a28d22767))
+- [**breaking**] Rework NAT taxonomy with behavior-only variants + ADF filtering ([#37](https://github.com/n0-computer/patchbay/issues/37)) - ([8415da5](https://github.com/n0-computer/patchbay/commit/8415da55db963fc03a9132475d9d6c1052c5d85a))
+
+## [0.6.0](https://github.com/n0-computer/patchbay/compare/patchbay-v0.5.2..patchbay-v0.6.0) - 2026-06-15
+
+### ⛰️  Features
+
+- [**breaking**] Update deps and iroh-metrics@1.0 ([#42](https://github.com/n0-computer/patchbay/issues/42)) - ([4332285](https://github.com/n0-computer/patchbay/commit/4332285b8572df44bee3bdc46b538bd62e964c8d))
+
+## [0.5.2](https://github.com/n0-computer/patchbay/compare/patchbay-v0.5.1..patchbay-v0.5.2) - 2026-05-07
+
+### ⛰️  Features
+
+- Update deps to latest ([#40](https://github.com/n0-computer/patchbay/issues/40)) - ([198bae0](https://github.com/n0-computer/patchbay/commit/198bae0afcdd21ad569b55c321d915933e9cc7a6))
+
+## [0.5.1](https://github.com/n0-computer/patchbay/compare/patchbay-v0.5.0..patchbay-v0.5.1) - 2026-05-04
+
+### ⛰️  Features
+
+- Add cargo deny and fix issues ([#39](https://github.com/n0-computer/patchbay/issues/39)) - ([cecd3b2](https://github.com/n0-computer/patchbay/commit/cecd3b22e23396874169fa12d4441a6bdcaa1de9))
+
+### ⚙️ Miscellaneous Tasks
+
+- Refine tracing log levels for cleaner debug output ([#35](https://github.com/n0-computer/patchbay/issues/35)) - ([f2582ba](https://github.com/n0-computer/patchbay/commit/f2582bab6bddada635ddb405b2c329992e2cefec))
+
 ## [0.5.0](https://github.com/n0-computer/patchbay/compare/patchbay-v0.4.0..patchbay-v0.5.0) - 2026-04-14
 
 ### ⛰️  Features
@@ -20,7 +50,7 @@
 
 - Remove stale files ([#23](https://github.com/n0-computer/patchbay/issues/23)) - ([859adc6](https://github.com/n0-computer/patchbay/commit/859adc6428603ba07eb5027f0d3e7f0db9152e2a))
 - Replace iroh-integration with self-contained fixture ([#24](https://github.com/n0-computer/patchbay/issues/24)) - ([f1ef699](https://github.com/n0-computer/patchbay/commit/f1ef699f1c0c43063382af41de0509c18dea6d0c))
-- Prepare 0.5.0 release - ([43a136d](https://github.com/n0-computer/patchbay/commit/43a136d36eb0dae7373f4e157e9715e5d8bca7de))
+- Prepare 0.5.0 release ([#32](https://github.com/n0-computer/patchbay/issues/32)) - ([b3c9cf3](https://github.com/n0-computer/patchbay/commit/b3c9cf30c6535e19491cfdc78e0afac0112e6adf))
 
 ## [0.4.0](https://github.com/n0-computer/patchbay/compare/patchbay-v0.3.0..patchbay-v0.4.0) - 2026-04-10
 
