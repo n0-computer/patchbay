@@ -169,18 +169,16 @@ Modify link impairment on the fly to simulate degrading or improving
 network quality:
 
 ```rust
-use patchbay::{LinkCondition, LinkDirection, LinkLimits};
+use patchbay::{LinkCondition, LinkDirection};
 
 // Switch to a 3G-like link.
-dev.iface("wlan0").unwrap().set_condition(LinkCondition::Mobile3G, LinkDirection::Both).await?;
+dev.iface("wlan0").unwrap().set_condition(LinkCondition::mobile_3g(), LinkDirection::Both).await?;
 
 // Apply custom impairment.
-dev.iface("wlan0").unwrap().set_condition(LinkCondition::Manual(LinkLimits {
-    rate_kbit: 500,
-    loss_pct: 15.0,
-    latency_ms: 200,
-    ..Default::default()
-}), LinkDirection::Both).await?;
+dev.iface("wlan0").unwrap().set_condition(
+    LinkCondition::new().rate_kbit(500).loss_pct(15.0).latency_ms(200),
+    LinkDirection::Both,
+).await?;
 
 // Remove all impairment and return to a clean link.
 dev.iface("wlan0").unwrap().clear_condition(LinkDirection::Both).await?;

@@ -140,7 +140,7 @@ let laptop = lab
     .iface("eth0", home.id())
     .build()
     .await?;
-laptop.iface("eth0").unwrap().set_condition(LinkCondition::Wifi, LinkDirection::Both).await?;
+laptop.iface("eth0").unwrap().set_condition(LinkCondition::wifi(), LinkDirection::Both).await?;
 ```
 
 At this point you have five network namespaces — the IX root, two

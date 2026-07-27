@@ -201,13 +201,14 @@ async fn build_time_conditions() -> Result<()> {
         .add_device("dev")
         .iface(
             "eth0",
-            IfaceConfig::routed(dc.id()).condition(LinkCondition::Mobile4G, LinkDirection::Egress),
+            IfaceConfig::routed(dc.id())
+                .condition(LinkCondition::mobile_4g(), LinkDirection::Egress),
         )
         .build()
         .await?;
 
     let eth0 = dev.iface("eth0").expect("eth0 should exist");
-    assert_eq!(eth0.egress(), Some(LinkCondition::Mobile4G));
+    assert_eq!(eth0.egress(), Some(LinkCondition::mobile_4g()));
     assert!(eth0.ingress().is_none());
 
     Ok(())
@@ -224,15 +225,15 @@ async fn asymmetric_conditions() -> Result<()> {
         .iface(
             "eth0",
             IfaceConfig::routed(dc.id())
-                .condition(LinkCondition::Mobile4G, LinkDirection::Egress)
-                .condition(LinkCondition::Mobile3G, LinkDirection::Ingress),
+                .condition(LinkCondition::mobile_4g(), LinkDirection::Egress)
+                .condition(LinkCondition::mobile_3g(), LinkDirection::Ingress),
         )
         .build()
         .await?;
 
     let eth0 = dev.iface("eth0").expect("eth0 should exist");
-    assert_eq!(eth0.egress(), Some(LinkCondition::Mobile4G));
-    assert_eq!(eth0.ingress(), Some(LinkCondition::Mobile3G));
+    assert_eq!(eth0.egress(), Some(LinkCondition::mobile_4g()));
+    assert_eq!(eth0.ingress(), Some(LinkCondition::mobile_3g()));
 
     Ok(())
 }
@@ -262,14 +263,14 @@ async fn dummy_guards() -> Result<()> {
 
     // Cannot set ingress condition on a dummy interface.
     let err = tun
-        .set_condition(LinkCondition::Mobile4G, LinkDirection::Ingress)
+        .set_condition(LinkCondition::mobile_4g(), LinkDirection::Ingress)
         .await;
     assert!(err.is_err(), "set_condition ingress on dummy should fail");
 
     // Egress condition works on a dummy interface.
-    tun.set_condition(LinkCondition::Mobile4G, LinkDirection::Egress)
+    tun.set_condition(LinkCondition::mobile_4g(), LinkDirection::Egress)
         .await?;
-    assert_eq!(tun.egress(), Some(LinkCondition::Mobile4G));
+    assert_eq!(tun.egress(), Some(LinkCondition::mobile_4g()));
 
     Ok(())
 }

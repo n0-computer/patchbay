@@ -192,13 +192,13 @@ let cell_router = lab
 let device = lab.add_device("phone")
     .iface("eth0", wifi_router.id())
     .build().await?;
-device.iface("eth0").unwrap().set_condition(LinkCondition::Wifi, LinkDirection::Both).await?;
+device.iface("eth0").unwrap().set_condition(LinkCondition::wifi(), LinkDirection::Both).await?;
 
 // Simulate handoff with connectivity gap
 device.iface("eth0").unwrap().link_down().await?;
 tokio::time::sleep(Duration::from_millis(500)).await;
 device.iface("eth0").unwrap().replug(cell_router.id()).await?;
-device.iface("eth0").unwrap().set_condition(LinkCondition::Mobile4G, LinkDirection::Both).await?;
+device.iface("eth0").unwrap().set_condition(LinkCondition::mobile_4g(), LinkDirection::Both).await?;
 device.iface("eth0").unwrap().link_up().await?;
 
 // Assert: application reconnects within X seconds
@@ -239,17 +239,14 @@ calls, each direction is limited by the sender's upload.
 // 20 Mbps down, 2 Mbps up (10:1 ratio)
 let router = lab.add_router("isp")
     .nat(Nat::Moderate)
-    .downlink_condition(LinkCondition::Manual(LinkLimits {
-        rate_kbit: 20_000,
-        ..Default::default()
-    }))
+    .downlink_condition(LinkCondition::new().rate_mbit(20))
     .build().await?;
 
 let device = lab.add_device("client").uplink(router.id()).build().await?;
-device.iface("eth0").unwrap().set_condition(LinkCondition::Manual(LinkLimits {
-    rate_kbit: 2_000,
-    ..Default::default()
-}), LinkDirection::Both).await?;
+device.iface("eth0").unwrap().set_condition(
+    LinkCondition::new().rate_mbit(2),
+    LinkDirection::Both,
+).await?;
 ```
 
 ---
@@ -340,9 +337,9 @@ Network conditions worsen over time (moving away from WiFi AP, entering tunnel
 on cellular, weather affecting satellite).
 
 ```rust
-device.iface("eth0").unwrap().set_condition(LinkCondition::Wifi, LinkDirection::Both).await?;
+device.iface("eth0").unwrap().set_condition(LinkCondition::wifi(), LinkDirection::Both).await?;
 tokio::time::sleep(Duration::from_secs(5)).await;
-device.iface("eth0").unwrap().set_condition(LinkCondition::WifiBad, LinkDirection::Both).await?;
+device.iface("eth0").unwrap().set_condition(LinkCondition::wifi_bad(), LinkDirection::Both).await?;
 tokio::time::sleep(Duration::from_secs(5)).await;
 device.iface("eth0").unwrap().clear_condition(LinkDirection::Both).await?;  // remove impairment
 ```

@@ -60,7 +60,7 @@ settings that may need adjustment.
 patchbay models link effects with `tc` parameters: latency, jitter,
 loss, and rate limits. It does not model WiFi or cellular PHY/MAC
 behavior such as radio scheduling, channel contention, or handover
-signaling. The link condition presets (`Wifi`, `Mobile4G`, etc.) apply
+signaling. The link condition presets (`wifi()`, `mobile_4g()`, etc.) apply
 realistic impairment at the IP layer, which is sufficient for transport
 and application resilience testing but not for radio-layer research.
 

@@ -18,7 +18,7 @@ use serde::Deserialize;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, debug_span};
 
-pub use crate::qdisc::LinkLimits;
+pub use crate::qdisc::LinkCondition;
 use crate::{
     config::LabConfig,
     core::{
@@ -81,124 +81,6 @@ pub enum LinkDirection {
     Egress,
     /// Apply impairment only to the bridge-side veth (incoming traffic).
     Ingress,
-}
-
-/// Link-layer impairment profile applied via `tc netem`.
-///
-/// Named presets model common last-mile conditions. Use [`LinkCondition::Manual`]
-/// with [`LinkLimits`] for full control over all `tc netem` parameters.
-#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum LinkCondition {
-    /// Wired LAN (1G Ethernet). No impairment.
-    ///
-    /// Use for datacenter-local, same-rack communication.
-    Lan,
-    /// Good WiFi — 5 GHz band, close to AP, low contention.
-    ///
-    /// 5 ms one-way delay, 2 ms jitter, 0.1 % loss.
-    Wifi,
-    /// Congested WiFi — 2.4 GHz, far from AP, interference.
-    ///
-    /// 40 ms one-way delay, 15 ms jitter, 2 % loss, 20 Mbit.
-    WifiBad,
-    /// 4G/LTE good signal.
-    ///
-    /// 25 ms one-way delay, 8 ms jitter, 0.5 % loss.
-    Mobile4G,
-    /// 3G or degraded 4G.
-    ///
-    /// 100 ms one-way delay, 30 ms jitter, 2 % loss, 2 Mbit.
-    Mobile3G,
-    /// LEO satellite (Starlink-class).
-    ///
-    /// 40 ms one-way delay, 7 ms jitter, 1 % loss.
-    Satellite,
-    /// GEO satellite (HughesNet/Viasat).
-    ///
-    /// 300 ms one-way delay, 20 ms jitter, 0.5 % loss, 25 Mbit.
-    SatelliteGeo,
-    /// Fully custom impairment parameters.
-    Manual(LinkLimits),
-}
-
-impl<'de> Deserialize<'de> for LinkCondition {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        #[derive(Deserialize)]
-        #[serde(untagged)]
-        enum Repr {
-            Preset(String),
-            Manual(LinkLimits),
-        }
-
-        match Repr::deserialize(deserializer)? {
-            Repr::Preset(s) => match s.as_str() {
-                "lan" => Ok(LinkCondition::Lan),
-                "wifi" => Ok(LinkCondition::Wifi),
-                "wifi-bad" => Ok(LinkCondition::WifiBad),
-                "mobile-4g" | "mobile" => Ok(LinkCondition::Mobile4G),
-                "mobile-3g" => Ok(LinkCondition::Mobile3G),
-                "satellite" => Ok(LinkCondition::Satellite),
-                "satellite-geo" => Ok(LinkCondition::SatelliteGeo),
-                _ => Err(serde::de::Error::custom(format!(
-                    "unknown link condition preset '{s}'"
-                ))),
-            },
-            Repr::Manual(limits) => Ok(LinkCondition::Manual(limits)),
-        }
-    }
-}
-
-impl LinkCondition {
-    /// Converts this preset (or manual config) into concrete [`LinkLimits`].
-    pub fn to_limits(self) -> LinkLimits {
-        match self {
-            LinkCondition::Lan => LinkLimits::default(),
-            LinkCondition::Wifi => LinkLimits {
-                latency_ms: 5,
-                jitter_ms: 2,
-                loss_pct: 0.1,
-                ..Default::default()
-            },
-            LinkCondition::WifiBad => LinkLimits {
-                latency_ms: 40,
-                jitter_ms: 15,
-                loss_pct: 2.0,
-                rate_kbit: 20_000,
-                ..Default::default()
-            },
-            LinkCondition::Mobile4G => LinkLimits {
-                latency_ms: 25,
-                jitter_ms: 8,
-                loss_pct: 0.5,
-                ..Default::default()
-            },
-            LinkCondition::Mobile3G => LinkLimits {
-                latency_ms: 100,
-                jitter_ms: 30,
-                loss_pct: 2.0,
-                rate_kbit: 2_000,
-                ..Default::default()
-            },
-            LinkCondition::Satellite => LinkLimits {
-                latency_ms: 40,
-                jitter_ms: 7,
-                loss_pct: 1.0,
-                ..Default::default()
-            },
-            LinkCondition::SatelliteGeo => LinkLimits {
-                latency_ms: 300,
-                jitter_ms: 20,
-                loss_pct: 0.5,
-                rate_kbit: 25_000,
-                ..Default::default()
-            },
-            LinkCondition::Manual(limits) => limits,
-        }
-    }
 }
 
 // ─────────────────────────────────────────────
@@ -578,6 +460,35 @@ impl LabBuilder {
         self
     }
 
+    /// Labels the lab with the current thread's name, if it has a meaningful one.
+    ///
+    /// The Rust test harness names each test thread after the test function, so
+    /// calling this in a `#[tokio::test]` (which defaults to the current-thread
+    /// runtime) labels the lab with the test name without threading it through
+    /// manually:
+    ///
+    /// ```no_run
+    /// # use patchbay::{Lab, OutDir};
+    /// # async fn f(dir: std::path::PathBuf) -> anyhow::Result<()> {
+    /// let lab = Lab::builder()
+    ///     .outdir(OutDir::Exact(dir))
+    ///     .label_from_thread()
+    ///     .build()
+    ///     .await?;
+    /// # Ok(()) }
+    /// ```
+    ///
+    /// Does nothing when the thread is unnamed or carries a generic runtime
+    /// name (`main`, `tokio-runtime-worker`), so it is safe to call
+    /// unconditionally. Note that `#[tokio::test(flavor = "multi_thread")]`
+    /// runs the test body on a worker thread, where no test name is available.
+    pub fn label_from_thread(self) -> Self {
+        match thread::current().name() {
+            Some(name) if !matches!(name, "main" | "tokio-runtime-worker") => self.label(name),
+            _ => self,
+        }
+    }
+
     /// Reads the output directory from the `PATCHBAY_OUTDIR` environment variable
     /// as [`OutDir::Nested`]. Does nothing if the variable is absent.
     pub fn outdir_from_env(mut self) -> Self {
@@ -680,6 +591,36 @@ impl Lab {
     /// Use [`Lab::builder()`] for explicit configuration.
     pub async fn new() -> Result<Self> {
         Self::builder().outdir_from_env().build().await
+    }
+
+    /// Builds a lab wired up for a test, returning it alongside its [`TestGuard`].
+    ///
+    /// This is the common setup for an integration test: it writes output
+    /// directly into `dir` ([`OutDir::Exact`]), labels the lab with the current
+    /// thread name via [`label_from_thread`](LabBuilder::label_from_thread), and
+    /// hands back the guard that records pass or fail. Pair it with a per-test
+    /// directory such as [`testdir!`](https://docs.rs/testdir):
+    ///
+    /// ```no_run
+    /// # use patchbay::Lab;
+    /// # async fn f() -> anyhow::Result<()> {
+    /// let (lab, guard) = Lab::for_test(testdir::testdir!()).await?;
+    /// // ... build the topology and run the test ...
+    /// guard.ok();
+    /// # Ok(()) }
+    /// ```
+    ///
+    /// The thread name only maps to the test function under the default
+    /// current-thread `#[tokio::test]` runtime; see
+    /// [`label_from_thread`](LabBuilder::label_from_thread) for the caveat.
+    pub async fn for_test(dir: impl Into<PathBuf>) -> Result<(Self, TestGuard)> {
+        let lab = Self::builder()
+            .outdir(OutDir::Exact(dir.into()))
+            .label_from_thread()
+            .build()
+            .await?;
+        let guard = lab.test_guard();
+        Ok((lab, guard))
     }
 
     /// Internal constructor used by [`LabBuilder::build`].
@@ -1391,17 +1332,13 @@ impl Lab {
 
         // Apply netem impairment on both veth ends.
         if link.latency_ms > 0 || link.jitter_ms > 0 || link.loss_pct > 0.0 {
-            let limits = LinkLimits {
-                latency_ms: link.latency_ms,
-                jitter_ms: link.jitter_ms,
-                loss_pct: link.loss_pct as f32,
-                rate_kbit: if link.rate_mbit > 0 {
-                    link.rate_mbit * 1000
-                } else {
-                    0
-                },
-                ..Default::default()
-            };
+            let mut limits = LinkCondition::new()
+                .latency_ms(link.latency_ms)
+                .jitter_ms(link.jitter_ms)
+                .loss_pct(link.loss_pct as f32);
+            if link.rate_mbit > 0 {
+                limits = limits.rate_mbit(link.rate_mbit);
+            }
             let veth_a4 = veth_a.clone();
             let limits_a = limits;
             let rt_a = netns.rt_handle_for(&s.a.ns)?;

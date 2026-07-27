@@ -45,23 +45,24 @@ export type Firewall = FirewallPreset | { custom: FirewallConfig }
 
 // ── Link condition types ──
 
-export interface LinkLimits {
-  latency_ms: number
+/**
+ * Matches Rust `LinkCondition`. Serializes as a single flat object (no
+ * preset-string form and no `manual` wrapper). `label` holds the preset
+ * name (e.g. "wifi", "mobile-4g") when the condition came from a preset,
+ * and is null when custom.
+ */
+export interface LinkCondition {
+  rate_kbit: number | null // null = uncapped
+  latency_ms: number // one-way
   jitter_ms: number
   loss_pct: number
-  rate_kbit: number | null
+  loss_burst_pkts: number | null // null = independent (Bernoulli) loss; >=2 = bursty
+  buffer_ms: number | null // null = default 400ms rate-limiter buffer
+  reorder_pct: number
+  duplicate_pct: number
+  corrupt_pct: number
+  label: string | null // preset name, or null when custom
 }
-
-/** Matches Rust `LinkCondition` — preset string or manual limits object. */
-export type LinkCondition =
-  | 'lan'
-  | 'wifi'
-  | 'wifi_bad'
-  | 'mobile_4g'
-  | 'mobile_3g'
-  | 'satellite'
-  | 'satellite_geo'
-  | LinkLimits
 
 // ── State types ──
 

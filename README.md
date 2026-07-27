@@ -39,7 +39,7 @@ let dev = lab
     .iface("eth0", home.id())
     .build()
     .await?;
-dev.iface("eth0").unwrap().set_condition(LinkCondition::Wifi, LinkDirection::Both).await?;
+dev.iface("eth0").unwrap().set_condition(LinkCondition::wifi(), LinkDirection::Both).await?;
 
 // A server in the datacenter.
 let server = lab
@@ -193,7 +193,7 @@ and `CaptivePortal` (block non-web UDP). All presets expand to a
 ### Link conditions
 
 `tc netem` and `tc tbf` provide packet loss, latency, jitter, and rate
-limiting. Apply presets (`LinkCondition::Wifi`, `LinkCondition::Mobile4G`)
+limiting. Apply presets (`LinkCondition::wifi()`, `LinkCondition::mobile_4g()`)
 or custom values at build time or dynamically.
 
 ### Cleanup
@@ -231,7 +231,7 @@ let dev = lab.add_device("phone")
     .iface("eth0", dc.id())
     .default_via("wlan0")
     .build().await?;
-dev.iface("wlan0").unwrap().set_condition(LinkCondition::Wifi, LinkDirection::Both).await?;
+dev.iface("wlan0").unwrap().set_condition(LinkCondition::wifi(), LinkDirection::Both).await?;
 ```
 
 ### Running code in namespaces
@@ -284,12 +284,10 @@ dev.iface("wlan0").unwrap().link_down().await?;
 dev.iface("wlan0").unwrap().link_up().await?;
 
 // Change link condition dynamically.
-dev.iface("wlan0").unwrap().set_condition(LinkCondition::Manual(LinkLimits {
-    rate_kbit: 1000,
-    loss_pct: 5.0,
-    latency_ms: 100,
-    ..Default::default()
-}), LinkDirection::Both).await?;
+dev.iface("wlan0").unwrap().set_condition(
+    LinkCondition::new().rate_kbit(1000).loss_pct(5.0).latency_ms(100),
+    LinkDirection::Both,
+).await?;
 
 // Change NAT mode at runtime.
 router.set_nat(Nat::Strict).await?;
