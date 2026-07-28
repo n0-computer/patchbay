@@ -10,6 +10,7 @@
 - [Building Topologies](guide/topology.md)
 - [NAT and Firewalls](guide/nat-and-firewalls.md)
 - [Running Code in Namespaces](guide/running-code.md)
+- [Running Containers](guide/containers.md)
 - [Testing](guide/testing.md)
 - [Running in a VM](guide/vm.md)
 
