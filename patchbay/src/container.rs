@@ -53,9 +53,12 @@
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
     ops::Deref,
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::Command,
-    sync::Arc,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
     time::{Duration, Instant},
 };
 
@@ -324,6 +327,13 @@ impl ContainerBuilder {
     }
 }
 
+/// Returns a fresh host path in the temp directory for staging a `podman cp`.
+fn unique_temp_path() -> PathBuf {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    std::env::temp_dir().join(format!("patchbay-cp-{}-{n}", std::process::id()))
+}
+
 /// Builds a lab-unique podman container name from the device's namespace.
 ///
 /// The namespace name (e.g. `lab3-d7`) is unique within a process, and the lab
@@ -397,11 +407,22 @@ fn build_run_args(
 /// it is the already-configured rootless namespace, so it uses the user's
 /// rootless storage and reuses already-pulled images.
 ///
-/// These variables are the only way to get this behavior: podman keys "am I
+/// These variables are the only way to get this behavior. podman keys "am I
 /// rootless" off euid, there is no `containers.conf` override, and
-/// `--userns=ns:<path>` is broken for rootless. Making it a supported flag is
-/// an open request (containers/podman#7774). They are internal, but stable and
+/// `--userns=ns:<path>` is broken for rootless (making it a supported flag is
+/// the open request containers/podman#7774). They are internal but stable, and
 /// exactly what podman sets on its own rootless re-exec.
+///
+/// Two roads not taken:
+/// - Running patchbay as a non-zero uid so podman detects rootless on its own.
+///   The rootful-vs-rootless storage choice is keyed on euid, not the
+///   namespace, so this only trades one variable for a non-root uid that breaks
+///   patchbay's own uid-0 assumptions.
+/// - Letting podman create its own nested user namespace for the container. Its
+///   automatic (subuid-driven) nesting fails, since the inner user has no
+///   `/etc/subuid` delegation; an explicit `--uidmap 0:0:65536` does work with
+///   `--network=host`, but it is redundant, because patchbay's namespace
+///   already maps the full range the container needs.
 fn runtime_command(runtime: &str) -> Command {
     let (uid, gid) = host_ids();
     let mut cmd = Command::new(runtime);
@@ -607,6 +628,64 @@ impl Container {
             );
         }
         Ok(())
+    }
+
+    /// Copies a host file or directory into the container.
+    ///
+    /// The destination's parent directory must already exist in the container.
+    pub async fn copy_to(&self, host_src: impl AsRef<Path>, container_dest: &str) -> Result<()> {
+        let src = host_src.as_ref().to_string_lossy().into_owned();
+        let dest = format!("{}:{}", self.inner.name, container_dest);
+        let output = podman(&self.inner.runtime, vec!["cp".into(), src, dest]).await?;
+        if !output.status.success() {
+            bail!(
+                "copy into container '{}' failed: {}",
+                self.inner.name,
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
+        Ok(())
+    }
+
+    /// Copies a file or directory out of the container to a host path.
+    pub async fn copy_from(&self, container_src: &str, host_dest: impl AsRef<Path>) -> Result<()> {
+        let src = format!("{}:{}", self.inner.name, container_src);
+        let dest = host_dest.as_ref().to_string_lossy().into_owned();
+        let output = podman(&self.inner.runtime, vec!["cp".into(), src, dest]).await?;
+        if !output.status.success() {
+            bail!(
+                "copy out of container '{}' failed: {}",
+                self.inner.name,
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
+        Ok(())
+    }
+
+    /// Writes bytes to a file inside the container, creating or replacing it.
+    ///
+    /// Accepts anything byte-like (`&str`, `String`, `&[u8]`, ...). The parent
+    /// directory must already exist in the container.
+    pub async fn write_file(&self, container_path: &str, contents: impl AsRef<[u8]>) -> Result<()> {
+        let tmp = unique_temp_path();
+        tokio::fs::write(&tmp, contents.as_ref())
+            .await
+            .context("write staging file")?;
+        let result = self.copy_to(&tmp, container_path).await;
+        let _ = tokio::fs::remove_file(&tmp).await;
+        result
+    }
+
+    /// Reads a file from inside the container.
+    pub async fn read_file(&self, container_path: &str) -> Result<Vec<u8>> {
+        let tmp = unique_temp_path();
+        let result = async {
+            self.copy_from(container_path, &tmp).await?;
+            tokio::fs::read(&tmp).await.context("read staged file")
+        }
+        .await;
+        let _ = tokio::fs::remove_file(&tmp).await;
+        result
     }
 
     /// Polls the readiness gate until it passes or times out.

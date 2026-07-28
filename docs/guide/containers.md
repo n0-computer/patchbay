@@ -66,8 +66,15 @@ On SELinux hosts a bind mount may need a `:z`/`:Z` label; add it with
 `run_arg`, e.g. `run_arg("--security-opt=label=disable")`.
 
 The returned [`Container`] dereferences to [`Device`], so `ip()`, `run_sync()`,
-and the other device accessors work directly. It also has `exec()`, `logs()`,
-and `stop()`. The container is removed when the handle is dropped.
+and the other device accessors work directly. It also has:
+
+- `exec(cmd)` — run a command inside the container.
+- `logs()` — fetch the container's logs.
+- `write_file(path, bytes)` / `read_file(path)` — write or read a file inside
+  the container without a bind mount.
+- `copy_to(host, container)` / `copy_from(container, host)` — copy files or
+  directories in or out.
+- `stop()` — remove it early (also happens automatically on drop).
 
 ## Runtime: podman, not docker
 

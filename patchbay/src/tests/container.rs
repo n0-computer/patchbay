@@ -98,3 +98,43 @@ async fn container_bind_mount_visible() -> Result<()> {
     );
     Ok(())
 }
+
+/// write_file/read_file round-trip and copy_to/copy_from work against a
+/// running container.
+#[tokio::test(flavor = "current_thread")]
+#[traced_test]
+async fn container_file_transfer() -> Result<()> {
+    check_caps()?;
+    if !podman_available() {
+        eprintln!("skipping container_file_transfer: podman not on PATH");
+        return Ok(());
+    }
+
+    let dir = std::env::temp_dir().join(format!("patchbay-xfer-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).context("create work dir")?;
+
+    let lab = Lab::new().await?;
+    let net = lab.add_router("net").build().await?;
+    let box_ = lab
+        .add_container("box", "docker.io/library/alpine:latest")
+        .uplink(net.id())
+        .args(["sleep", "infinity"])
+        .build()
+        .await?;
+
+    // write_file then read_file round-trips.
+    box_.write_file("/tmp/greeting", "hello-from-host").await?;
+    assert_eq!(box_.read_file("/tmp/greeting").await?, b"hello-from-host");
+
+    // copy_from a container file to the host.
+    box_.copy_from("/tmp/greeting", dir.join("out.txt")).await?;
+    assert_eq!(std::fs::read(dir.join("out.txt"))?, b"hello-from-host");
+
+    // copy_to a host file into the container.
+    std::fs::write(dir.join("in.txt"), "from-copy-to")?;
+    box_.copy_to(dir.join("in.txt"), "/tmp/in.txt").await?;
+    assert_eq!(box_.read_file("/tmp/in.txt").await?, b"from-copy-to");
+
+    let _ = std::fs::remove_dir_all(&dir);
+    Ok(())
+}
