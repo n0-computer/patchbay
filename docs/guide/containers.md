@@ -39,9 +39,31 @@ The builder mirrors the device builder for wiring (`uplink`, `iface`,
 |--------|---------|
 | `env(k, v)` | Set an environment variable in the container. |
 | `arg(a)` / `args([..])` | Append to the container's command. |
+| `volume(host, container)` | Bind-mount a host path read-write. |
+| `volume_ro(host, container)` | Bind-mount a host path read-only. |
+| `tmpfs(container)` | Mount a fresh tmpfs at a path. |
 | `run_arg(a)` | Pass an extra flag to `podman run` (escape hatch). |
 | `ready_tcp(port)` | Block `build` until `port` accepts a connection. |
 | `runtime(name)` | Override the runtime binary (default `podman`). |
+
+## Volumes and config
+
+Hand a service its config or data with a bind mount. Host paths should be
+absolute:
+
+```rust,ignore
+let pebble = lab
+    .add_container("pebble", "ghcr.io/letsencrypt/pebble:latest")
+    .uplink(net.id())
+    .volume_ro(config_dir.join("pebble.json"), "/test/config/pebble.json")
+    .args(["-config", "/test/config/pebble.json"])
+    .ready_tcp(14000)
+    .build()
+    .await?;
+```
+
+On SELinux hosts a bind mount may need a `:z`/`:Z` label; add it with
+`run_arg`, e.g. `run_arg("--security-opt=label=disable")`.
 
 The returned [`Container`] dereferences to [`Device`], so `ip()`, `run_sync()`,
 and the other device accessors work directly. It also has `exec()`, `logs()`,

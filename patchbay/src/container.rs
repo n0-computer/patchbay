@@ -53,6 +53,7 @@
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
     ops::Deref,
+    path::PathBuf,
     process::Command,
     sync::Arc,
     time::{Duration, Instant},
@@ -79,6 +80,39 @@ enum Ready {
     Tcp { port: u16, timeout: Duration },
 }
 
+/// A mount to add to the container.
+#[derive(Clone, Debug)]
+enum Mount {
+    /// Bind-mount a host path at `container` path, read-only when `read_only`.
+    Bind {
+        host: PathBuf,
+        container: String,
+        read_only: bool,
+    },
+    /// Mount a fresh tmpfs at `container` path.
+    Tmpfs { container: String },
+}
+
+impl Mount {
+    /// Renders this mount as `podman run` arguments.
+    fn to_args(&self) -> Vec<String> {
+        match self {
+            Mount::Bind {
+                host,
+                container,
+                read_only,
+            } => {
+                let mut spec = format!("{}:{container}", host.display());
+                if *read_only {
+                    spec.push_str(":ro");
+                }
+                vec!["--volume".to_string(), spec]
+            }
+            Mount::Tmpfs { container } => vec!["--tmpfs".to_string(), container.clone()],
+        }
+    }
+}
+
 /// Builder for a [`Container`]; returned by [`Lab::add_container`](crate::Lab::add_container).
 ///
 /// The uplink and interface methods mirror [`Lab::add_device`](crate::Lab::add_device):
@@ -88,6 +122,7 @@ pub struct ContainerBuilder {
     image: String,
     args: Vec<String>,
     env: Vec<(String, String)>,
+    mounts: Vec<Mount>,
     run_args: Vec<String>,
     runtime: String,
     ready: Ready,
@@ -101,6 +136,7 @@ impl ContainerBuilder {
             image: image.into(),
             args: Vec::new(),
             env: Vec::new(),
+            mounts: Vec::new(),
             run_args: Vec::new(),
             runtime: DEFAULT_RUNTIME.to_string(),
             ready: Ready::None,
@@ -156,10 +192,44 @@ impl ContainerBuilder {
         self
     }
 
+    /// Bind-mounts a host path into the container, read-write.
+    ///
+    /// Use this to hand the service its data or config, for example a Pebble
+    /// config file or a seeded database directory. The host path should be
+    /// absolute. For read-only, use [`volume_ro`](Self::volume_ro).
+    pub fn volume(mut self, host: impl Into<PathBuf>, container: impl Into<String>) -> Self {
+        self.mounts.push(Mount::Bind {
+            host: host.into(),
+            container: container.into(),
+            read_only: false,
+        });
+        self
+    }
+
+    /// Bind-mounts a host path into the container, read-only.
+    pub fn volume_ro(mut self, host: impl Into<PathBuf>, container: impl Into<String>) -> Self {
+        self.mounts.push(Mount::Bind {
+            host: host.into(),
+            container: container.into(),
+            read_only: true,
+        });
+        self
+    }
+
+    /// Mounts a fresh tmpfs at the given path inside the container.
+    ///
+    /// Useful for a writable scratch directory on an otherwise read-only image.
+    pub fn tmpfs(mut self, container: impl Into<String>) -> Self {
+        self.mounts.push(Mount::Tmpfs {
+            container: container.into(),
+        });
+        self
+    }
+
     /// Passes an extra flag to `podman run` (before the image name).
     ///
     /// An escape hatch for flags the builder does not model, such as
-    /// `--cgroup-manager=cgroupfs` or `--volume`.
+    /// `--cgroup-manager=cgroupfs` or a `:z` SELinux volume label.
     pub fn run_arg(mut self, arg: impl Into<String>) -> Self {
         self.run_args.push(arg.into());
         self
@@ -210,7 +280,14 @@ impl ContainerBuilder {
         ensure_image(&self.runtime, &self.image).await?;
         let device = self.device.build().await?;
 
-        let run_args = build_run_args(&name, &self.image, &self.env, &self.args, &self.run_args);
+        let run_args = build_run_args(
+            &name,
+            &self.image,
+            &self.env,
+            &self.mounts,
+            &self.args,
+            &self.run_args,
+        );
         debug!(container = %name, runtime = %self.runtime, image = %self.image, "starting container");
 
         // Fork the runtime from inside the device namespace so the container,
@@ -284,6 +361,7 @@ fn build_run_args(
     name: &str,
     image: &str,
     env: &[(String, String)],
+    mounts: &[Mount],
     cmd_args: &[String],
     extra_run_args: &[String],
 ) -> Vec<String> {
@@ -302,6 +380,9 @@ fn build_run_args(
         args.push("--env".to_string());
         args.push(format!("{k}={v}"));
     }
+    for mount in mounts {
+        args.extend(mount.to_args());
+    }
     args.extend(extra_run_args.iter().cloned());
     args.push(image.to_string());
     args.extend(cmd_args.iter().cloned());
@@ -315,6 +396,12 @@ fn build_run_args(
 /// itself as rootful and use unwritable system paths. These variables tell it
 /// it is the already-configured rootless namespace, so it uses the user's
 /// rootless storage and reuses already-pulled images.
+///
+/// These variables are the only way to get this behavior: podman keys "am I
+/// rootless" off euid, there is no `containers.conf` override, and
+/// `--userns=ns:<path>` is broken for rootless. Making it a supported flag is
+/// an open request (containers/podman#7774). They are internal, but stable and
+/// exactly what podman sets on its own rootless re-exec.
 fn runtime_command(runtime: &str) -> Command {
     let (uid, gid) = host_ids();
     let mut cmd = Command::new(runtime);
@@ -572,6 +659,7 @@ mod tests {
             "lab-p1-c0",
             "docker.io/library/alpine",
             &[("A".into(), "1".into()), ("B".into(), "2".into())],
+            &[],
             &["sleep".into(), "infinity".into()],
             &["--cgroup-manager=cgroupfs".into()],
         );
@@ -598,6 +686,42 @@ mod tests {
         // Command args come after the image, in order.
         assert_eq!(&args[image_idx + 1], "sleep");
         assert_eq!(&args[image_idx + 2], "infinity");
+    }
+
+    #[test]
+    fn mounts_render_before_the_image() {
+        let mounts = vec![
+            Mount::Bind {
+                host: "/srv/data".into(),
+                container: "/data".into(),
+                read_only: false,
+            },
+            Mount::Bind {
+                host: "/etc/conf".into(),
+                container: "/conf".into(),
+                read_only: true,
+            },
+            Mount::Tmpfs {
+                container: "/scratch".into(),
+            },
+        ];
+        let args = build_run_args("c", "img", &[], &mounts, &[], &[]);
+        let image_idx = args.iter().position(|a| a == "img").unwrap();
+        assert!(args
+            .windows(2)
+            .any(|w| w[0] == "--volume" && w[1] == "/srv/data:/data"));
+        assert!(args
+            .windows(2)
+            .any(|w| w[0] == "--volume" && w[1] == "/etc/conf:/conf:ro"));
+        assert!(args
+            .windows(2)
+            .any(|w| w[0] == "--tmpfs" && w[1] == "/scratch"));
+        // All mount args precede the image.
+        let last_mount = args
+            .iter()
+            .rposition(|a| a == "--volume" || a == "--tmpfs")
+            .unwrap();
+        assert!(last_mount < image_idx);
     }
 
     #[test]

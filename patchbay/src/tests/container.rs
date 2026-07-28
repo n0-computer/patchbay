@@ -60,3 +60,41 @@ async fn container_service_reachable_from_device() -> Result<()> {
     );
     Ok(())
 }
+
+/// A read-only bind mount is visible inside the container.
+#[tokio::test(flavor = "current_thread")]
+#[traced_test]
+async fn container_bind_mount_visible() -> Result<()> {
+    check_caps()?;
+    if !podman_available() {
+        eprintln!("skipping container_bind_mount_visible: podman not on PATH");
+        return Ok(());
+    }
+
+    let dir = std::env::temp_dir().join(format!("patchbay-vol-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).context("create mount dir")?;
+    std::fs::write(dir.join("hello.txt"), "patchbay-volume").context("write mount file")?;
+
+    let lab = Lab::new().await?;
+    let net = lab.add_router("net").build().await?;
+    let box_ = lab
+        .add_container("box", "docker.io/library/alpine:latest")
+        .uplink(net.id())
+        .volume_ro(&dir, "/data")
+        .args(["sleep", "infinity"])
+        .build()
+        .await?;
+
+    let out = box_.exec(["cat", "/data/hello.txt"]).await?;
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        out.status.success(),
+        "cat failed: {}",
+        String::from_utf8_lossy(&out.stderr).trim()
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).trim(),
+        "patchbay-volume"
+    );
+    Ok(())
+}
