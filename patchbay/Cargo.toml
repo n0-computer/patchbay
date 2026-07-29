@@ -19,6 +19,7 @@ derive_more = { version = "2.1.1", features = ["debug", "display", "eq"] }
 futures = "0.3"
 ipnet = { version = "2.11", features = ["serde"] }
 libc = "0.2"
+libloading = "0.8"
 nix = { version = "0.31", features = ["sched", "mount", "fs", "signal", "process", "user", "ioctl"] }
 rtnetlink = "0.21"
 serde = { version = "1", features = ["derive"] }
