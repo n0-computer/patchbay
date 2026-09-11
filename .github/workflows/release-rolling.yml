@@ -109,15 +109,21 @@ jobs:
           git tag -f rolling "$GITHUB_SHA"
           git push -f origin refs/tags/rolling
 
+      # `gh` ships on the runner, so this job needs no third-party action
+      # despite being the only one holding contents: write.
       - name: Publish rolling release
-        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
-        with:
-          tag_name: rolling
-          name: Rolling build
-          prerelease: true
-          make_latest: false
-          files: |
-            release-artifacts/**/*.tar.gz
-          body: |
-            Automated rolling release from commit ${{ github.sha }}.
-            This release is updated on every push to main.
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          notes="Automated rolling release from commit ${GITHUB_SHA}.
+          This release is updated on every push to main."
+          if gh release view rolling >/dev/null 2>&1; then
+            gh release edit rolling \
+              --title "Rolling build" --prerelease --latest=false --notes "$notes"
+          else
+            gh release create rolling \
+              --title "Rolling build" --prerelease --latest=false --notes "$notes"
+          fi
+          find release-artifacts -type f -name '*.tar.gz' -print0 \
+            | xargs -0 gh release upload rolling --clobber
