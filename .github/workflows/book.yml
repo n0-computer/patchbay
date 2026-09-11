@@ -22,6 +22,8 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
       - uses: taiki-e/install-action@decb84fb327e5b809630c914eb4d1ca67cf59966 # v2.85.14
         with:
           tool: mdbook
