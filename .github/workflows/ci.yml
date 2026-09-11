@@ -9,6 +9,10 @@ env:
   CARGO_TERM_COLOR: always
   RUSTC_WRAPPER: sccache
 
+# Default to read-only; jobs that need more grant it explicitly.
+permissions:
+  contents: read
+
 jobs:
   ci:
     runs-on: ubuntu-latest

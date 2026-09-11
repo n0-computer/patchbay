@@ -4,8 +4,9 @@ on:
   push:
     branches: [main]
 
+# Default to read-only; only the publish job needs write.
 permissions:
-  contents: write
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -81,6 +82,8 @@ jobs:
 
   publish-rolling:
     name: Publish Rolling Release
+    permissions:
+      contents: write        # moves the rolling tag and publishes the release
     runs-on: ubuntu-latest
     needs:
       - build-linux-musl
