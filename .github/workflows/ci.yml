@@ -42,16 +42,19 @@ jobs:
         run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
 
       - name: Build
-        run: cargo build --workspace --all-targets
+        run: cargo build --locked --workspace --all-targets
 
       - name: Test
-        run: cargo nextest run --workspace --profile ci
+        run: cargo nextest run --locked --workspace --profile ci
 
       - name: Clippy
-        run: cargo clippy --workspace --tests -- -D warnings
+        run: cargo clippy --locked --workspace --tests -- -D warnings
 
       - name: Format
         run: cargo make format-check
+      - name: Lockfile must not have moved
+        # cargo make takes no --locked; assert the lockfile instead.
+        run: git diff --exit-code Cargo.lock
 
   macos-check:
     runs-on: [self-hosted, macOS, arm64]
@@ -72,10 +75,10 @@ jobs:
       - uses: mozilla-actions/sccache-action@7d986dd989559c6ecdb630a3fd2557667be217ad # v0.0.9
 
       - name: Build patchbay-vm
-        run: cargo build -p patchbay-vm
+        run: cargo build --locked -p patchbay-vm
 
       - name: Clippy patchbay-vm
-        run: cargo clippy -p patchbay-vm -- -D warnings
+        run: cargo clippy --locked -p patchbay-vm -- -D warnings
 
       - name: Container backend smoke test
         run: |
@@ -89,7 +92,7 @@ jobs:
             exit 0
           fi
           rustup target add aarch64-unknown-linux-musl
-          cargo build --release -p patchbay-vm -p patchbay-runner --bin patchbay --target aarch64-unknown-linux-musl
+          cargo build --locked --release -p patchbay-vm -p patchbay-runner --bin patchbay --target aarch64-unknown-linux-musl
           ./target/release/patchbay-vm --backend container run \
             --patchbay-version "path:target/aarch64-unknown-linux-musl/release/patchbay" \
             ./patchbay-cli/tests/fixtures/iperf-1to1-public.toml
@@ -133,7 +136,7 @@ jobs:
         run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
 
       - name: Build Rust (bins + test targets)
-        run: cargo build --workspace --all-targets
+        run: cargo build --locked --workspace --all-targets
 
       - name: UI E2E
         working-directory: ui

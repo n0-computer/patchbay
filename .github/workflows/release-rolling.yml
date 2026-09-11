@@ -31,10 +31,10 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y musl-tools
 
       - name: Build patchbay (linux musl)
-        run: cargo build -p patchbay-cli --all-features --release --target x86_64-unknown-linux-musl
+        run: cargo build --locked -p patchbay-cli --all-features --release --target x86_64-unknown-linux-musl
 
       - name: Build patchbay-serve (linux musl)
-        run: cargo build -p patchbay-server --release --target x86_64-unknown-linux-musl
+        run: cargo build --locked -p patchbay-server --release --target x86_64-unknown-linux-musl
 
       - name: Package linux artifacts
         run: |
@@ -71,7 +71,7 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
       - name: Build patchbay (${{ matrix.target }})
-        run: cargo build -p patchbay-cli --all-features --release --target ${{ matrix.target }}
+        run: cargo build --locked -p patchbay-cli --all-features --release --target ${{ matrix.target }}
 
       - name: Package macOS artifact (${{ matrix.target }})
         run: |
