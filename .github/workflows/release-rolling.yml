@@ -71,13 +71,17 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
       - name: Build patchbay (${{ matrix.target }})
-        run: cargo build --locked -p patchbay-cli --all-features --release --target ${{ matrix.target }}
+        env:
+          RUST_TARGET: ${{ matrix.target }}
+        run: cargo build --locked -p patchbay-cli --all-features --release --target "$RUST_TARGET"
 
       - name: Package macOS artifact (${{ matrix.target }})
+        env:
+          RUST_TARGET: ${{ matrix.target }}
         run: |
           mkdir -p dist
-          cp target/${{ matrix.target }}/release/patchbay dist/patchbay-${{ matrix.target }}
-          tar -C dist -czf dist/patchbay-${{ matrix.target }}.tar.gz patchbay-${{ matrix.target }}
+          cp "target/$RUST_TARGET/release/patchbay" "dist/patchbay-$RUST_TARGET"
+          tar -C dist -czf "dist/patchbay-$RUST_TARGET.tar.gz" "patchbay-$RUST_TARGET"
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
