@@ -13,7 +13,7 @@ repository.workspace = true
 [dependencies]
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
-dirs = "6"
+dirs = "7"
 patchbay-utils = { workspace = true }
 nix = { version = "0.31", features = ["signal", "process"] }
 serde = { version = "1", features = ["derive"] }
