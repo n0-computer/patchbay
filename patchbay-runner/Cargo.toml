@@ -29,5 +29,5 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [dev-dependencies]
 n0-tracing-test = "0.3.0"
-serial_test = "3"
+serial_test = "4"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
