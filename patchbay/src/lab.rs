@@ -1058,6 +1058,34 @@ impl Lab {
         }
     }
 
+    /// Returns a builder for a container node.
+    ///
+    /// A container is a device whose workload is an OCI image run with podman,
+    /// joined to the device's network namespace and reachable from other lab
+    /// devices at its lab IP. Wire it into the topology like a device, then
+    /// call [`build`](crate::ContainerBuilder::build):
+    ///
+    /// ```no_run
+    /// # use patchbay::Lab;
+    /// # async fn f(lab: Lab, net_id: patchbay::NodeId) -> anyhow::Result<()> {
+    /// let db = lab
+    ///     .add_container("db", "docker.io/library/postgres:16")
+    ///     .uplink(net_id)
+    ///     .env("POSTGRES_PASSWORD", "test")
+    ///     .ready_tcp(5432)
+    ///     .build()
+    ///     .await?;
+    /// # let _ = db;
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// Requires `podman` on `PATH`; see [`Container`](crate::Container) for why
+    /// docker does not work.
+    pub fn add_container(&self, name: &str, image: impl Into<String>) -> crate::ContainerBuilder {
+        crate::ContainerBuilder::new(self.add_device(name), image)
+    }
+
     // ── removal ──────────────────────────────────────────────────────────
 
     /// Removes a device from the lab, destroying its namespace and all interfaces.

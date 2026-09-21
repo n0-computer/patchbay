@@ -201,6 +201,8 @@ use anyhow::{anyhow, bail, Context, Result};
 pub mod config;
 /// Shared filename constants for the run output directory.
 pub mod consts;
+/// Run OCI containers as lab devices.
+pub(crate) mod container;
 pub(crate) mod core;
 /// Device handle and builder.
 pub(crate) mod device;
@@ -235,6 +237,7 @@ pub mod util;
 pub(crate) mod wiring;
 pub(crate) mod writer;
 
+pub use container::{Container, ContainerBuilder};
 pub use device::{Device, DeviceBuilder};
 pub use firewall::PortPolicy;
 pub use iface::{Iface, IfaceConfig};
