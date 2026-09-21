@@ -100,7 +100,7 @@ pub struct Router {
     id: NodeId,
     name: Arc<str>,
     ns: Arc<str>,
-    lab: Arc<LabInner>,
+    pub(crate) lab: Arc<LabInner>,
     dispatch: tracing::Dispatch,
 }
 
