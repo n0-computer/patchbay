@@ -1,0 +1,15 @@
+[workspace]
+# Only release the patchbay crate (not runner, vm, cli, server, utils).
+release = false
+publish = false
+
+[changelog]
+# Use the existing cliff.toml for changelog generation.
+config = "cliff.toml"
+
+[[package]]
+name = "patchbay"
+release = true
+publish = true
+# Tag format matching existing convention.
+git_tag_name = "patchbay-v{{ version }}"
