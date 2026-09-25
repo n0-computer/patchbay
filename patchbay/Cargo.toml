@@ -12,12 +12,12 @@ repository.workspace = true
 iroh-metrics = ["dep:iroh-metrics"]
 
 [dependencies]
-iroh-metrics = { version = "1.0.0", optional = true }
+iroh-metrics = { version = "1.0.2", optional = true }
 anyhow = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 derive_more = { version = "2.1.1", features = ["debug", "display", "eq"] }
 futures = "0.3"
-ipnet = { version = "2.11", features = ["serde"] }
+ipnet = { version = "2.12", features = ["serde"] }
 libc = "0.2"
 nix = { version = "0.31", features = ["sched", "mount", "fs", "signal", "process", "user", "ioctl"] }
 rtnetlink = "0.23"
@@ -27,7 +27,7 @@ strum = { version = "0.28", features = ["derive"] }
 tokio = { version = "1", features = ["rt", "macros", "sync", "time", "fs", "net", "io-util", "process"] }
 hickory-proto = { version = "0.26", default-features = false }
 tokio-util = { version = "0.7", features = ["rt"] }
-toml = "1.0"
+toml = "1.1"
 tracing = "0.1"
 tracing-core = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["env-filter", "fmt", "ansi"] }
