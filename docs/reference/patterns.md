@@ -370,6 +370,7 @@ for _ in 0..3 {
 | VPN split tunnel | Two interfaces on different routers + `set_default_route` |
 | WiFi to cellular | `iface.replug()` + `iface.set_condition()` |
 | Network goes down briefly | `iface.link_down()`, sleep, `iface.link_up()` |
+| Cable unplugged, Wi-Fi drops | `iface.carrier_down()`, sleep, `iface.carrier_up()` |
 | Cone NAT | `Nat::Moderate` |
 | Symmetric NAT | `Nat::Strict` |
 | Double NAT / CGNAT | Chain routers: `home.upstream(cgnat.id())` |
