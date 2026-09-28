@@ -377,7 +377,12 @@ impl Iface {
     ///
     /// Linux removes routes and the IPv6 link-local address when a link
     /// goes down, so this re-adds the link-local and, if this is the
-    /// device's routed default route interface, the default routes.
+    /// device's routed default route interface, the default routes. Routes
+    /// added outside patchbay are not restored.
+    ///
+    /// With [`Ipv6DadMode::Enabled`](crate::Ipv6DadMode::Enabled), IPv6
+    /// addresses rerun duplicate address detection after this returns and
+    /// stay unusable until it completes, which takes about two seconds.
     pub async fn link_up(&self) -> Result<()> {
         use crate::{
             device::select_default_v6_gateway, netlink::Netlink, wiring, Ipv6ProvisioningMode,
