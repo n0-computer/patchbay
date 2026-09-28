@@ -295,21 +295,7 @@ impl Iface {
                 );
             }
 
-            let gateway = if !iface.is_dummy() {
-                let uplink = iface.uplink().expect("routed interface has uplink");
-                let gw_router = inner
-                    .switch(uplink)
-                    .and_then(|sw| sw.owner_router)
-                    .and_then(|rid| inner.router(rid))
-                    .ok_or_else(|| {
-                        anyhow!("gateway router not found for interface '{}'", self.ifname)
-                    })?;
-                Some((gw_router.ns.clone(), format!("v{}", iface.idx)))
-            } else {
-                None
-            };
-
-            (dev.ns.clone(), gateway, op)
+            (dev.ns.clone(), inner.gateway_veth(iface)?, op)
         };
         let _guard = op.lock().await;
 
@@ -455,6 +441,72 @@ impl Iface {
             iface: self.ifname.to_string(),
         });
         Ok(())
+    }
+
+    // ── Mutate: carrier ──
+
+    /// Removes carrier from this interface, like pulling its network cable.
+    ///
+    /// The interface stays administratively up and keeps its addresses and
+    /// routes, which the kernel flags as `linkdown`. Packets sent while the
+    /// carrier is down are dropped without an error to the sender. Unlike
+    /// [`link_down`](Self::link_down), nothing is lost, so
+    /// [`carrier_up`](Self::carrier_up) restores traffic as it was.
+    ///
+    /// This takes down the router-side end of the interface's veth pair.
+    /// Returns an error for dummy interfaces, which have no peer.
+    pub async fn carrier_down(&self) -> Result<()> {
+        self.set_carrier(false).await?;
+        self.lab.emit(LabEventKind::CarrierDown {
+            device: self.device_name(),
+            iface: self.ifname.to_string(),
+        });
+        Ok(())
+    }
+
+    /// Restores carrier on this interface, like plugging its network cable
+    /// back in.
+    ///
+    /// Returns an error for dummy interfaces, which have no peer.
+    pub async fn carrier_up(&self) -> Result<()> {
+        self.set_carrier(true).await?;
+        self.lab.emit(LabEventKind::CarrierUp {
+            device: self.device_name(),
+            iface: self.ifname.to_string(),
+        });
+        Ok(())
+    }
+
+    /// Sets the admin state of the router-side veth, which the kernel
+    /// reports as carrier on this interface.
+    async fn set_carrier(&self, up: bool) -> Result<()> {
+        use crate::{netlink::Netlink, wiring};
+
+        let (gw_ns, peer, op) = {
+            let inner = self.lab.core.lock().expect("poisoned");
+            let dev = inner
+                .device(self.device)
+                .ok_or_else(|| anyhow!("device removed"))?;
+            let iface = dev
+                .iface(&self.ifname)
+                .ok_or_else(|| anyhow!("interface '{}' removed", self.ifname))?;
+            let Some((gw_ns, peer)) = inner.gateway_veth(iface)? else {
+                bail!(
+                    "cannot change carrier on dummy interface '{}' (no router-side peer)",
+                    self.ifname
+                );
+            };
+            (gw_ns, peer, Arc::clone(&dev.op))
+        };
+        let _guard = op.lock().await;
+        wiring::nl_run(&self.lab.netns, &gw_ns, move |nl: Netlink| async move {
+            if up {
+                nl.set_link_up(&peer).await
+            } else {
+                nl.set_link_down(&peer).await
+            }
+        })
+        .await
     }
 
     // ── Mutate: addressing ──

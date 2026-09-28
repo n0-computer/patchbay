@@ -28,6 +28,8 @@ pub(crate) fn step_action(step: &Step) -> &'static str {
         Step::SetDefaultRoute { .. } => "set-default-route",
         Step::LinkDown { .. } => "link-down",
         Step::LinkUp { .. } => "link-up",
+        Step::CarrierDown { .. } => "carrier-down",
+        Step::CarrierUp { .. } => "carrier-up",
         Step::Assert { .. } => "assert",
         Step::GenCerts { .. } => "gen-certs",
         Step::GenFile { .. } => "gen-file",
@@ -53,6 +55,8 @@ pub(crate) fn step_device(step: &Step) -> Option<&str> {
         Step::SetDefaultRoute { device, .. } => Some(device),
         Step::LinkDown { device, .. } => Some(device),
         Step::LinkUp { device, .. } => Some(device),
+        Step::CarrierDown { device, .. } => Some(device),
+        Step::CarrierUp { device, .. } => Some(device),
         Step::GenCerts { device, .. } => device.as_deref(),
         Step::GenFile { device, .. } => device.as_deref(),
         _ => None,
@@ -461,6 +465,28 @@ pub(crate) async fn execute_step(state: &mut SimState, step: &Step) -> Result<()
                 .iface(interface)
                 .ok_or_else(|| anyhow::anyhow!("interface '{}' not found", interface))?
                 .link_up()
+                .await?;
+        }
+
+        // ── carrier-down / carrier-up ─────────────────────────────────────
+        Step::CarrierDown { device, interface } => {
+            state
+                .lab
+                .device_by_name(device)
+                .ok_or_else(|| anyhow::anyhow!("unknown device '{}'", device))?
+                .iface(interface)
+                .ok_or_else(|| anyhow::anyhow!("interface '{}' not found", interface))?
+                .carrier_down()
+                .await?;
+        }
+        Step::CarrierUp { device, interface } => {
+            state
+                .lab
+                .device_by_name(device)
+                .ok_or_else(|| anyhow::anyhow!("unknown device '{}'", device))?
+                .iface(interface)
+                .ok_or_else(|| anyhow::anyhow!("interface '{}' not found", interface))?
+                .carrier_up()
                 .await?;
         }
 
@@ -1009,5 +1035,16 @@ mod tests {
         assert_eq!(parse_duration("2s").unwrap(), Duration::from_secs(2));
         assert_eq!(parse_duration("3m").unwrap(), Duration::from_secs(180));
         assert!(parse_duration("3h").is_err());
+    }
+
+    #[test]
+    fn parse_carrier_steps() {
+        for (action, down) in [("carrier-down", true), ("carrier-up", false)] {
+            let raw = format!("action = \"{action}\"\ndevice = \"dev\"\ninterface = \"eth0\"");
+            let step: Step = toml::from_str(&raw).expect("parse step");
+            assert_eq!(step_action(&step), action);
+            assert_eq!(step_device(&step), Some("dev"));
+            assert_eq!(matches!(step, Step::CarrierDown { .. }), down);
+        }
     }
 }

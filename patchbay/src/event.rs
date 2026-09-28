@@ -183,6 +183,20 @@ pub enum LabEventKind {
         /// Interface name.
         iface: String,
     },
+    /// Device interface regained carrier, like a cable plugged back in.
+    CarrierUp {
+        /// Device name.
+        device: String,
+        /// Interface name.
+        iface: String,
+    },
+    /// Device interface lost carrier, like a pulled cable.
+    CarrierDown {
+        /// Device name.
+        device: String,
+        /// Interface name.
+        iface: String,
+    },
     /// A new interface was added to a device.
     InterfaceAdded {
         /// Device name.
@@ -628,8 +642,11 @@ impl LabState {
                     r.downlink_condition = *condition;
                 }
             }
-            LabEventKind::LinkUp { .. } | LabEventKind::LinkDown { .. } => {
-                // State doesn't track link up/down currently.
+            LabEventKind::LinkUp { .. }
+            | LabEventKind::LinkDown { .. }
+            | LabEventKind::CarrierUp { .. }
+            | LabEventKind::CarrierDown { .. } => {
+                // State doesn't track link or carrier state currently.
             }
             LabEventKind::InterfaceAdded { device, iface } => {
                 if let Some(d) = self.devices.get_mut(device) {
