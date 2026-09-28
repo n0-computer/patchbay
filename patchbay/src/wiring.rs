@@ -876,10 +876,13 @@ pub(crate) fn link_local_from_seed(seed: u64) -> Ipv6Addr {
 // Netns + process helpers
 // ─────────────────────────────────────────────
 
-/// Creates a namespace with optional DNS overlay and applies IPv6 DAD mode.
+/// Creates a namespace with optional DNS overlay and applies IPv6 sysctls.
 ///
-/// When `dad_mode` is disabled, this sets `accept_dad=0` and
-/// `dad_transmits=0` before interfaces are moved in.
+/// Global IPv6 addresses are kept across link down/up (`keep_addr_on_down=1`)
+/// so that `Iface::link_up` can re-add the v6 default route. Linux flushes
+/// them by default, which leaves the gateway off-link. When `dad_mode` is
+/// disabled, this also sets `accept_dad=0` and `dad_transmits=0`. All sysctls
+/// are set before interfaces are moved in.
 pub(crate) fn create_named_netns(
     netns: &netns::NetnsManager,
     name: &str,
@@ -888,17 +891,17 @@ pub(crate) fn create_named_netns(
     dad_mode: Ipv6DadMode,
 ) -> Result<()> {
     netns.create_netns(name, dns_overlay, log_prefix)?;
-    if dad_mode == Ipv6DadMode::Disabled {
-        // Disable DAD before any interfaces are created or moved in.
-        netns.run_closure_in(name, || {
+    netns.run_closure_in(name, move || {
+        set_sysctl_root("net/ipv6/conf/all/keep_addr_on_down", "1").ok();
+        set_sysctl_root("net/ipv6/conf/default/keep_addr_on_down", "1").ok();
+        if dad_mode == Ipv6DadMode::Disabled {
             set_sysctl_root("net/ipv6/conf/all/accept_dad", "0").ok();
             set_sysctl_root("net/ipv6/conf/default/accept_dad", "0").ok();
             set_sysctl_root("net/ipv6/conf/all/dad_transmits", "0").ok();
             set_sysctl_root("net/ipv6/conf/default/dad_transmits", "0").ok();
-            Ok(())
-        })?;
-    }
-    Ok(())
+        }
+        Ok(())
+    })
 }
 
 /// Sets a sysctl value in the current namespace (caller must already be in the ns).

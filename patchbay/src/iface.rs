@@ -375,15 +375,20 @@ impl Iface {
 
     /// Brings this interface administratively up.
     ///
-    /// If this is the device's default route interface (and it is routed),
-    /// the default route is re-added (Linux removes routes when a link
-    /// goes down).
+    /// Linux removes routes and the IPv6 link-local address when a link
+    /// goes down, so this re-adds the link-local and, if this is the
+    /// device's routed default route interface, the default routes. Routes
+    /// added outside patchbay are not restored.
+    ///
+    /// With [`Ipv6DadMode::Enabled`](crate::Ipv6DadMode::Enabled), IPv6
+    /// addresses rerun duplicate address detection after this returns and
+    /// stay unusable until it completes, which takes about two seconds.
     pub async fn link_up(&self) -> Result<()> {
         use crate::{
             device::select_default_v6_gateway, netlink::Netlink, wiring, Ipv6ProvisioningMode,
         };
 
-        let (ns, uplink, is_default_via, dummy, op) = {
+        let (ns, uplink, is_default_via, dummy, ll_v6, op) = {
             let inner = self.lab.core.lock().expect("poisoned");
             let dev = inner
                 .device(self.device)
@@ -396,6 +401,7 @@ impl Iface {
                 iface.uplink(),
                 *dev.default_via == *self.ifname,
                 iface.is_dummy(),
+                iface.ll_v6,
                 Arc::clone(&dev.op),
             )
         };
@@ -404,7 +410,16 @@ impl Iface {
         let ifname = self.ifname.to_string();
         wiring::nl_run(&self.lab.netns, &ns, {
             let ifname = ifname.clone();
-            move |nl: Netlink| async move { nl.set_link_up(&ifname).await }
+            move |nl: Netlink| async move {
+                nl.set_link_up(&ifname).await?;
+                // Global v6 addresses survive link down via `keep_addr_on_down`
+                // (see `wiring::create_named_netns`), but the kernel always
+                // drops link-locals, so the seeded one is re-added here.
+                if let Some(ll6) = ll_v6 {
+                    nl.add_addr6(&ifname, ll6, 64).await?;
+                }
+                Ok(())
+            }
         })
         .await?;
 
