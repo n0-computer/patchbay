@@ -295,21 +295,7 @@ impl Iface {
                 );
             }
 
-            let gateway = if !iface.is_dummy() {
-                let uplink = iface.uplink().expect("routed interface has uplink");
-                let gw_router = inner
-                    .switch(uplink)
-                    .and_then(|sw| sw.owner_router)
-                    .and_then(|rid| inner.router(rid))
-                    .ok_or_else(|| {
-                        anyhow!("gateway router not found for interface '{}'", self.ifname)
-                    })?;
-                Some((gw_router.ns.clone(), format!("v{}", iface.idx)))
-            } else {
-                None
-            };
-
-            (dev.ns.clone(), gateway, op)
+            (dev.ns.clone(), inner.gateway_veth(iface)?, op)
         };
         let _guard = op.lock().await;
 
