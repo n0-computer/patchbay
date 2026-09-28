@@ -374,6 +374,19 @@ Brings a device interface up or down.
 
 ---
 
+### `action = "carrier-down"` / `action = "carrier-up"`
+
+Removes or restores carrier on a device interface, like pulling and
+replugging its cable. The interface stays up and keeps its addresses and
+routes while traffic is dropped.
+
+| Key         | Type   | Description |
+|-------------|--------|-------------|
+| `device`    | string | Target device. |
+| `interface` | string | Interface name. |
+
+---
+
 ### `action = "set-default-route"`
 
 Switches the default route on a device to a given interface. Useful for

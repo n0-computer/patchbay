@@ -285,6 +285,14 @@ pub enum Step {
         device: String,
         interface: String,
     },
+    CarrierDown {
+        device: String,
+        interface: String,
+    },
+    CarrierUp {
+        device: String,
+        interface: String,
+    },
     Assert {
         check: Option<String>,
         #[serde(default)]
