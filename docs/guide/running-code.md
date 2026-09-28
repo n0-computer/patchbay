@@ -163,6 +163,23 @@ dev.iface("wlan0").unwrap().link_up().await?;
 // The interface is back and traffic flows again.
 ```
 
+An administrative down is what `ip link set wlan0 down` does. The kernel
+removes the interface's routes, and sends fail with an error. A pulled
+cable or a lost Wi-Fi association looks different: the interface stays up
+and keeps its addresses and routes, but loses carrier, and packets vanish
+without an error. Use `carrier_down` and `carrier_up` for that case:
+
+```rust
+dev.iface("eth0").unwrap().carrier_down().await?;
+// eth0 shows NO-CARRIER; addresses and routes stay, traffic is dropped.
+
+dev.iface("eth0").unwrap().carrier_up().await?;
+// Carrier is back and traffic flows again, with nothing to restore.
+```
+
+Applications that watch netlink see different events for the two, so test
+both if your code reacts to network changes.
+
 ### Changing link conditions at runtime
 
 Modify link impairment on the fly to simulate degrading or improving

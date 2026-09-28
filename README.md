@@ -283,6 +283,10 @@ dev.set_default_route("eth0").await?;
 dev.iface("wlan0").unwrap().link_down().await?;
 dev.iface("wlan0").unwrap().link_up().await?;
 
+// Pull and replug the cable: carrier drops, addresses and routes stay.
+dev.iface("wlan0").unwrap().carrier_down().await?;
+dev.iface("wlan0").unwrap().carrier_up().await?;
+
 // Change link condition dynamically.
 dev.iface("wlan0").unwrap().set_condition(
     LinkCondition::new().rate_kbit(1000).loss_pct(5.0).latency_ms(100),
