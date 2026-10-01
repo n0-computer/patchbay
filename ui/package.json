@@ -15,7 +15,7 @@
     "dagre": "^0.8.5",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
-    "react-router-dom": "^7.13.1"
+    "react-router-dom": "^7.18.4"
   },
   "devDependencies": {
     "@playwright/test": "^1.51.1",
