@@ -11,7 +11,7 @@
   },
   "dependencies": {
     "@types/dagre": "^0.7.54",
-    "@xyflow/react": "^12.10.1",
+    "@xyflow/react": "^12.11.6",
     "dagre": "^0.8.5",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
