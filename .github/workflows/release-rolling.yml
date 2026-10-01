@@ -16,11 +16,11 @@ jobs:
     name: Build Linux Musl
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
-      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # v1
         with:
           toolchain: stable
           targets: x86_64-unknown-linux-musl
@@ -44,7 +44,7 @@ jobs:
           tar -C dist -czf dist/patchbay-x86_64-unknown-linux-musl.tar.gz patchbay-x86_64-unknown-linux-musl
           tar -C dist -czf dist/patchbay-serve-x86_64-unknown-linux-musl.tar.gz patchbay-serve-x86_64-unknown-linux-musl
 
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: release-linux-musl
           path: dist/*.tar.gz
@@ -59,11 +59,11 @@ jobs:
           - runner: macos-14
             target: aarch64-apple-darwin
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
-      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # v1
         with:
           toolchain: stable
           targets: ${{ matrix.target }}
@@ -83,7 +83,7 @@ jobs:
           cp "target/$RUST_TARGET/release/patchbay" "dist/patchbay-$RUST_TARGET"
           tar -C dist -czf "dist/patchbay-$RUST_TARGET.tar.gz" "patchbay-$RUST_TARGET"
 
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: release-macos-${{ matrix.target }}
           path: dist/*.tar.gz
@@ -97,14 +97,14 @@ jobs:
       - build-linux-musl
       - build-macos
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # stays on: this job moves the rolling tag with a bare `git push`
           persist-credentials: true
           fetch-depth: 0
 
       - name: Download artifacts
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           path: release-artifacts
 
