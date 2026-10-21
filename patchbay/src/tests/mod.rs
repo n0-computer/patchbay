@@ -34,6 +34,7 @@ use super::*;
 use crate::{check_caps, config};
 
 mod alloc;
+mod balancer;
 mod devtools;
 mod dns;
 mod firewall;
