@@ -1719,9 +1719,9 @@ checksum = "2d6e2daf9a8c2e21302714706860a0e6be02e03d17294ecc66b354ea7d4059dd"
 
 [[package]]
 name = "netlink-packet-route"
-version = "0.33.0"
+version = "0.34.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "59d48ffc8b73a506e1ff0878528c72668f2bfbc3d875b6be890a96be5d0d5576"
+checksum = "d3c407d8e95c0128ee5729728482a369f3ba9a0d9ba8335c20949a8d8989cf6b"
 dependencies = [
  "bitflags",
  "libc",
@@ -1732,9 +1732,9 @@ dependencies = [
 
 [[package]]
 name = "netlink-proto"
-version = "0.13.0"
+version = "0.14.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "97e03ae6247c6cdb499e8f14e98c72b83954d85822b687056e3a21150b438f2b"
+checksum = "deb648c817503ada468a15b8fb7a37d2061079dc0905f2c6552392850279dd85"
 dependencies = [
  "bytes",
  "futures-channel",
@@ -1742,7 +1742,6 @@ dependencies = [
  "log",
  "netlink-packet-core",
  "netlink-sys",
- "thiserror",
 ]
 
 [[package]]
@@ -1756,18 +1755,6 @@ dependencies = [
  "libc",
  "log",
  "tokio",
-]
-
-[[package]]
-name = "nix"
-version = "0.30.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "74523f3a35e05aba87a1d978330aef40f67b0304ac79c1c00b294c9830543db6"
-dependencies = [
- "bitflags",
- "cfg-if",
- "cfg_aliases",
- "libc",
 ]
 
 [[package]]
@@ -1967,7 +1954,7 @@ dependencies = [
  "iroh-metrics",
  "libc",
  "n0-tracing-test",
- "nix 0.31.3",
+ "nix",
  "rtnetlink",
  "serde",
  "serde_json",
@@ -1990,7 +1977,7 @@ dependencies = [
  "clap",
  "ctor",
  "flate2",
- "nix 0.31.3",
+ "nix",
  "open",
  "patchbay",
  "patchbay-runner",
@@ -2017,7 +2004,7 @@ dependencies = [
  "comfy-table",
  "flate2",
  "n0-tracing-test",
- "nix 0.31.3",
+ "nix",
  "patchbay",
  "patchbay-utils",
  "rcgen",
@@ -2081,7 +2068,7 @@ dependencies = [
  "anyhow",
  "clap",
  "dirs",
- "nix 0.31.3",
+ "nix",
  "patchbay-utils",
  "serde",
  "serde_json",
@@ -2394,9 +2381,9 @@ dependencies = [
 
 [[package]]
 name = "rtnetlink"
-version = "0.23.0"
+version = "0.24.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "90f60a3ee149005c5819e03e3d73ba4a470bc18b52b0c8422cfe1bea2cae63c6"
+checksum = "3ebb223efd6a02c17e119412e8a06640abead288a44256e642377e1c09d2134c"
 dependencies = [
  "futures-channel",
  "futures-util",
@@ -2405,8 +2392,7 @@ dependencies = [
  "netlink-packet-route",
  "netlink-proto",
  "netlink-sys",
- "nix 0.30.1",
- "thiserror",
+ "nix",
  "tokio",
 ]
 
