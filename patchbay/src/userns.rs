@@ -36,14 +36,15 @@ pub unsafe fn init_userns_for_ctor() {
 #[cfg(target_os = "linux")]
 fn do_bootstrap() -> anyhow::Result<()> {
     use anyhow::Context;
-    use nix::sched::{unshare, CloneFlags};
-    let uid = nix::unistd::Uid::current().as_raw();
-    let gid = nix::unistd::Gid::current().as_raw();
-    unshare(CloneFlags::CLONE_NEWUSER).context("unshare(CLONE_NEWUSER) failed")?;
+    use rustix::thread::UnshareFlags;
+    let uid = rustix::process::getuid().as_raw();
+    let gid = rustix::process::getgid().as_raw();
+    let new_user = crate::netns::unshare_namespaces(UnshareFlags::NEWUSER);
+    new_user.context("unshare(CLONE_NEWUSER) failed")?;
     std::fs::write("/proc/self/setgroups", "deny\n").context("write setgroups")?;
     std::fs::write("/proc/self/uid_map", format!("0 {uid} 1\n")).context("write uid_map")?;
     std::fs::write("/proc/self/gid_map", format!("0 {gid} 1\n")).context("write gid_map")?;
-    if nix::unistd::Uid::effective().is_root() {
+    if rustix::process::geteuid().is_root() {
         Ok(())
     } else {
         anyhow::bail!("userns bootstrap finished without UID 0 mapping")

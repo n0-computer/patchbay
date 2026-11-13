@@ -19,8 +19,10 @@ derive_more = { version = "2.1.1", features = ["debug", "display", "eq"] }
 futures = "0.3"
 ipnet = { version = "2.12", features = ["serde"] }
 libc = "0.2"
-nix = { version = "0.31", features = ["sched", "mount", "fs", "signal", "process", "user", "ioctl"] }
-rtnetlink = "0.23"
+netlink-packet-core = "0.8"
+netlink-packet-route = "0.31"
+netlink-proto = "0.12"
+rustix = { version = "1", default-features = false, features = ["std", "thread", "process"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 strum = { version = "0.28", features = ["derive"] }
