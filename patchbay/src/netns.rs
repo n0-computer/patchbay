@@ -8,14 +8,14 @@
 use std::{
     collections::HashMap,
     fs::File,
-    os::unix::fs::MetadataExt,
+    os::{fd::AsFd, unix::fs::MetadataExt},
     path::PathBuf,
     sync::{mpsc, Arc, Mutex},
     thread,
 };
 
 use anyhow::{anyhow, Context, Result};
-use nix::sched::{setns, unshare, CloneFlags};
+use rustix::thread::{move_into_link_name_space, LinkNameSpaceType, UnshareFlags};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, debug_span};
 
@@ -106,7 +106,7 @@ fn setup_namespace_thread(
 /// namespace's state instead of the host's. Without this, libraries that read
 /// `/proc/net/route` (e.g. netwatch) get the host's default route interface.
 fn apply_mount_overlay(overlay: Option<&DnsOverlay>) {
-    if let Err(e) = unshare(CloneFlags::CLONE_NEWNS) {
+    if let Err(e) = unshare_namespaces(UnshareFlags::NEWNS) {
         tracing::warn!(
             "unshare(CLONE_NEWNS) failed: {e} — /proc and DNS overlays may show host data"
         );
@@ -163,9 +163,31 @@ fn fixup_proc_net() {
     }
 }
 
+const NAMESPACES: UnshareFlags = UnshareFlags::NEWCGROUP
+    .union(UnshareFlags::NEWIPC)
+    .union(UnshareFlags::NEWNET)
+    .union(UnshareFlags::NEWNS)
+    .union(UnshareFlags::NEWPID)
+    .union(UnshareFlags::NEWTIME)
+    .union(UnshareFlags::NEWUSER)
+    .union(UnshareFlags::NEWUTS);
+
+/// Moves the calling thread into new namespaces of the kinds in `flags`; other flags give `EINVAL`.
+pub(crate) fn unshare_namespaces(flags: UnshareFlags) -> rustix::io::Result<()> {
+    if !NAMESPACES.contains(flags) {
+        return Err(rustix::io::Errno::INVAL);
+    }
+    // SAFETY: `flags` hold only namespace kinds, never `FILES`, so the fd table stays shared.
+    unsafe { rustix::thread::unshare_unsafe(flags) }
+}
+
+fn enter_network(fd: &File) -> rustix::io::Result<()> {
+    move_into_link_name_space(fd.as_fd(), Some(LinkNameSpaceType::Network))
+}
+
 /// Enters an existing namespace via `setns` and applies mount overlay.
 fn enter_namespace(fd: &File, overlay: Option<&DnsOverlay>) -> Result<()> {
-    setns(fd, CloneFlags::CLONE_NEWNET).context("setns CLONE_NEWNET")?;
+    enter_network(fd).context("setns CLONE_NEWNET")?;
     apply_mount_overlay(overlay);
     Ok(())
 }
@@ -211,8 +233,8 @@ fn open_current_thread_netns_fd() -> Result<File> {
     if let Ok(fd) = File::open("/proc/thread-self/ns/net") {
         return Ok(fd);
     }
-    let tid = nix::unistd::gettid();
-    let path = format!("/proc/self/task/{}/ns/net", tid.as_raw());
+    let tid = rustix::thread::gettid();
+    let path = format!("/proc/self/task/{}/ns/net", tid.as_raw_pid());
     if let Ok(fd) = File::open(&path) {
         return Ok(fd);
     }
@@ -242,8 +264,7 @@ impl SyncWorker {
             .name(thread_name(ns, "sw"))
             .spawn(move || {
                 let _guard = span.entered();
-                setns(&target, CloneFlags::CLONE_NEWNET)
-                    .expect("sync worker: setns CLONE_NEWNET failed");
+                enter_network(&target).expect("sync worker: setns CLONE_NEWNET failed");
                 let _tracing_guard = setup_namespace_thread(&ns_name, &opts);
                 while let Ok(msg) = rx.recv() {
                     match msg {
@@ -314,7 +335,7 @@ impl Worker {
             .spawn(move || {
                 let _guard = span.entered();
                 let init = (|| -> Result<(File, tokio::runtime::Runtime)> {
-                    unshare(CloneFlags::CLONE_NEWNET).context("unshare CLONE_NEWNET")?;
+                    unshare_namespaces(UnshareFlags::NEWNET).context("unshare CLONE_NEWNET")?;
                     let ns_fd = open_current_thread_netns_fd()?;
                     let mut builder = tokio::runtime::Builder::new_current_thread();
                     builder.enable_all();
@@ -395,10 +416,9 @@ impl Worker {
         let (tx, rx) = mpsc::channel();
         self.rt_handle.spawn(async move {
             let result = async {
-                let (conn, handle, _) =
-                    rtnetlink::new_connection().context("rtnetlink new_connection")?;
+                let (conn, nl) = crate::netlink::connect()?;
                 tokio::spawn(conn);
-                Ok::<Netlink, anyhow::Error>(Netlink::new(handle))
+                Ok::<Netlink, anyhow::Error>(nl)
             }
             .await;
             let _ = tx.send(result);

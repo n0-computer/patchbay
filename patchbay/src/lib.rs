@@ -265,7 +265,7 @@ pub use crate::{
 ///
 /// Returns an error listing the missing capabilities.
 pub fn check_caps() -> Result<()> {
-    if nix::unistd::Uid::effective().is_root() {
+    if rustix::process::geteuid().is_root() {
         return Ok(());
     }
     let status = std::fs::read_to_string("/proc/self/status").context("read /proc/self/status")?;
