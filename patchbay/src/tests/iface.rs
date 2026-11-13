@@ -97,6 +97,35 @@ async fn renew_ip() -> Result<()> {
     Ok(())
 }
 
+/// After renewing its IP, a device behind a NAT router still reaches a peer
+/// on another router: the renewal keeps the default route.
+#[tokio::test(flavor = "current_thread")]
+#[traced_test]
+async fn renew_ip_keeps_default_route() -> Result<()> {
+    let lab = Lab::new().await?;
+    let dc = lab
+        .add_router("dc")
+        .preset(RouterPreset::Public)
+        .build()
+        .await?;
+    let home = lab
+        .add_router("home")
+        .preset(RouterPreset::Home)
+        .build()
+        .await?;
+    let peer = lab.add_device("peer").uplink(dc.id()).build().await?;
+    let dev = lab.add_device("dev").uplink(home.id()).build().await?;
+
+    let target = peer.ip().context("peer has no v4")?.to_string();
+    let before = target.clone();
+    dev.run_sync(move || ping(&before))?;
+
+    dev.iface("eth0").unwrap().renew_ip().await?;
+    dev.run_sync(move || ping(&target))?;
+
+    Ok(())
+}
+
 /// Adding a secondary IP to an interface makes both addresses reachable.
 #[tokio::test(flavor = "current_thread")]
 #[traced_test]
