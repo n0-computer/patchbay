@@ -6,7 +6,7 @@ use anyhow::{anyhow, bail, Result};
 use ipnet::{Ipv4Net, Ipv6Net};
 
 use crate::{
-    core::{DeviceIfaceData, NodeId},
+    core::{DeviceIfaceData, NodeId, Renewal},
     event::LabEventKind,
     lab::{LabInner, LinkCondition, LinkDirection},
 };
@@ -488,7 +488,13 @@ impl Iface {
         let (_ns, op) = self.device_ns_and_op()?;
         let _guard = op.lock().await;
 
-        let (ns, old_ip, new_ip, prefix_len) = self
+        let Renewal {
+            ns,
+            old_ip,
+            new_ip,
+            prefix_len,
+            gw,
+        } = self
             .lab
             .core
             .lock()
@@ -499,6 +505,10 @@ impl Iface {
         wiring::nl_run(&self.lab.netns, &ns, move |nl: Netlink| async move {
             nl.del_addr4(&ifname, old_ip, prefix_len).await?;
             nl.add_addr4(&ifname, new_ip, prefix_len).await?;
+            // The kernel drops the default route with the old address.
+            if let Some(gw) = gw {
+                nl.replace_default_route_v4(&ifname, gw).await?;
+            }
             Ok(())
         })
         .await?;
