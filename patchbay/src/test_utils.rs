@@ -48,6 +48,27 @@ pub(crate) async fn run_reflector(
     Ok(())
 }
 
+/// Lists the IPv6 addresses assigned to `ifname` in the current namespace.
+///
+/// Reads `/proc/net/if_inet6`, whose rows are the address as 32 hex digits
+/// followed by index, prefix length, scope, flags, and the interface name.
+pub(crate) fn iface_v6_addrs(ifname: &str) -> Result<Vec<Ipv6Addr>> {
+    let table = std::fs::read_to_string("/proc/net/if_inet6").context("read if_inet6")?;
+    let mut addrs = Vec::new();
+    for line in table.lines() {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        let [hex, .., name] = fields.as_slice() else {
+            continue;
+        };
+        if *name != ifname {
+            continue;
+        }
+        let raw = u128::from_str_radix(hex, 16).with_context(|| format!("parse {hex}"))?;
+        addrs.push(Ipv6Addr::from(raw));
+    }
+    Ok(addrs)
+}
+
 /// Sends a UDP probe to `reflector` and returns the observed external address.
 ///
 /// Assumes the calling thread is already in the target namespace.

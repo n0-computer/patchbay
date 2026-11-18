@@ -123,6 +123,51 @@ async fn link_down_up() -> Result<()> {
     Ok(())
 }
 
+/// Link down then up on a dual-stack device keeps its IPv6 addresses and
+/// restores v6 connectivity.
+///
+/// Linux flushes global IPv6 addresses when a link goes down, so without
+/// `keep_addr_on_down` the v6 default route cannot be re-added on link up.
+#[tokio::test(flavor = "current_thread")]
+#[traced_test]
+async fn link_down_up_dual_stack() -> Result<()> {
+    check_caps()?;
+    let lab = Lab::new().await?;
+    let dc = lab
+        .add_router("dc")
+        .ip_support(IpSupport::DualStack)
+        .build()
+        .await?;
+    let dev = lab.add_device("dev").uplink(dc.id()).build().await?;
+    let eth0 = dev.iface("eth0").context("eth0")?;
+    let ip6 = eth0.ip6().context("eth0 has no v6 address")?;
+    let ll6 = eth0.ll6().context("eth0 has no v6 link-local")?;
+
+    let dc_ip_v6 = dc.uplink_ip_v6().context("no dc v6 uplink ip")?;
+    let r = SocketAddr::new(IpAddr::V6(dc_ip_v6), 16_700);
+    let _r = dc.spawn_reflector(r).await?;
+    dev.run_sync(move || test_utils::udp_roundtrip(r))
+        .context("before link_down")?;
+
+    eth0.link_down().await?;
+    eth0.link_up().await?;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let addrs = dev.run_sync(|| test_utils::iface_v6_addrs("eth0"))?;
+    assert!(
+        addrs.contains(&ip6),
+        "global v6 {ip6} lost after link_up: {addrs:?}"
+    );
+    assert!(
+        addrs.contains(&ll6),
+        "link-local {ll6} lost after link_up: {addrs:?}"
+    );
+
+    dev.run_sync(move || test_utils::udp_roundtrip(r))
+        .context("after link_up")?;
+    Ok(())
+}
+
 // ── Rate limiting ────────────────────────────────────────────────────
 
 /// 2 Mbit/s upload cap via tc on device interface.
