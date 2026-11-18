@@ -478,3 +478,21 @@ fn os_error(err: &anyhow::Error) -> Option<i32> {
 fn is_eexist(err: &anyhow::Error) -> bool {
     os_error(err) == Some(libc::EEXIST)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A link that does not exist gives `ENODEV`, and `ensure_link_deleted` skips it.
+    #[tokio::test]
+    async fn missing_link_is_enodev() -> Result<()> {
+        let (connection, netlink) = connect()?;
+        tokio::spawn(connection);
+
+        let err = netlink.link_index("pb-no-such-link").await.unwrap_err();
+        assert_eq!(os_error(&err), Some(libc::ENODEV), "{err:#}");
+        assert!(err.to_string().contains("link not found"), "{err:#}");
+
+        netlink.ensure_link_deleted("pb-no-such-link").await
+    }
+}

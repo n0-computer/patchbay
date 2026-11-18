@@ -13,6 +13,7 @@
 //! ```
 
 use std::{
+    mem::offset_of,
     net::{Ipv4Addr, Ipv6Addr},
     os::{
         fd::{AsRawFd, OwnedFd},
@@ -49,7 +50,9 @@ struct IfReq {
     _pad: [u8; IFREQ_PAD],
 }
 
+// The kernel reads and writes one `struct ifreq`, so `IfReq` must cover the same bytes.
 const _: () = assert!(size_of::<IfReq>() == size_of::<libc::ifreq>());
+const _: () = assert!(offset_of!(IfReq, ifr_flags) == offset_of!(libc::ifreq, ifr_ifru));
 
 /// Opens `/dev/net/tun` in non-blocking mode (required for tokio `AsyncFd`) and attaches it to the
 /// device that `request` names.
@@ -60,7 +63,10 @@ fn open_tun(request: &mut IfReq) -> Result<std::fs::File> {
         .custom_flags(libc::O_NONBLOCK)
         .open("/dev/net/tun")
         .context("open /dev/net/tun")?;
-    // SAFETY: `IfReq` has the size and layout of `struct ifreq` (checked above).
+    // SAFETY: `tun` is an open `/dev/net/tun` fd, and `TUNSETIFF` is a valid request for it. The
+    // kernel reads one `struct ifreq` from the argument and writes the device name back into it.
+    // `IfReq` has the size and the field offsets of `struct ifreq` (checked above), and each bit
+    // pattern is a valid `IfReq`. `request` is an exclusive borrow that outlives the call.
     unsafe { ioctl(&tun, Updater::<TUNSETIFF, IfReq>::new(request)) }.context("TUNSETIFF ioctl")?;
     Ok(tun)
 }

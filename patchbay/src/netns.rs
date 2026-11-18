@@ -178,6 +178,8 @@ pub(crate) fn unshare_namespaces(flags: UnshareFlags) -> rustix::io::Result<()> 
         return Err(rustix::io::Errno::INVAL);
     }
     // SAFETY: `flags` hold only namespace kinds, never `FILES`, so the fd table stays shared.
+    // The kernel adds `CLONE_FS` for `NEWNS` and `NEWUSER`, and `CLONE_THREAD` for `NEWUSER`. It
+    // never adds `CLONE_FILES`.
     unsafe { rustix::thread::unshare_unsafe(flags) }
 }
 
