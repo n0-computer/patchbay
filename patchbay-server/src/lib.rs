@@ -1043,8 +1043,7 @@ async fn push_run(
     }
 
     // Create run directory: {run_dir}/{project}-{date}-{uuid}
-    let now = chrono::Utc::now();
-    let date = now.format("%Y%m%d_%H%M%S").to_string();
+    let date = patchbay_utils::manifest::run_dir_stamp(time::OffsetDateTime::now_utc());
     let uuid = uuid::Uuid::new_v4();
     let run_name = format!("{project}-{date}-{uuid}");
     let run_dir = push.run_dir.join(&run_name);
@@ -1143,7 +1142,7 @@ async fn push_run(
             pr: None,
             pr_url: None,
             title: None,
-            started_at: Some(chrono::Utc::now()),
+            started_at: Some(time::OffsetDateTime::now_utc()),
             ended_at: None,
             runtime: None,
             outcome: None,

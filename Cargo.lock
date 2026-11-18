@@ -406,10 +406,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1aa79e62e7697b8e29b513a68abacf485adcd1fe8284a4316c5ae868e6633327"
 dependencies = [
  "iana-time-zone",
- "js-sys",
  "num-traits",
- "serde",
- "wasm-bindgen",
  "windows-link",
 ]
 
@@ -655,6 +652,9 @@ name = "deranged"
 version = "0.5.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7cd812cc2bc1d69d4764bd80df88b4317eaef9e773c75226407d9bc0876b211c"
+dependencies = [
+ "serde_core",
+]
 
 [[package]]
 name = "derive_more"
@@ -1845,6 +1845,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "num_threads"
+version = "0.1.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cabcc654086861f9e1bc5115258de62ef92c79b20f4615a1b0cc57c4e82027d4"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "objc2-core-foundation"
 version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1956,7 +1965,6 @@ name = "patchbay"
 version = "0.7.0"
 dependencies = [
  "anyhow",
- "chrono",
  "ctor",
  "derive_more",
  "futures",
@@ -1973,6 +1981,7 @@ dependencies = [
  "serde_json",
  "strum",
  "testdir",
+ "time",
  "tokio",
  "tokio-util",
  "toml",
@@ -1986,7 +1995,6 @@ name = "patchbay-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "chrono",
  "clap",
  "ctor",
  "flate2",
@@ -2002,6 +2010,7 @@ dependencies = [
  "serde_json",
  "tar",
  "tempfile",
+ "time",
  "tokio",
  "toml",
  "tracing",
@@ -2012,7 +2021,6 @@ name = "patchbay-runner"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "chrono",
  "clap",
  "comfy-table",
  "flate2",
@@ -2026,6 +2034,7 @@ dependencies = [
  "serde_json",
  "serial_test",
  "tar",
+ "time",
  "tokio",
  "toml",
  "tracing",
@@ -2040,7 +2049,6 @@ dependencies = [
  "async-stream",
  "axum",
  "axum-server",
- "chrono",
  "clap",
  "dirs",
  "flate2",
@@ -2049,6 +2057,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tar",
+ "time",
  "tokio",
  "tokio-rustls-acme",
  "tokio-stream",
@@ -2062,7 +2071,6 @@ name = "patchbay-utils"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "chrono",
  "flate2",
  "glob",
  "reqwest",
@@ -2070,6 +2078,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "tar",
+ "time",
  "tracing",
  "tracing-subscriber",
 ]
@@ -3010,7 +3019,9 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cdb87b95ec50ddfa440816d227a17b2ccbdda963a316a727fda0fc4334f7d134"
 dependencies = [
  "deranged",
+ "libc",
  "num-conv",
+ "num_threads",
  "powerfmt",
  "serde_core",
  "time-core",

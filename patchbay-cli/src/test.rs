@@ -246,9 +246,9 @@ pub fn run_native(args: TestArgs, verbose: bool, persist: bool) -> Result<()> {
         cmd.env("PATCHBAY_OUTDIR", target_dir.join("testdir-current"));
     }
 
-    let started_at = chrono::Utc::now();
+    let started_at = time::OffsetDateTime::now_utc();
     let (success, stdout, stderr) = run_piped(&mut cmd, verbose)?;
-    let ended_at = chrono::Utc::now();
+    let ended_at = time::OffsetDateTime::now_utc();
 
     // Parse results: structured JSON from nextest, text fallback for cargo test.
     let results = if use_nextest {
@@ -280,7 +280,7 @@ pub fn run_native(args: TestArgs, verbose: bool, persist: bool) -> Result<()> {
         title: None,
         started_at: Some(started_at),
         ended_at: Some(ended_at),
-        runtime: (ended_at - started_at).to_std().ok(),
+        runtime: (ended_at - started_at).try_into().ok(),
         outcome: Some(if success { "pass" } else { "fail" }.to_string()),
         pass: Some(pass),
         fail: Some(fail),
@@ -324,7 +324,7 @@ fn persist_run() -> Result<()> {
     if !testdir.exists() {
         return Ok(());
     }
-    let ts = chrono::Utc::now().format("%Y%m%d_%H%M%S");
+    let ts = patchbay_utils::manifest::run_dir_stamp(time::OffsetDateTime::now_utc());
     let dest = PathBuf::from(format!(".patchbay/work/run-{ts}"));
     std::fs::create_dir_all(dest.parent().unwrap())?;
     // -rL: dereference symlinks (testdir-current is a symlink to testdir-N)

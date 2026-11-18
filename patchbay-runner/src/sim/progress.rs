@@ -65,13 +65,19 @@ pub(crate) struct RunProgress {
 }
 
 pub(crate) fn format_timestamp(ts: SystemTime) -> String {
-    chrono::DateTime::<chrono::Utc>::from(ts)
-        .format("%Y-%m-%dT%H:%M:%SZ")
-        .to_string()
+    time::OffsetDateTime::from(ts)
+        .format(time::macros::format_description!(
+            "[year]-[month]-[day]T[hour]:[minute]:[second]Z"
+        ))
+        .expect("format timestamp")
 }
 
 pub(crate) fn now_stamp() -> String {
-    chrono::Utc::now().format("%y%m%d-%H%M%S").to_string()
+    time::OffsetDateTime::now_utc()
+        .format(time::macros::format_description!(
+            "[year repr:last_two][month][day]-[hour][minute][second]"
+        ))
+        .expect("format timestamp")
 }
 
 pub(crate) async fn write_sim_report(run_root: &Path, report: &SimRunReport) -> Result<()> {
