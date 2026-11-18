@@ -10,7 +10,6 @@ repository.workspace = true
 
 [dependencies]
 anyhow = "1"
-clap = { version = "4", features = ["derive"] }
 comfy-table = "7"
 flate2 = "1"
 patchbay = { workspace = true }
