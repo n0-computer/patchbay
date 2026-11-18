@@ -558,7 +558,7 @@ impl Lab {
     fn refuse_real_root() -> Result<()> {
         #[cfg(target_os = "linux")]
         {
-            if !nix::unistd::Uid::effective().is_root() {
+            if !rustix::process::geteuid().is_root() {
                 return Ok(());
             }
             // Check if we're in a non-initial user namespace by comparing
