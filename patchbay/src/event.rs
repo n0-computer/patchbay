@@ -36,6 +36,7 @@ pub struct LabEvent {
 /// All event variants. Internally tagged with a `"kind"` field.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum LabEventKind {
     // ── Lifecycle ──
     /// Emitted once during `Lab::new()`.
