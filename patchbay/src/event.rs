@@ -6,9 +6,9 @@ use std::{
     sync::atomic::Ordering,
 };
 
-use chrono::{DateTime, Utc};
 use ipnet::{Ipv4Net, Ipv6Net};
 use serde::{Deserialize, Serialize};
+use time::OffsetDateTime;
 
 use crate::{
     firewall::Firewall,
@@ -25,8 +25,9 @@ use crate::{
 pub struct LabEvent {
     /// Monotonically increasing operation id.
     pub opid: u64,
-    /// Wall-clock timestamp.
-    pub timestamp: DateTime<Utc>,
+    /// Wall-clock timestamp in UTC, serialized as RFC 3339.
+    #[serde(with = "time::serde::rfc3339")]
+    pub timestamp: OffsetDateTime,
     /// The event payload.
     #[serde(flatten)]
     pub kind: LabEventKind,
@@ -314,7 +315,8 @@ pub struct LabState {
     /// Lab status (`"running"` or `"stopped"`).
     pub status: String,
     /// Lab creation timestamp.
-    pub created_at: Option<DateTime<Utc>>,
+    #[serde(default, with = "time::serde::rfc3339::option")]
+    pub created_at: Option<OffsetDateTime>,
     /// IX state.
     pub ix: Option<IxState>,
     /// Router states keyed by name.
@@ -773,7 +775,7 @@ impl crate::lab::LabInner {
         let opid = self.opid.fetch_add(1, Ordering::Relaxed);
         let event = LabEvent {
             opid,
-            timestamp: Utc::now(),
+            timestamp: OffsetDateTime::now_utc(),
             kind,
         };
         // Ignore error — no receivers is fine.
@@ -847,7 +849,7 @@ mod tests {
         for (i, kind) in events.into_iter().enumerate() {
             let event = LabEvent {
                 opid: i as u64,
-                timestamp: Utc::now(),
+                timestamp: OffsetDateTime::now_utc(),
                 kind,
             };
             let json = serde_json::to_string(&event).expect("serialize");
@@ -863,7 +865,7 @@ mod tests {
         let events = vec![
             LabEvent {
                 opid: 0,
-                timestamp: Utc::now(),
+                timestamp: OffsetDateTime::now_utc(),
                 kind: LabEventKind::LabCreated {
                     lab_prefix: "lab-test".into(),
                     label: None,
@@ -871,7 +873,7 @@ mod tests {
             },
             LabEvent {
                 opid: 1,
-                timestamp: Utc::now(),
+                timestamp: OffsetDateTime::now_utc(),
                 kind: LabEventKind::IxCreated {
                     bridge: "br-1".into(),
                     cidr: "198.18.0.0/24".parse().unwrap(),
@@ -882,7 +884,7 @@ mod tests {
             },
             LabEvent {
                 opid: 2,
-                timestamp: Utc::now(),
+                timestamp: OffsetDateTime::now_utc(),
                 kind: LabEventKind::RouterAdded {
                     name: "r1".into(),
                     state: Box::new(RouterState {
@@ -911,7 +913,7 @@ mod tests {
             },
             LabEvent {
                 opid: 3,
-                timestamp: Utc::now(),
+                timestamp: OffsetDateTime::now_utc(),
                 kind: LabEventKind::DeviceAdded {
                     name: "d1".into(),
                     state: DeviceState {

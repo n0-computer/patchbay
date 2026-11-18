@@ -669,7 +669,15 @@ impl Lab {
                     .as_ref()
                     .map(|s| s.to_string())
                     .unwrap_or_else(|| prefix.clone());
-                let ts = chrono::Local::now().format("%Y%m%d_%H%M%S");
+                // `now_local` fails once the process has more than one thread,
+                // so the name then falls back to UTC.
+                let now = time::OffsetDateTime::now_local()
+                    .unwrap_or_else(|_| time::OffsetDateTime::now_utc());
+                let ts = now
+                    .format(time::macros::format_description!(
+                        "[year][month][day]_[hour][minute][second]"
+                    ))
+                    .expect("format run dir timestamp");
                 base.join(format!("{ts}-{label_or_prefix}"))
             }
         });

@@ -406,7 +406,11 @@ pub(crate) async fn run_nat64_loop(
         sync::{Arc, Mutex},
     };
 
-    let tun = tokio::io::unix::AsyncFd::new(tun_fd).context("AsyncFd on TUN")?;
+    // SAFETY: `OwnedFd` owns a valid open fd, and `as_raw_fd` always returns
+    // that same fd while the `AsyncFd` holds it.
+    let tun = unsafe { tokio::io::unix::AsyncFd::register(tun_fd) }
+        .map_err(std::io::Error::from)
+        .context("AsyncFd on TUN")?;
     let translations: Arc<Mutex<HashMap<(Ipv4Addr, u16), Ipv6Addr>>> =
         Arc::new(Mutex::new(HashMap::new()));
 

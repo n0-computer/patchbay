@@ -441,7 +441,11 @@ impl NsWriterSubscriber {
             return;
         }
 
-        let timestamp = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Micros, true);
+        let timestamp = time::OffsetDateTime::now_utc()
+            .format(time::macros::format_description!(
+                "[year]-[month]-[day]T[hour]:[minute]:[second].[subsecond digits:6]Z"
+            ))
+            .expect("format log timestamp");
 
         // Write to .events.jsonl — only _events:: targets.
         if let Some(kind) = target.split_once("_events::").map(|(_, k)| k) {

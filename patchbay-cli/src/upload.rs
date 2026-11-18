@@ -20,7 +20,7 @@ pub fn manifest_from_env(project: &str) -> RunManifest {
         pr_url: None,
         title: std::env::var("GITHUB_PR_TITLE").ok(),
         outcome: None,
-        started_at: Some(chrono::Utc::now()),
+        started_at: Some(time::OffsetDateTime::now_utc()),
         ended_at: None,
         runtime: None,
         dirty: false,

@@ -93,13 +93,13 @@ pub fn run_tests_in_dir(
 pub fn persist_worktree_run(
     tree_dir: &Path,
     results: &[TestResult],
-    started_at: chrono::DateTime<chrono::Utc>,
-    ended_at: chrono::DateTime<chrono::Utc>,
+    started_at: time::OffsetDateTime,
+    ended_at: time::OffsetDateTime,
     runtime: Duration,
 ) -> Result<()> {
     use manifest::{RunKind, RunManifest};
 
-    let ts = chrono::Utc::now().format("%Y%m%d_%H%M%S");
+    let ts = patchbay_utils::manifest::run_dir_stamp(time::OffsetDateTime::now_utc());
     let dest = PathBuf::from(format!(".patchbay/work/run-{ts}"));
     std::fs::create_dir_all(&dest)?;
 

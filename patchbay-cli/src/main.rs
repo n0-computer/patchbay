@@ -497,10 +497,10 @@ fn dispatch_compare(command: CompareCommand, verbose: bool) -> Result<()> {
 
                 println!("Running tests in {label} ...");
                 let tree_dir = compare::setup_worktree(git_ref, &cwd)?;
-                let started_at = chrono::Utc::now();
+                let started_at = time::OffsetDateTime::now_utc();
                 let (results, _output) = compare::run_tests_in_dir(&tree_dir, &args, verbose)?;
-                let ended_at = chrono::Utc::now();
-                let runtime = (ended_at - started_at).to_std().unwrap_or_default();
+                let ended_at = time::OffsetDateTime::now_utc();
+                let runtime = (ended_at - started_at).try_into().unwrap_or_default();
 
                 compare::persist_worktree_run(&tree_dir, &results, started_at, ended_at, runtime)?;
                 compare::cleanup_worktree(&tree_dir)?;

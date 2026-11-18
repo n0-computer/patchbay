@@ -10,8 +10,8 @@ use std::{
     time::Duration,
 };
 
-use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use time::OffsetDateTime;
 
 // ── Duration serde helpers ──────────────────────────────────────────
 
@@ -46,6 +46,14 @@ pub mod option_duration_ms {
     pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Duration>, D::Error> {
         Ok(Option::<u64>::deserialize(d)?.map(Duration::from_millis))
     }
+}
+
+/// Formats `ts` as `YYYYmmdd_HHMMSS` for run directory names.
+pub fn run_dir_stamp(ts: OffsetDateTime) -> String {
+    ts.format(time::macros::format_description!(
+        "[year][month][day]_[hour][minute][second]"
+    ))
+    .expect("format run dir timestamp")
 }
 
 // ── Core types ──────────────────────────────────────────────────────
@@ -112,10 +120,18 @@ pub struct RunManifest {
     pub title: Option<String>,
 
     // ── Execution ──
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub started_at: Option<DateTime<Utc>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ended_at: Option<DateTime<Utc>>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "time::serde::rfc3339::option"
+    )]
+    pub started_at: Option<OffsetDateTime>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "time::serde::rfc3339::option"
+    )]
+    pub ended_at: Option<OffsetDateTime>,
     /// Total runtime, serialized as integer milliseconds.
     #[serde(
         default,
@@ -478,6 +494,27 @@ pub fn parse_nextest_json(output: &str) -> Vec<TestResult> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Manifests written with chrono still parse, and new ones use RFC 3339.
+    #[test]
+    fn manifest_timestamps_rfc3339() {
+        let json = r#"{"kind":"test","started_at":"2026-11-18T10:00:00.123456789Z","ended_at":"2026-11-18T10:00:05+00:00"}"#;
+        let manifest: RunManifest = serde_json::from_str(json).unwrap();
+        let started = manifest.started_at.unwrap();
+        let ended = manifest.ended_at.unwrap();
+        assert_eq!(started.nanosecond(), 123_456_789);
+        assert_eq!(ended - started, time::Duration::nanoseconds(4_876_543_211));
+
+        let out = serde_json::to_value(&manifest).unwrap();
+        assert_eq!(out["started_at"], "2026-11-18T10:00:00.123456789Z");
+        assert_eq!(out["ended_at"], "2026-11-18T10:00:05Z");
+    }
+
+    #[test]
+    fn run_dir_stamp_format() {
+        let ts = time::macros::datetime!(2026-01-02 03:04:05.678 UTC);
+        assert_eq!(run_dir_stamp(ts), "20260102_030405");
+    }
 
     #[test]
     fn test_parse_test_output() {
