@@ -22,6 +22,7 @@ allow = [
 [advisories]
 yanked = "deny"
 ignore = [
+  "RUSTSEC-2026-0543", # unmaintained: chrono, via tokio-rustls-acme
 ]
 
 [sources]
