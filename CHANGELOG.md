@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.7.1](https://github.com/n0-computer/patchbay/compare/patchbay-v0.7.0..0.7.1) - 2026-11-19
+
+### 🐛 Bug Fixes
+
+- Keep IPv6 addresses across link down/up on dual-stack devices ([#47](https://github.com/n0-computer/patchbay/issues/47)) - ([23a7373](https://github.com/n0-computer/patchbay/commit/23a737398e3aea6b737d34f67ba11ed29758623d))
+
+### ⚙️ Miscellaneous Tasks
+
+- *(security)* Hardening + lock files + dependabot cooldown ([#48](https://github.com/n0-computer/patchbay/issues/48)) - ([4ccaa15](https://github.com/n0-computer/patchbay/commit/4ccaa15398b692715d8d4325c3497ce5de700ebb))
+- Replace chrono with time ([#82](https://github.com/n0-computer/patchbay/issues/82)) - ([5210859](https://github.com/n0-computer/patchbay/commit/5210859ff2091308d9646a992a3fa57d88888c91))
+
+### Deps
+
+- *(patchbay-server)* Update tokio-rustls-acme to 0.10 ([#84](https://github.com/n0-computer/patchbay/issues/84)) - ([3cde22d](https://github.com/n0-computer/patchbay/commit/3cde22dcc40dd208cf018eeaf67bfb29a7f5b9be))
+- Bump all deps ([#63](https://github.com/n0-computer/patchbay/issues/63)) - ([c4147e1](https://github.com/n0-computer/patchbay/commit/c4147e142136249933a868337e8f3c6bf4bdd18f))
+
 ## [0.7.0](https://github.com/n0-computer/patchbay/compare/patchbay-v0.6.0..0.7.0) - 2026-07-27
 
 ### ⛰️  Features
