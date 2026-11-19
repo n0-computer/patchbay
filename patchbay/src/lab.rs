@@ -146,6 +146,7 @@ impl RegionLink {
 }
 
 /// Pre-built regions from [`Lab::add_default_regions`].
+#[non_exhaustive]
 pub struct DefaultRegions {
     /// US region (198.18.0.0/20).
     pub us: Region,
