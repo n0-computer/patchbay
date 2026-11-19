@@ -82,6 +82,7 @@ pub enum PortPolicy {
 ///     .build();
 /// ```
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct FirewallConfig {
     /// Block unsolicited inbound traffic on the WAN interface (RFC 6092).
     /// When true, only established/related return traffic is allowed inbound.

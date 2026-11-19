@@ -112,6 +112,7 @@ impl Region {
 
 /// Parameters for an inter-region link passed to [`Lab::link_regions`].
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct RegionLink {
     /// One-way latency in milliseconds (RTT = 2x).
     pub latency_ms: u32,

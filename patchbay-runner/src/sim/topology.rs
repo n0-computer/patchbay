@@ -103,27 +103,16 @@ gateway = "r1"
 
     #[test]
     fn rejects_inline_when_topology_ref_set() {
-        let sim = SimFile {
+        let mut sim = SimFile {
             sim: SimMeta {
                 name: "x".into(),
                 topology: Some("a".into()),
             },
-            topology: patchbay::config::LabConfig {
-                router: vec![patchbay::config::RouterConfig {
-                    name: "r1".into(),
-                    region: None,
-                    upstream: None,
-                    nat: patchbay::Nat::None,
-                    ip_support: patchbay::IpSupport::V4Only,
-                    nat_v6: patchbay::NatV6Mode::None,
-                    ra_enabled: None,
-                    ra_interval_secs: None,
-                    ra_lifetime_secs: None,
-                }],
-                ..Default::default()
-            },
             ..Default::default()
         };
+        sim.topology
+            .router
+            .push(patchbay::config::RouterConfig::new("r1"));
         let err = match load_topology(&sim, Path::new("sims/sim.toml")) {
             Ok(_) => panic!("expected inline-topology rejection"),
             Err(err) => err,
