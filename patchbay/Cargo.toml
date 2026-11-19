@@ -19,7 +19,7 @@ futures = "0.3"
 ipnet = { version = "2.12", features = ["serde"] }
 libc = "0.2"
 netlink-packet-core = "0.9"
-netlink-packet-route = "0.33"
+netlink-packet-route = "0.34"
 netlink-proto = "0.13"
 rustix = { version = "1.1", default-features = false, features = ["std", "thread", "process"] }
 serde = { version = "1", features = ["derive"] }
