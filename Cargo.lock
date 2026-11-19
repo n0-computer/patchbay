@@ -1701,18 +1701,6 @@ dependencies = [
 
 [[package]]
 name = "nix"
-version = "0.30.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "74523f3a35e05aba87a1d978330aef40f67b0304ac79c1c00b294c9830543db6"
-dependencies = [
- "bitflags",
- "cfg-if",
- "cfg_aliases",
- "libc",
-]
-
-[[package]]
-name = "nix"
 version = "0.31.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2bc81ce8148d3b4f3274da811f11cdd824ae661ee4ef732cdb229825cf5be7f7"
@@ -1916,8 +1904,10 @@ dependencies = [
  "iroh-metrics",
  "libc",
  "n0-tracing-test",
- "nix 0.31.4",
- "rtnetlink",
+ "netlink-packet-core",
+ "netlink-packet-route",
+ "netlink-proto",
+ "rustix",
  "serde",
  "serde_json",
  "strum",
@@ -1939,7 +1929,7 @@ dependencies = [
  "clap",
  "ctor",
  "flate2",
- "nix 0.31.4",
+ "nix",
  "open",
  "patchbay",
  "patchbay-runner",
@@ -1965,7 +1955,7 @@ dependencies = [
  "comfy-table",
  "flate2",
  "n0-tracing-test",
- "nix 0.31.4",
+ "nix",
  "patchbay",
  "patchbay-utils",
  "rcgen",
@@ -2029,7 +2019,7 @@ dependencies = [
  "anyhow",
  "clap",
  "dirs",
- "nix 0.31.4",
+ "nix",
  "patchbay-utils",
  "serde",
  "serde_json",
@@ -2328,24 +2318,6 @@ dependencies = [
  "libc",
  "untrusted",
  "windows-sys 0.52.0",
-]
-
-[[package]]
-name = "rtnetlink"
-version = "0.23.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "90f60a3ee149005c5819e03e3d73ba4a470bc18b52b0c8422cfe1bea2cae63c6"
-dependencies = [
- "futures-channel",
- "futures-util",
- "log",
- "netlink-packet-core",
- "netlink-packet-route",
- "netlink-proto",
- "netlink-sys",
- "nix 0.30.1",
- "thiserror",
- "tokio",
 ]
 
 [[package]]
