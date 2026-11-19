@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 /// Use [`Firewall::Custom`] for full control.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum Firewall {
     /// No filtering beyond NAT (default).
     #[default]
@@ -58,6 +59,7 @@ pub enum Firewall {
 /// traversing the router's forward chain.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum PortPolicy {
     /// All destination ports are allowed (no filtering).
     #[default]

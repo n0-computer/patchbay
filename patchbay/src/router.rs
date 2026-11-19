@@ -734,6 +734,7 @@ impl Router {
 ///     .build().await?;
 /// ```
 #[derive(Clone, Copy, Debug)]
+#[non_exhaustive]
 pub enum RouterPreset {
     /// Residential home router.
     ///
