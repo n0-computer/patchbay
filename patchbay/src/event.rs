@@ -22,6 +22,7 @@ use crate::{
 
 /// A single lab event with global ordering.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct LabEvent {
     /// Monotonically increasing operation id.
     pub opid: u64,
@@ -265,6 +266,7 @@ pub enum LabEventKind {
 
 /// Snapshot of a device interface at the time of an event.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[non_exhaustive]
 pub struct IfaceSnapshot {
     /// Interface name.
     pub name: String,
@@ -287,6 +289,7 @@ pub struct IfaceSnapshot {
 
 /// Traffic counters for one interface (from `/proc/net/dev`).
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct IfaceCounters {
     /// Interface name.
     pub iface: String,
@@ -306,6 +309,7 @@ pub struct IfaceCounters {
 
 /// Lab state derived from the event stream. Mirrors the `state.json` schema.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct LabState {
     /// Latest applied opid.
     pub opid: u64,
@@ -332,6 +336,7 @@ pub struct LabState {
 
 /// IX state in state.json.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct IxState {
     /// Bridge name.
     pub bridge: String,
@@ -347,6 +352,7 @@ pub struct IxState {
 
 /// Router state in state.json.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct RouterState {
     /// Namespace name.
     pub ns: String,
@@ -392,6 +398,7 @@ pub struct RouterState {
 
 /// Device state in state.json.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct DeviceState {
     /// Namespace name.
     pub ns: String,
@@ -407,6 +414,7 @@ pub struct DeviceState {
 
 /// Region state in state.json.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct RegionState {
     /// Router assigned to this region.
     pub router: String,
@@ -414,6 +422,7 @@ pub struct RegionState {
 
 /// Inter-region link state.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct RegionLinkState {
     /// Router A name.
     pub a: String,
