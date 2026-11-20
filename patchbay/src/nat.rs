@@ -44,6 +44,7 @@ use serde::{Deserialize, Serialize};
     strum::Display,
 )]
 #[serde(rename_all = "kebab-case")]
+#[non_exhaustive]
 pub enum Nat {
     /// No NAT. The device has a publicly routable address.
     #[default]
@@ -145,6 +146,7 @@ impl From<Nat> for Option<NatConfig> {
 /// packets.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum NatMapping {
     /// Same external port for all destinations.
     ///
@@ -414,6 +416,7 @@ impl NatConfigBuilder {
 /// IPv6 NAT mode for a router.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
+#[non_exhaustive]
 pub enum NatV6Mode {
     /// No translation; devices use global unicast directly.
     #[default]

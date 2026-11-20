@@ -61,7 +61,7 @@ pub(crate) struct CoreConfig {
 /// Cheaply copyable and usable as a hash-map key.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, derive_more::Display)]
 #[display("{_0}")]
-pub struct NodeId(pub u64);
+pub struct NodeId(pub(crate) u64);
 
 /// Selects the address pool used for router downstream links.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
