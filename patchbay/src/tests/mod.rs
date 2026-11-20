@@ -35,7 +35,7 @@ use crate::{check_caps, config};
 
 mod alloc;
 mod devtools;
-#[cfg(feature = "dns")]
+#[cfg(feature = "dns-server")]
 mod dns;
 mod firewall;
 mod hairpin;

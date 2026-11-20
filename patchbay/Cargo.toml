@@ -9,9 +9,9 @@ authors.workspace = true
 repository.workspace = true
 
 [features]
-default = ["dns"]
+default = ["dns-server"]
 # The in-process lab DNS server (`Lab::dns_server`).
-dns = ["dep:hickory-proto"]
+dns-server = ["dep:hickory-proto"]
 iroh-metrics = ["dep:iroh-metrics"]
 
 [dependencies]

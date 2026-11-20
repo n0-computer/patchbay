@@ -205,7 +205,7 @@ pub(crate) mod core;
 /// Device handle and builder.
 pub(crate) mod device;
 /// Minimal in-process DNS server for the lab IX bridge.
-#[cfg(feature = "dns")]
+#[cfg(feature = "dns-server")]
 pub mod dns_server;
 /// Lab event system: typed events, state reducer, file writer.
 pub mod event;
@@ -249,7 +249,7 @@ pub use lab::{
 pub use metrics::MetricsBuilder;
 pub use router::{Router, RouterBuilder, RouterIface, RouterPreset};
 
-#[cfg(feature = "dns")]
+#[cfg(feature = "dns-server")]
 pub use crate::dns_server::DnsServer;
 pub use crate::{
     core::{NodeId, ReflectorGuard},

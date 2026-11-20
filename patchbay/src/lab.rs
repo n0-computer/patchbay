@@ -181,7 +181,7 @@ pub(crate) struct LabInner {
     /// IPv6 provisioning behavior.
     pub ipv6_provisioning_mode: Ipv6ProvisioningMode,
     /// In-process DNS server on the IX bridge (lazy, started on first access).
-    #[cfg(feature = "dns")]
+    #[cfg(feature = "dns-server")]
     pub dns_server: std::sync::Mutex<Option<crate::dns_server::DnsServer>>,
     /// Writer task handle (kept alive until lab is dropped).
     /// Writer task handle. The task listens to `cancel` for graceful shutdown
@@ -707,7 +707,7 @@ impl Lab {
             run_dir: run_dir.clone(),
             ipv6_dad_mode: opts.ipv6_dad_mode,
             ipv6_provisioning_mode: opts.ipv6_provisioning_mode,
-            #[cfg(feature = "dns")]
+            #[cfg(feature = "dns-server")]
             dns_server: std::sync::Mutex::new(None),
             writer_handle: std::sync::Mutex::new(None),
             test_status: test_status.clone(),
@@ -1550,7 +1550,7 @@ impl Lab {
     ///
     /// Use [`DnsServer::set_host`] and [`DnsServer::set_txt`] to add records.
     /// Records are immediately visible to DNS queries — no propagation delay.
-    #[cfg(feature = "dns")]
+    #[cfg(feature = "dns-server")]
     pub fn dns_server(&self) -> Result<crate::dns_server::DnsServer> {
         let mut guard = self.inner.dns_server.lock().unwrap();
         if let Some(ref server) = *guard {
@@ -1572,7 +1572,7 @@ impl Lab {
     }
 
     /// Resolves a name via the DNS server (if started), or returns `None`.
-    #[cfg(feature = "dns")]
+    #[cfg(feature = "dns-server")]
     pub fn resolve(&self, name: &str) -> Option<std::net::IpAddr> {
         self.inner
             .dns_server
