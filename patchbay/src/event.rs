@@ -36,6 +36,7 @@ pub struct LabEvent {
 /// All event variants. Internally tagged with a `"kind"` field.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum LabEventKind {
     // ── Lifecycle ──
     /// Emitted once during `Lab::new()`.
@@ -179,6 +180,20 @@ pub enum LabEventKind {
     },
     /// Device interface brought down.
     LinkDown {
+        /// Device name.
+        device: String,
+        /// Interface name.
+        iface: String,
+    },
+    /// Device interface regained carrier, like a cable plugged back in.
+    CarrierUp {
+        /// Device name.
+        device: String,
+        /// Interface name.
+        iface: String,
+    },
+    /// Device interface lost carrier, like a pulled cable.
+    CarrierDown {
         /// Device name.
         device: String,
         /// Interface name.
@@ -630,8 +645,11 @@ impl LabState {
                     r.downlink_condition = *condition;
                 }
             }
-            LabEventKind::LinkUp { .. } | LabEventKind::LinkDown { .. } => {
-                // State doesn't track link up/down currently.
+            LabEventKind::LinkUp { .. }
+            | LabEventKind::LinkDown { .. }
+            | LabEventKind::CarrierUp { .. }
+            | LabEventKind::CarrierDown { .. } => {
+                // State doesn't track link or carrier state currently.
             }
             LabEventKind::InterfaceAdded { device, iface } => {
                 if let Some(d) = self.devices.get_mut(device) {
