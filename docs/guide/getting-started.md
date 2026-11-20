@@ -92,6 +92,19 @@ The `ctor` crate runs the function at load time, before `main` or the
 test harness starts. This keeps your test functions clean and avoids
 repeating the namespace setup in every binary.
 
+### Keeping your own uid
+
+`init_userns()` maps your user to root (uid 0) inside the namespace. A
+process that also talks to the session D-Bus, for example to use a desktop
+portal, then fails: D-Bus clients such as `zbus` claim uid 0, and the bus
+rejects them.
+
+In that case call `init_userns_keep_uid()` (or
+`init_userns_keep_uid_for_ctor()` from a `#[ctor]`). Your user keeps its
+uid. Spawned commands keep `CAP_NET_ADMIN`, `CAP_NET_RAW` and
+`CAP_NET_BIND_SERVICE`, so `nft`, `tc`, `ping` and low ports work, but
+commands such as `mount` do not. That is why it is not the default.
+
 ## Creating a lab
 
 A `Lab` is the top-level container for a topology. When you create one, it
