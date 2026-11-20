@@ -520,9 +520,12 @@ impl Iface {
         wiring::nl_run(&self.lab.netns, &ns, move |nl: Netlink| async move {
             nl.del_addr4(&ifname, old_ip, prefix_len).await?;
             nl.add_addr4(&ifname, new_ip, prefix_len).await?;
-            // The kernel drops the default route with the old address.
+            // The default route went away with the old address. On a down link
+            // the gateway is unreachable, and link_up adds the route instead.
             if let Some(gw) = gw {
-                nl.replace_default_route_v4(&ifname, gw).await?;
+                if nl.link_is_up(&ifname).await? {
+                    nl.add_default_route_v4(gw).await?;
+                }
             }
             Ok(())
         })

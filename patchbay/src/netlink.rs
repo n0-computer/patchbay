@@ -92,6 +92,16 @@ impl Netlink {
     }
 
     pub(crate) async fn link_index(&self, ifname: &str) -> Result<u32> {
+        Ok(self.link(ifname).await?.header.index)
+    }
+
+    /// Returns whether `ifname` is administratively up.
+    pub(crate) async fn link_is_up(&self, ifname: &str) -> Result<bool> {
+        let link = self.link(ifname).await?;
+        Ok(link.header.flags.contains(LinkFlags::Up))
+    }
+
+    async fn link(&self, ifname: &str) -> Result<LinkMessage> {
         let mut query = LinkMessage::default();
         query
             .attributes
@@ -105,7 +115,7 @@ impl Netlink {
         replies
             .into_iter()
             .find_map(|reply| match reply {
-                RouteNetlinkMessage::NewLink(link) => Some(link.header.index),
+                RouteNetlinkMessage::NewLink(link) => Some(link),
                 _ => None,
             })
             .ok_or_else(|| anyhow!("link not found: {ifname}"))

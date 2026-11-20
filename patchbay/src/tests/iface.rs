@@ -103,6 +103,38 @@ async fn renew_ip() -> Result<()> {
 #[traced_test]
 async fn renew_ip_keeps_default_route() -> Result<()> {
     let lab = Lab::new().await?;
+    let (dev, target) = device_behind_nat(&lab).await?;
+    let before = target.clone();
+    dev.run_sync(move || ping(&before))?;
+
+    dev.iface("eth0").unwrap().renew_ip().await?;
+    dev.run_sync(move || ping(&target))?;
+
+    Ok(())
+}
+
+/// Renewing the IP of a down interface works, and `link_up` brings back the
+/// default route for the new address.
+#[tokio::test(flavor = "current_thread")]
+#[traced_test]
+async fn renew_ip_while_link_down() -> Result<()> {
+    let lab = Lab::new().await?;
+    let (dev, target) = device_behind_nat(&lab).await?;
+    let eth0 = dev.iface("eth0").unwrap();
+
+    eth0.link_down().await?;
+    let new_ip = eth0.renew_ip().await?;
+    eth0.link_up().await?;
+
+    assert_eq!(dev.ip(), Some(new_ip));
+    dev.run_sync(move || ping(&target))?;
+
+    Ok(())
+}
+
+/// Builds a device behind a home NAT router, and returns it with the IP of a
+/// peer on a public router.
+async fn device_behind_nat(lab: &Lab) -> Result<(Device, String)> {
     let dc = lab
         .add_router("dc")
         .preset(RouterPreset::Public)
@@ -115,15 +147,8 @@ async fn renew_ip_keeps_default_route() -> Result<()> {
         .await?;
     let peer = lab.add_device("peer").uplink(dc.id()).build().await?;
     let dev = lab.add_device("dev").uplink(home.id()).build().await?;
-
     let target = peer.ip().context("peer has no v4")?.to_string();
-    let before = target.clone();
-    dev.run_sync(move || ping(&before))?;
-
-    dev.iface("eth0").unwrap().renew_ip().await?;
-    dev.run_sync(move || ping(&target))?;
-
-    Ok(())
+    Ok((dev, target))
 }
 
 /// Adding a secondary IP to an interface makes both addresses reachable.
