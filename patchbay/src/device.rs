@@ -364,6 +364,14 @@ impl Device {
         self.lab.netns.spawn_thread_in(&self.ns, f)
     }
 
+    /// Returns a handle that spawns commands as root in this device's namespace.
+    ///
+    /// See [`AsRoot`](crate::AsRoot) for when root is available and what it
+    /// means for files on the host.
+    pub fn root(&self) -> crate::AsRoot<'_> {
+        crate::AsRoot::new(&self.lab, &self.ns)
+    }
+
     /// Spawns a [`tokio::process::Command`] in this device's network namespace.
     ///
     /// The child is registered with the namespace's tokio reactor so that

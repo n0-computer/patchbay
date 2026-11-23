@@ -18,8 +18,8 @@ use serde::{Deserialize, Serialize};
 /// where main() is not our code (nextest spawns each test as a process).
 #[ctor::ctor(unsafe)]
 fn _init_userns() {
-    // Safety: called from .init_array before main() and before any threads.
-    unsafe { patchbay::init_userns_for_ctor() };
+    // Runs before main() and before any threads. `init()` reports the result.
+    let _ = patchbay::init_userns();
 }
 
 /// Initialize user namespaces (called from main() as well for the CLI binary).

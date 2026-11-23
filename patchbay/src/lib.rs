@@ -193,9 +193,9 @@
 //!
 //! Linux with unprivileged user namespaces enabled, plus `nft` and `tc` in
 //! PATH. No root needed. Call [`init_userns`] before spawning any threads
-//! to enter the user namespace. Use [`init_userns_keep_uid`] instead if the
-//! process also talks to services that check its uid, such as the session
-//! D-Bus.
+//! to enter the user namespace. The process keeps its uid. Commands can run
+//! as root on request with [`Device::root`] if the host has a subordinate id
+//! range for the user.
 
 use anyhow::{anyhow, bail, Context, Result};
 
@@ -256,9 +256,7 @@ pub use crate::dns_server::DnsServer;
 pub use crate::{
     core::{NodeId, ReflectorGuard},
     event::{IfaceCounters, IfaceSnapshot, LabEvent, LabEventKind, LabState},
-    userns::{
-        init_userns, init_userns_for_ctor, init_userns_keep_uid, init_userns_keep_uid_for_ctor,
-    },
+    userns::{init_userns, AsRoot},
 };
 
 /// Verifies the process has enough privileges to manage namespaces, routes, and raw sockets.
