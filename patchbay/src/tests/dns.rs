@@ -2,13 +2,19 @@
 
 use super::*;
 
-/// First A record in a hickory-resolver `Lookup`, as `Ipv4Addr`.
-fn first_a(lookup: &hickory_resolver::lookup::Lookup) -> Option<Ipv4Addr> {
-    use hickory_resolver::proto::rr::RData;
-    lookup.answers().iter().find_map(|r| match &r.data {
-        RData::A(a) => Some(a.0),
-        _ => None,
-    })
+/// Resolves `name` to its first IPv4 address with a resolver that reads the
+/// system configuration. Call it inside a device namespace.
+async fn lookup_first_v4(name: &str) -> Option<Ipv4Addr> {
+    let resolver = n0_dns_resolver::DnsResolver::builder()
+        .use_system_config()
+        .build();
+    match resolver.lookup_ipv4(name).await {
+        Ok(addrs) => addrs.first().copied(),
+        Err(e) => {
+            tracing::error!("lookup_ipv4 {name} failed: {e}");
+            None
+        }
+    }
 }
 
 /// DNS server entry is visible via getent in a spawned command.
@@ -337,11 +343,11 @@ async fn tokio_lookup() -> Result<()> {
     Ok(())
 }
 
-/// hickory-resolver with system config resolves via DNS server.
+/// The default resolver with system config and fallback resolves via DNS server.
 #[tokio::test(flavor = "current_thread")]
 #[traced_test]
-async fn hickory_resolver() -> Result<()> {
-    use hickory_resolver::TokioResolver;
+async fn dns_resolver_system_with_fallback() -> Result<()> {
+    use n0_dns_resolver::DnsResolver;
 
     let lab = Lab::new().await?;
     let dc = lab.add_router("dc").build().await?;
@@ -349,29 +355,27 @@ async fn hickory_resolver() -> Result<()> {
     let dev = lab.add_device("dev").iface("eth0", dc.id()).build().await?;
 
     let dc_ip = dc.uplink_ip().context("dc uplink ip")?;
-    dns.set_host("hickorytest.patchbay.", IpAddr::V4(dc_ip))?;
+    dns.set_host("resolvertest.patchbay.", IpAddr::V4(dc_ip))?;
 
     let jh = dev.spawn(move |_dev| async move {
-        let resolver = TokioResolver::builder_tokio().ok()?.build().ok()?;
-        let lookup = resolver.lookup_ip("hickorytest.patchbay").await.ok()?;
-        lookup.iter().next()
+        let resolver = DnsResolver::system_with_fallback();
+        let addrs = resolver.lookup_ipv4("resolvertest.patchbay").await.ok()?;
+        addrs.first().copied()
     });
     let resolved = jh?.await.unwrap();
-    info!(?resolved, "hickory resolver via spawn");
+    info!(?resolved, "dns resolver via spawn");
     assert_eq!(
         resolved,
-        Some(IpAddr::V4(dc_ip)),
-        "hickory should resolve via DNS server"
+        Some(dc_ip),
+        "resolver should resolve via DNS server"
     );
     Ok(())
 }
 
-/// hickory ipv4_lookup (iroh's code path) resolves via DNS server.
+/// `lookup_ipv4` (iroh's code path) resolves via DNS server.
 #[tokio::test(flavor = "current_thread")]
 #[traced_test]
-async fn hickory_ipv4_lookup() -> Result<()> {
-    use hickory_resolver::TokioResolver;
-
+async fn dns_resolver_ipv4_lookup() -> Result<()> {
     let lab = Lab::new().await?;
     let dc = lab.add_router("dc").build().await?;
     let dns = lab.dns_server()?;
@@ -380,26 +384,13 @@ async fn hickory_ipv4_lookup() -> Result<()> {
     let dc_ip = dc.uplink_ip().context("dc uplink ip")?;
     dns.set_host("ipv4test.patchbay.", IpAddr::V4(dc_ip))?;
 
-    let jh = dev.spawn(move |_dev| async move {
-        let resolver = TokioResolver::builder_tokio()
-            .expect("system conf")
-            .build()
-            .expect("build resolver");
-
-        match resolver.ipv4_lookup("ipv4test.patchbay").await {
-            Ok(lookup) => first_a(&lookup),
-            Err(e) => {
-                tracing::error!("ipv4_lookup failed: {e}");
-                None
-            }
-        }
-    });
+    let jh = dev.spawn(|_dev| async move { lookup_first_v4("ipv4test.patchbay").await });
     let resolved: Option<Ipv4Addr> = jh?.await.unwrap();
-    info!(?resolved, "hickory ipv4_lookup via spawn");
+    info!(?resolved, "lookup_ipv4 via spawn");
     assert_eq!(
         resolved,
         Some(dc_ip),
-        "hickory ipv4_lookup should resolve via DNS server"
+        "lookup_ipv4 should resolve via DNS server"
     );
     Ok(())
 }
@@ -407,9 +398,7 @@ async fn hickory_ipv4_lookup() -> Result<()> {
 /// Stress test: resolve DNS from many devices across multiple labs concurrently.
 #[tokio::test(flavor = "current_thread")]
 #[traced_test]
-async fn hickory_resolve_stress() -> Result<()> {
-    use hickory_resolver::TokioResolver;
-
+async fn dns_resolver_stress() -> Result<()> {
     const NUM_LABS: usize = 4;
     const NUM_DEVICES: usize = 3;
 
@@ -432,20 +421,7 @@ async fn hickory_resolve_stress() -> Result<()> {
                 .await?;
             let hostname = format!("stress{lab_idx}.patchbay");
             let expected = dc_ip;
-            let jh = dev.spawn(move |_dev| async move {
-                let resolver = TokioResolver::builder_tokio()
-                    .expect("system conf")
-                    .build()
-                    .expect("build resolver");
-
-                match resolver.ipv4_lookup(&hostname).await {
-                    Ok(lookup) => first_a(&lookup),
-                    Err(e) => {
-                        tracing::error!("ipv4_lookup failed: {e}");
-                        None
-                    }
-                }
-            })?;
+            let jh = dev.spawn(move |_dev| async move { lookup_first_v4(&hostname).await })?;
             handles.push((format!("lab{lab_idx}/dev{dev_idx}"), expected, jh));
         }
         labs.push(lab);
@@ -456,19 +432,17 @@ async fn hickory_resolve_stress() -> Result<()> {
         assert_eq!(
             resolved,
             Some(expected),
-            "{label}: hickory ipv4_lookup should resolve via DNS server"
+            "{label}: lookup_ipv4 should resolve via DNS server"
         );
     }
     Ok(())
 }
 
 /// Mimics iroh's patchbay test setup: relay device with DNS, then resolve from
-/// client/server devices using hickory ipv4_lookup (iroh's code path).
+/// client/server devices using `lookup_ipv4` (iroh's code path).
 #[tokio::test(flavor = "current_thread")]
 #[traced_test]
-async fn hickory_resolve_relay_setup() -> Result<()> {
-    use hickory_resolver::TokioResolver;
-
+async fn dns_resolver_relay_setup() -> Result<()> {
     let lab = Lab::new().await?;
     let dns = lab.dns_server()?;
 
@@ -494,22 +468,9 @@ async fn hickory_resolve_relay_setup() -> Result<()> {
         let label_owned = label.to_string();
         let jh = dev.spawn(move |_dev| async move {
             let label = label_owned;
-            let resolver = TokioResolver::builder_tokio()
-                .expect("system conf")
-                .build()
-                .expect("build resolver");
-
-            match resolver.ipv4_lookup("relay.test").await {
-                Ok(lookup) => {
-                    let first = first_a(&lookup);
-                    info!(%label, ?first, "resolved relay.test");
-                    first
-                }
-                Err(e) => {
-                    error!(%label, "ipv4_lookup relay.test failed: {e}");
-                    None
-                }
-            }
+            let first = lookup_first_v4("relay.test").await;
+            info!(%label, ?first, "resolved relay.test");
+            first
         })?;
         handles.push((label.to_string(), jh));
     }
@@ -710,7 +671,7 @@ async fn txt_record() -> Result<()> {
 #[tokio::test(flavor = "current_thread")]
 #[traced_test]
 async fn txt_record_via_dns() -> Result<()> {
-    use hickory_resolver::{proto::rr::RData, TokioResolver};
+    use n0_dns_resolver::DnsResolver;
 
     let lab = Lab::new().await?;
     let dc = lab.add_router("dc").build().await?;
@@ -720,20 +681,14 @@ async fn txt_record_via_dns() -> Result<()> {
     dns.set_txt("_disco.test.", &["node=abc123", "port=4433"])?;
 
     let jh = dev.spawn(move |_dev| async move {
-        let resolver = TokioResolver::builder_tokio()
-            .expect("system conf")
-            .build()
-            .expect("build resolver");
-        let lookup = resolver.txt_lookup("_disco.test.").await.ok()?;
-        lookup.answers().iter().find_map(|r| match &r.data {
-            RData::TXT(txt) => Some(
-                txt.txt_data
-                    .iter()
-                    .map(|s| String::from_utf8_lossy(s).into_owned())
-                    .collect::<Vec<_>>(),
-            ),
-            _ => None,
-        })
+        let resolver = DnsResolver::builder().use_system_config().build();
+        let records = resolver.lookup_txt("_disco.test.").await.ok()?;
+        let txt = records.first()?;
+        Some(
+            txt.iter()
+                .map(|s| String::from_utf8_lossy(s).into_owned())
+                .collect::<Vec<_>>(),
+        )
     });
     let strings = jh?.await.unwrap();
     assert_eq!(
