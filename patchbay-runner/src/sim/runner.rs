@@ -1646,6 +1646,8 @@ fn set_step_device(step: &mut Step, device: String) {
         Step::SetDefaultRoute { device: d, .. } => *d = device,
         Step::LinkDown { device: d, .. } => *d = device,
         Step::LinkUp { device: d, .. } => *d = device,
+        Step::CarrierDown { device: d, .. } => *d = device,
+        Step::CarrierUp { device: d, .. } => *d = device,
         Step::GenCerts { device: d, .. } => *d = Some(device),
         Step::GenFile { device: d, .. } => *d = Some(device),
         _ => {}
