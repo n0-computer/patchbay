@@ -269,8 +269,8 @@ async fn wan_pool_selection() -> Result<()> {
 #[tokio::test(flavor = "current_thread")]
 #[traced_test]
 async fn reflexive_ip_all_combos() -> Result<()> {
-    use futures::StreamExt as _;
     use futures_buffered::BufferedStreamExt;
+    use futures_lite::StreamExt as _;
     use strum::IntoEnumIterator;
 
     // Nat::None + Via*Isp is skipped: no return route from DC → device subnet.
@@ -284,7 +284,7 @@ async fn reflexive_ip_all_combos() -> Result<()> {
         .flat_map(|(m, w, p)| BindMode::iter().map(move |b| (m, w, p, b)))
         .collect();
 
-    let failures: Vec<String> = futures::stream::iter(combos.into_iter().enumerate().map(
+    let failures: Vec<String> = futures_lite::stream::iter(combos.into_iter().enumerate().map(
         |(i, (mode, wiring, proto, bind))| {
             let port_base = 14_000u16 + (i as u16) * 10;
             async move {
@@ -309,7 +309,7 @@ async fn reflexive_ip_all_combos() -> Result<()> {
         },
     ))
     .buffered_unordered(8)
-    .filter_map(|x| async { x })
+    .filter_map(|x| x)
     .collect()
     .await;
 
