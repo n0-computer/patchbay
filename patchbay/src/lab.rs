@@ -112,6 +112,7 @@ impl Region {
 
 /// Parameters for an inter-region link passed to [`Lab::link_regions`].
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct RegionLink {
     /// One-way latency in milliseconds (RTT = 2x).
     pub latency_ms: u32,
@@ -146,6 +147,7 @@ impl RegionLink {
 }
 
 /// Pre-built regions from [`Lab::add_default_regions`].
+#[non_exhaustive]
 pub struct DefaultRegions {
     /// US region (198.18.0.0/20).
     pub us: Region,
@@ -388,6 +390,7 @@ pub struct LabBuilder {
 
 /// Where the lab writes event logs and state files.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub enum OutDir {
     /// Parent directory — lab creates a timestamped subdirectory inside it.
     Nested(PathBuf),
@@ -398,6 +401,7 @@ pub enum OutDir {
 /// Controls IPv6 duplicate address detection behavior in created namespaces.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum Ipv6DadMode {
     /// Keep kernel default behavior, DAD enabled.
     Enabled,
@@ -409,6 +413,7 @@ pub enum Ipv6DadMode {
 /// Controls how IPv6 routes are provisioned for hosts and routers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum Ipv6ProvisioningMode {
     /// Install routes directly from patchbay wiring logic.
     #[default]
@@ -430,6 +435,7 @@ pub enum Ipv6ProvisioningMode {
 /// order, or link-local gateway behavior.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum Ipv6Profile {
     /// DAD disabled, static route wiring. Fast and reproducible for tests.
     Deterministic,
