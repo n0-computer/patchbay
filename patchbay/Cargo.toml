@@ -18,7 +18,7 @@ iroh-metrics = ["dep:iroh-metrics"]
 iroh-metrics = { version = "1.0.2", optional = true }
 anyhow = "1"
 derive_more = { version = "2.1.1", features = ["debug", "display", "eq"] }
-futures = "0.3"
+futures-lite = "2.6"
 ipnet = { version = "2.12", features = ["serde"] }
 libc = "0.2"
 netlink-packet-core = "0.9"
