@@ -4,7 +4,7 @@ use super::*;
 
 /// First A record in a hickory-resolver `Lookup`, as `Ipv4Addr`.
 fn first_a(lookup: &hickory_resolver::lookup::Lookup) -> Option<Ipv4Addr> {
-    use hickory_proto::rr::RData;
+    use hickory_resolver::proto::rr::RData;
     lookup.answers().iter().find_map(|r| match &r.data {
         RData::A(a) => Some(a.0),
         _ => None,
@@ -702,6 +702,43 @@ async fn txt_record() -> Result<()> {
     assert_eq!(
         lab.resolve("_disco.test."),
         Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)))
+    );
+    Ok(())
+}
+
+/// TXT record is served over DNS with all its strings.
+#[tokio::test(flavor = "current_thread")]
+#[traced_test]
+async fn txt_record_via_dns() -> Result<()> {
+    use hickory_resolver::{proto::rr::RData, TokioResolver};
+
+    let lab = Lab::new().await?;
+    let dc = lab.add_router("dc").build().await?;
+    let dns = lab.dns_server()?;
+    let dev = lab.add_device("dev").iface("eth0", dc.id()).build().await?;
+
+    dns.set_txt("_disco.test.", &["node=abc123", "port=4433"])?;
+
+    let jh = dev.spawn(move |_dev| async move {
+        let resolver = TokioResolver::builder_tokio()
+            .expect("system conf")
+            .build()
+            .expect("build resolver");
+        let lookup = resolver.txt_lookup("_disco.test.").await.ok()?;
+        lookup.answers().iter().find_map(|r| match &r.data {
+            RData::TXT(txt) => Some(
+                txt.txt_data
+                    .iter()
+                    .map(|s| String::from_utf8_lossy(s).into_owned())
+                    .collect::<Vec<_>>(),
+            ),
+            _ => None,
+        })
+    });
+    let strings = jh?.await.unwrap();
+    assert_eq!(
+        strings,
+        Some(vec!["node=abc123".to_string(), "port=4433".to_string()])
     );
     Ok(())
 }

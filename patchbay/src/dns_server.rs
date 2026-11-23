@@ -9,8 +9,8 @@
 //! - **No TCP fallback.** Only UDP is supported. Responses exceeding 512 bytes
 //!   will be truncated. This is fine for lab use with short names.
 //! - **FQDN trailing dots.** DNS names passed to [`DnsServer::set_host`] and
-//!   [`DnsServer::set_txt`] are parsed as DNS wire names. Use a trailing dot
-//!   for fully-qualified names (`"relay.test."`). Device-level
+//!   [`DnsServer::set_txt`] are always fully qualified. The trailing dot is
+//!   optional: `"relay.test"` and `"relay.test."` are the same name. Device-level
 //!   [`set_host`](crate::Device::set_host) writes to `/etc/hosts` where trailing
 //!   dots are not used — these are different namespaces.
 //! - **TXT records are not queryable via [`DnsServer::resolve`]** — it only
@@ -23,13 +23,9 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use hickory_proto::{
-    op::{Message, MessageType, ResponseCode},
-    rr::{
-        rdata::{A, AAAA, TXT},
-        DNSClass, LowerName, Name, RData, Record, RecordType,
-    },
-    serialize::binary::{BinDecodable, BinEncodable},
+use simple_dns::{
+    rdata::{RData, A, AAAA, TXT},
+    Name, Packet, PacketFlag, ResourceRecord, CLASS, QTYPE, RCODE, TYPE,
 };
 use tracing::{debug, warn};
 
@@ -38,20 +34,38 @@ use crate::netns;
 /// Default TTL for DNS records (seconds).
 const DEFAULT_TTL: u32 = 1;
 
-/// Parses a DNS name and ensures it is fully qualified (has a trailing dot).
-///
-/// DNS wire queries always use absolute names, so records must be stored
-/// as FQDN to match. Accepts both `"relay.test"` and `"relay.test."`.
-fn parse_name(name: &str) -> Result<Name> {
-    let fqdn = if name.ends_with('.') {
-        name.to_string()
-    } else {
-        format!("{name}.")
-    };
-    Name::from_ascii(&fqdn).context("invalid DNS name")
+/// Record types the lab DNS server stores.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum RecordType {
+    /// IPv4 address record.
+    A,
+    /// IPv6 address record.
+    Aaaa,
+    /// Text record.
+    Txt,
 }
 
-type RecordStore = HashMap<(LowerName, RecordType), Vec<Record>>;
+impl RecordType {
+    fn from_qtype(qtype: QTYPE) -> Option<Self> {
+        match qtype {
+            QTYPE::TYPE(TYPE::A) => Some(Self::A),
+            QTYPE::TYPE(TYPE::AAAA) => Some(Self::Aaaa),
+            QTYPE::TYPE(TYPE::TXT) => Some(Self::Txt),
+            _ => None,
+        }
+    }
+}
+
+/// Parses a DNS name. Accepts both `"relay.test"` and `"relay.test."`.
+///
+/// [`Name`] compares labels without regard to ASCII case and ignores the
+/// trailing dot, so the parsed name matches the query name directly.
+fn parse_name(name: &str) -> Result<Name<'static>> {
+    Ok(Name::new(name).context("invalid DNS name")?.into_owned())
+}
+
+type RecordStore = HashMap<(Name<'static>, RecordType), ResourceRecord<'static>>;
 
 /// In-process DNS server running on the IX bridge.
 ///
@@ -110,14 +124,13 @@ impl DnsServer {
         let name = parse_name(name)?;
         let (rtype, rdata) = match ip {
             IpAddr::V4(v4) => (RecordType::A, RData::A(A::from(v4))),
-            IpAddr::V6(v6) => (RecordType::AAAA, RData::AAAA(AAAA::from(v6))),
+            IpAddr::V6(v6) => (RecordType::Aaaa, RData::AAAA(AAAA::from(v6))),
         };
-        let key = (LowerName::new(&name), rtype);
-        let record = Record::from_rdata(name, DEFAULT_TTL, rdata);
+        let record = ResourceRecord::new(name.clone(), CLASS::IN, DEFAULT_TTL, rdata);
         self.records
             .write()
             .expect("poisoned")
-            .insert(key, vec![record]);
+            .insert((name, rtype), record);
         Ok(())
     }
 
@@ -125,13 +138,21 @@ impl DnsServer {
     /// Immediately visible to DNS queries.
     pub fn set_txt(&self, name: &str, values: &[&str]) -> Result<()> {
         let name = parse_name(name)?;
-        let txt = TXT::new(values.iter().map(|s| s.to_string()).collect());
-        let key = (LowerName::new(&name), RecordType::TXT);
-        let record = Record::from_rdata(name, DEFAULT_TTL, RData::TXT(txt));
+        let mut txt = TXT::new();
+        for value in values {
+            txt.add_string(value)
+                .with_context(|| format!("invalid TXT value {value:?}"))?;
+        }
+        let record = ResourceRecord::new(
+            name.clone(),
+            CLASS::IN,
+            DEFAULT_TTL,
+            RData::TXT(txt.into_owned()),
+        );
         self.records
             .write()
             .expect("poisoned")
-            .insert(key, vec![record]);
+            .insert((name, RecordType::Txt), record);
         Ok(())
     }
 
@@ -141,27 +162,21 @@ impl DnsServer {
         self.records
             .write()
             .expect("poisoned")
-            .remove(&(LowerName::new(&name), rtype));
+            .remove(&(name, rtype));
         Ok(())
     }
 
     /// In-process lookup. Returns the first matching A or AAAA address.
     pub fn resolve(&self, name: &str) -> Option<IpAddr> {
         let name = parse_name(name).ok()?;
-        let lower = LowerName::new(&name);
         let store = self.records.read().expect("poisoned");
-        for rtype in [RecordType::A, RecordType::AAAA] {
-            if let Some(recs) = store.get(&(lower.clone(), rtype)) {
-                for r in recs {
-                    match &r.data {
-                        RData::A(a) => return Some(IpAddr::V4((*a).into())),
-                        RData::AAAA(aaaa) => return Some(IpAddr::V6((*aaaa).into())),
-                        _ => {}
-                    }
-                }
-            }
-        }
-        None
+        [RecordType::A, RecordType::Aaaa]
+            .into_iter()
+            .find_map(|rtype| match &store.get(&(name.clone(), rtype))?.rdata {
+                RData::A(a) => Some(IpAddr::V4(a.clone().into())),
+                RData::AAAA(aaaa) => Some(IpAddr::V6(aaaa.clone().into())),
+                _ => None,
+            })
     }
 }
 
@@ -186,43 +201,113 @@ async fn serve(records: Arc<RwLock<RecordStore>>, socket: tokio::net::UdpSocket)
 }
 
 fn handle_query(records: &RwLock<RecordStore>, buf: &[u8]) -> Option<Vec<u8>> {
-    let query = Message::from_bytes(buf).ok()?;
-    if query.message_type != MessageType::Query {
+    let query = Packet::parse(buf).ok()?;
+    if query.has_flags(PacketFlag::RESPONSE) {
         return None;
     }
 
-    let mut response = Message::response(query.id, query.op_code);
-    response.metadata.recursion_desired = query.recursion_desired;
-    response.metadata.authoritative = true;
-    response.add_queries(query.queries.iter().cloned());
+    let mut response = Packet::new_reply(query.id());
+    *response.opcode_mut() = query.opcode();
+    response.set_flags(PacketFlag::AUTHORITATIVE_ANSWER);
+    if query.has_flags(PacketFlag::RECURSION_DESIRED) {
+        response.set_flags(PacketFlag::RECURSION_DESIRED);
+    }
 
     let store = records.read().expect("poisoned");
     let mut found = false;
     let mut name_exists = false;
-    for q in &query.queries {
-        let qname: LowerName = q.name().into();
+    for q in &query.questions {
         if !name_exists {
-            name_exists = store.keys().any(|(n, _)| *n == qname);
+            name_exists = store.keys().any(|(n, _)| *n == q.qname);
         }
-        if let Some(recs) = store.get(&(qname, q.query_type())) {
-            for r in recs {
-                let mut answer = r.clone();
-                answer.dns_class = DNSClass::IN;
-                response.add_answer(answer);
-                found = true;
-            }
+        let Some(rtype) = RecordType::from_qtype(q.qtype) else {
+            continue;
+        };
+        if let Some(record) = store.get(&(q.qname.clone().into_owned(), rtype)) {
+            response.answers.push(record.clone());
+            found = true;
         }
     }
-    if !found {
-        // Name exists but queried type doesn't → NOERROR (empty answer).
-        // Name doesn't exist at all → NXDomain.
-        let code = if name_exists {
-            ResponseCode::NoError
-        } else {
-            ResponseCode::NXDomain
-        };
-        response.metadata.response_code = code;
+    // Name exists but queried type doesn't → NOERROR (empty answer).
+    // Name doesn't exist at all → NXDomain.
+    if !found && !name_exists {
+        *response.rcode_mut() = RCODE::NameError;
+    }
+    response.questions = query.questions;
+
+    response.build_bytes_vec().ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::net::Ipv4Addr;
+
+    use simple_dns::{Question, QCLASS};
+
+    use super::*;
+
+    fn store_with(name: &str, ip: Ipv4Addr) -> RwLock<RecordStore> {
+        let name = parse_name(name).unwrap();
+        let record = ResourceRecord::new(name.clone(), CLASS::IN, DEFAULT_TTL, RData::A(ip.into()));
+        RwLock::new(RecordStore::from([((name, RecordType::A), record)]))
     }
 
-    response.to_bytes().ok()
+    fn query(name: &str, qtype: TYPE) -> Vec<u8> {
+        let mut packet = Packet::new_query(42);
+        packet.set_flags(PacketFlag::RECURSION_DESIRED);
+        packet.questions.push(Question::new(
+            Name::new(name).unwrap(),
+            qtype.into(),
+            QCLASS::CLASS(CLASS::IN),
+            false,
+        ));
+        packet.build_bytes_vec().unwrap()
+    }
+
+    #[test]
+    fn answers_a_query_case_insensitive() {
+        let ip = Ipv4Addr::new(10, 0, 0, 1);
+        let store = store_with("relay.test", ip);
+        let bytes = handle_query(&store, &query("Relay.TEST.", TYPE::A)).unwrap();
+        let response = Packet::parse(&bytes).unwrap();
+        assert_eq!(response.id(), 42);
+        assert!(response.has_flags(PacketFlag::RESPONSE));
+        assert!(response.has_flags(PacketFlag::AUTHORITATIVE_ANSWER));
+        assert!(response.has_flags(PacketFlag::RECURSION_DESIRED));
+        assert_eq!(response.rcode(), RCODE::NoError);
+        assert_eq!(response.questions.len(), 1);
+        assert_eq!(response.answers.len(), 1);
+        assert_eq!(response.answers[0].rdata, RData::A(ip.into()));
+    }
+
+    #[test]
+    fn known_name_other_type_is_noerror() {
+        let store = store_with("relay.test", Ipv4Addr::new(10, 0, 0, 1));
+        let bytes = handle_query(&store, &query("relay.test", TYPE::AAAA)).unwrap();
+        let response = Packet::parse(&bytes).unwrap();
+        assert_eq!(response.rcode(), RCODE::NoError);
+        assert!(response.answers.is_empty());
+    }
+
+    #[test]
+    fn unknown_name_is_nxdomain() {
+        let store = store_with("relay.test", Ipv4Addr::new(10, 0, 0, 1));
+        let bytes = handle_query(&store, &query("other.test", TYPE::A)).unwrap();
+        let response = Packet::parse(&bytes).unwrap();
+        assert_eq!(response.rcode(), RCODE::NameError);
+        assert!(response.answers.is_empty());
+    }
+
+    #[test]
+    fn ignores_responses() {
+        let store = store_with("relay.test", Ipv4Addr::new(10, 0, 0, 1));
+        let mut packet = Packet::new_reply(1);
+        packet.questions.push(Question::new(
+            Name::new("relay.test").unwrap(),
+            TYPE::A.into(),
+            QCLASS::CLASS(CLASS::IN),
+            false,
+        ));
+        assert!(handle_query(&store, &packet.build_bytes_vec().unwrap()).is_none());
+    }
 }

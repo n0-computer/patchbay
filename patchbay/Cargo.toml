@@ -11,7 +11,7 @@ repository.workspace = true
 [features]
 default = ["dns-server"]
 # The in-process lab DNS server (`Lab::dns_server`).
-dns-server = ["dep:hickory-proto"]
+dns-server = ["simple-dns"]
 iroh-metrics = ["dep:iroh-metrics"]
 
 [dependencies]
@@ -27,10 +27,10 @@ netlink-proto = "0.13"
 rustix = { version = "1.1", default-features = false, features = ["std", "thread", "process"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+simple-dns = { version = "0.13", optional = true }
 strum = { version = "0.28", features = ["derive"] }
 time = { version = "0.3", features = ["formatting", "local-offset", "macros", "parsing", "serde"] }
 tokio = { version = "1", features = ["rt", "macros", "sync", "time", "fs", "net", "io-util", "process"] }
-hickory-proto = { version = "0.26", default-features = false, optional = true }
 tokio-util = { version = "0.7", features = ["rt"] }
 toml = "1.1"
 tracing = "0.1"
