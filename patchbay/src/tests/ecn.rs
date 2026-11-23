@@ -14,25 +14,23 @@ use std::{
 };
 
 use noq_udp::{EcnCodepoint, RecvMeta, Transmit, UdpSocketState};
-use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 
 use super::*;
 
-fn udp4_pair(bind: SocketAddr) -> Result<(Socket, UdpSocketState)> {
-    let sock = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
-    sock.bind(&SockAddr::from(bind))?;
+fn udp4_pair(bind: SocketAddr) -> Result<(UdpSocket, UdpSocketState)> {
+    let sock = UdpSocket::bind(bind)?;
     sock.set_nonblocking(true)?;
     let state = UdpSocketState::new((&sock).into())?;
     Ok((sock, state))
 }
 
 fn send_ecn(
-    sock: &Socket,
+    sock: &UdpSocket,
     state: &UdpSocketState,
     dst: SocketAddr,
     ecn: EcnCodepoint,
 ) -> Result<()> {
-    state.send(
+    state.try_send(
         sock.into(),
         &Transmit {
             destination: dst,
@@ -45,7 +43,7 @@ fn send_ecn(
     Ok(())
 }
 
-fn recv_ecn(sock: &Socket, state: &UdpSocketState) -> Result<Option<EcnCodepoint>> {
+fn recv_ecn(sock: &UdpSocket, state: &UdpSocketState) -> Result<Option<EcnCodepoint>> {
     let mut buf = [0u8; 128];
     let mut meta = RecvMeta::default();
     state.recv(
@@ -74,7 +72,7 @@ async fn ecn_bits_preserved_direct() -> Result<()> {
 
     let recv_task = receiver.spawn(move |_| async move {
         let (sock, state) = udp4_pair(recv_addr)?;
-        let tokio_sock = tokio::net::UdpSocket::from_std(UdpSocket::from(sock.try_clone()?))?;
+        let tokio_sock = tokio::net::UdpSocket::from_std(sock.try_clone()?)?;
         let _ = bound_tx.send(Ok(()));
 
         tokio::time::timeout(Duration::from_secs(2), tokio_sock.readable()).await??;
@@ -118,7 +116,7 @@ async fn ecn_bits_preserved_through_nat() -> Result<()> {
 
     let server_task = server.spawn(move |_| async move {
         let (sock, state) = udp4_pair(server_addr)?;
-        let tokio_sock = tokio::net::UdpSocket::from_std(UdpSocket::from(sock.try_clone()?))?;
+        let tokio_sock = tokio::net::UdpSocket::from_std(sock.try_clone()?)?;
         let _ = bound_tx.send(Ok(()));
 
         tokio::time::timeout(Duration::from_secs(2), tokio_sock.readable()).await??;
@@ -161,7 +159,7 @@ async fn ecn_all_codepoints() -> Result<()> {
 
     let recv_task = receiver.spawn(move |_| async move {
         let (sock, state) = udp4_pair(recv_addr)?;
-        let tokio_sock = tokio::net::UdpSocket::from_std(UdpSocket::from(sock.try_clone()?))?;
+        let tokio_sock = tokio::net::UdpSocket::from_std(sock.try_clone()?)?;
         let _ = bound_tx.send(Ok(()));
 
         for expected in [EcnCodepoint::Ect0, EcnCodepoint::Ect1, EcnCodepoint::Ce] {
