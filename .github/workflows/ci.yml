@@ -46,6 +46,9 @@ jobs:
 
       - name: Test
         run: cargo nextest run --locked --workspace --profile ci
+        env:
+          # The runner has a subordinate id range, so root must work.
+          PATCHBAY_EXPECT_ROOT: "1"
 
       - name: Clippy
         run: cargo clippy --locked --workspace --tests -- -D warnings

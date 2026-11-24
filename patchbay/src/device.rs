@@ -368,8 +368,8 @@ impl Device {
     ///
     /// See [`AsRoot`](crate::AsRoot) for when root is available and what it
     /// means for files on the host.
-    pub fn root(&self) -> crate::AsRoot<'_> {
-        crate::AsRoot::new(&self.lab, &self.ns)
+    pub fn as_root(&self) -> crate::AsRoot<'_> {
+        crate::AsRoot::new(&self.lab, self.ns.to_string())
     }
 
     /// Spawns a [`tokio::process::Command`] in this device's network namespace.

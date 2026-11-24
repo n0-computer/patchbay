@@ -94,7 +94,7 @@ async fn child() -> Result<()> {
     ensure!(dev.ip().is_some(), "device has no ip");
 
     let err = dev
-        .root()
+        .as_root()
         .spawn_command_sync(std::process::Command::new("true"))
         .err()
         .context("root spawn should fail without a gid 0")?;

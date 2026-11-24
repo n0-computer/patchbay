@@ -194,7 +194,7 @@
 //! Linux with unprivileged user namespaces enabled, plus `nft` and `tc` in
 //! PATH. No root needed. Call [`init_userns`] before spawning any threads
 //! to enter the user namespace. The process keeps its uid. Commands can run
-//! as root on request with [`Device::root`] if the host has a subordinate id
+//! as root on request with [`Device::as_root`] if the host has a subordinate id
 //! range for the user.
 
 use anyhow::{anyhow, bail, Context, Result};

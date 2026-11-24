@@ -5,9 +5,9 @@
 //! user (`/etc/subuid`, `/etc/subgid`, and the `newuidmap`/`newgidmap`
 //! helpers), the namespace also maps the ids around the user's onto that
 //! range, so uid 0 exists and commands can run as root on request (see
-//! [`Device::root`]).
+//! [`Device::as_root`]).
 //!
-//! [`Device::root`]: crate::Device::root
+//! [`Device::as_root`]: crate::Device::as_root
 
 use std::sync::OnceLock;
 
@@ -41,8 +41,8 @@ static NO_ROOT_REASON: OnceLock<String> = OnceLock::new();
 /// `/etc/subgid` have an entry for the user, the ids from 0 up to the size of
 /// the range, except the user's own, map onto that range. Uid 0, `nobody`
 /// and the system ids then exist, and commands can run as root with
-/// [`Device::root`](crate::Device::root) and
-/// [`Router::root`](crate::Router::root). Without the range, or if the
+/// [`Device::as_root`](crate::Device::as_root) and
+/// [`Router::as_root`](crate::Router::as_root). Without the range, or if the
 /// helpers fail, only the user's own ids are mapped and root is not available.
 /// The error of a root spawn then says why.
 pub fn init_userns() -> anyhow::Result<()> {
@@ -443,8 +443,9 @@ unsafe fn raise_ambient_caps() -> libc::c_long {
 
 /// Spawns commands as root (uid 0) in one node's namespace.
 ///
-/// Returned by [`Device::root`](crate::Device::root) and
-/// [`Router::root`](crate::Router::root). The patchbay process keeps the
+/// Returned by [`Device::as_root`](crate::Device::as_root),
+/// [`Router::as_root`](crate::Router::as_root) and
+/// [`Ix::as_root`](crate::Ix::as_root). The patchbay process keeps the
 /// user's uid, and its own code already has all capabilities in the
 /// namespace. Child processes normally run as the user too, with only the
 /// network capabilities. Use this for commands that need more, or that check
@@ -460,7 +461,7 @@ unsafe fn raise_ambient_caps() -> libc::c_long {
 #[must_use = "AsRoot does nothing until you spawn a command"]
 pub struct AsRoot<'a> {
     lab: &'a crate::lab::LabInner,
-    ns: &'a str,
+    ns: String,
 }
 
 impl std::fmt::Debug for AsRoot<'_> {
@@ -470,7 +471,7 @@ impl std::fmt::Debug for AsRoot<'_> {
 }
 
 impl<'a> AsRoot<'a> {
-    pub(crate) fn new(lab: &'a crate::lab::LabInner, ns: &'a str) -> Self {
+    pub(crate) fn new(lab: &'a crate::lab::LabInner, ns: String) -> Self {
         Self { lab, ns }
     }
 
@@ -485,8 +486,8 @@ impl<'a> AsRoot<'a> {
         use anyhow::Context;
         ensure_root_mapped()?;
         cmd.uid(0).gid(0);
-        let rt = self.lab.rt_handle_for(self.ns)?;
-        self.lab.netns.run_closure_in(self.ns, move || {
+        let rt = self.lab.rt_handle_for(&self.ns)?;
+        self.lab.netns.run_closure_in(&self.ns, move || {
             let _guard = rt.enter();
             cmd.spawn()
                 .context("spawn async command as root in namespace")
@@ -506,7 +507,7 @@ impl<'a> AsRoot<'a> {
         use anyhow::Context;
         ensure_root_mapped()?;
         cmd.uid(0).gid(0);
-        self.lab.netns.run_closure_in(self.ns, move || {
+        self.lab.netns.run_closure_in(&self.ns, move || {
             cmd.spawn().context("spawn command as root in namespace")
         })
     }

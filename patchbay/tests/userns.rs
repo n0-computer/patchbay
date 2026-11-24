@@ -64,7 +64,7 @@ fn sh(dev: &patchbay::Device, root: bool, script: &str) -> Result<String> {
     cmd.args(["-c", script])
         .stdout(std::process::Stdio::piped());
     let child = if root {
-        dev.root().spawn_command_sync(cmd)?
+        dev.as_root().spawn_command_sync(cmd)?
     } else {
         dev.spawn_command_sync(cmd)?
     };
@@ -94,7 +94,7 @@ fn uid_maps_to_itself() -> Result<()> {
     Ok(())
 }
 
-/// `root()` spawns commands as uid 0 with every capability, and root can
+/// `as_root()` spawns commands as uid 0 with every capability, and root can
 /// switch to other ids such as `nobody`. Plain spawns run as the user.
 ///
 /// Requires root where the host is set up for it, unless the test runs in a
@@ -112,7 +112,7 @@ async fn root_command_runs_as_uid_zero() -> Result<()> {
     ensure!(as_user.trim() == uid.to_string(), "unexpected: {as_user:?}");
 
     if let Err(err) = dev
-        .root()
+        .as_root()
         .spawn_command_sync(std::process::Command::new("true"))
     {
         let err = format!("{err:#}");
@@ -151,10 +151,23 @@ async fn root_command_runs_as_uid_zero() -> Result<()> {
     )?;
     ensure!(as_nobody.trim() == "65534", "unexpected: {as_nobody:?}");
 
+    // The IX root namespace has a root handle too.
+    let mut cmd = std::process::Command::new("id");
+    cmd.arg("-u").stdout(std::process::Stdio::piped());
+    let output = lab
+        .ix()
+        .as_root()
+        .spawn_command_sync(cmd)?
+        .wait_with_output()?;
+    ensure!(
+        String::from_utf8(output.stdout)?.trim() == "0",
+        "lab root spawn not root"
+    );
+
     // The async variant runs as root too.
     let mut cmd = tokio::process::Command::new("id");
     cmd.arg("-u").stdout(std::process::Stdio::piped());
-    let output = dev.root().spawn_command(cmd)?.wait_with_output().await?;
+    let output = dev.as_root().spawn_command(cmd)?.wait_with_output().await?;
     ensure!(
         String::from_utf8(output.stdout)?.trim() == "0",
         "async spawn not root"

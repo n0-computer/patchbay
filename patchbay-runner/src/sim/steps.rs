@@ -139,7 +139,7 @@ pub(crate) async fn execute_step(state: &mut SimState, step: &Step) -> Result<()
                 .device_by_name(device)
                 .ok_or_else(|| anyhow::anyhow!("unknown device '{}'", device))?;
             let mut child = if *root {
-                node.root().spawn_command_sync(cmd)
+                node.as_root().spawn_command_sync(cmd)
             } else {
                 node.spawn_command_sync(cmd)
             }
@@ -260,7 +260,7 @@ pub(crate) async fn execute_step(state: &mut SimState, step: &Step) -> Result<()
                 .device_by_name(device)
                 .ok_or_else(|| anyhow::anyhow!("unknown device '{}'", device))?;
             let mut child = if *root {
-                node.root().spawn_command_sync(cmd)
+                node.as_root().spawn_command_sync(cmd)
             } else {
                 node.spawn_command_sync(cmd)
             }
