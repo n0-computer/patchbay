@@ -42,4 +42,5 @@ ctor = "1.0"
 futures-buffered = "0.2"
 hickory-resolver = { version = "0.26", default-features = false, features = ["system-config", "tokio"] }
 n0-tracing-test = "0.3.0"
+noq-udp = "1.5"
 testdir = "0.10"
