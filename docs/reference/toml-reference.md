@@ -278,7 +278,7 @@ These fields apply to most or all step types.
 
 | Key       | Type            | Description |
 |-----------|-----------------|-------------|
-| `action`  | string          | Step type. See the sections below for valid values. Defaults to `"run"` when `cmd` is present. |
+| `action`  | string          | Step type. See the sections below for valid values. Required, unless `use` names a template or group that sets it. |
 | `id`      | string          | Step identifier. Required for `spawn`, `gen-certs`, `gen-file`. Referenced as `${id.capture_name}` in later steps. |
 | `use`     | string          | Template or group name. When referencing a group, only `vars` is used from this entry; all other fields come from the group. |
 | `vars`    | table           | Group substitution variables. Only meaningful when `use` references a `[[step-group]]`. |

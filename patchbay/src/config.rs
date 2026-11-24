@@ -15,7 +15,7 @@ pub struct LabConfig {
     /// Router entries.
     #[serde(default)]
     pub router: Vec<RouterConfig>,
-    /// Raw device tables; post-processed by [`crate::Lab::from_config`].
+    /// Raw device tables; post-processed by [`LabBuilder::config`](crate::LabBuilder::config).
     #[serde(default)]
     pub device: HashMap<String, toml::Value>,
 }

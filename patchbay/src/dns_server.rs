@@ -1,7 +1,7 @@
 //! Minimal in-process authoritative DNS server for the lab.
 //!
 //! Runs on the IX bridge, serves A/AAAA/TXT records from a [`std::sync::RwLock`]-guarded
-//! [`HashMap`]. Record mutations via [`DnsServer::set_host`] / [`DnsServer::set_txt`] are
+//! [`HashMap`](std::collections::HashMap). Record mutations via [`DnsServer::set_host`] / [`DnsServer::set_txt`] are
 //! synchronous — the record is visible to DNS queries the instant the method returns.
 //!
 //! ## Limitations
