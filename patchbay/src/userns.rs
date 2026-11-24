@@ -68,6 +68,20 @@ fn init(mapping: Mapping) -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!("{e}"))
 }
 
+#[cfg(all(target_os = "linux", feature = "podman"))]
+pub(crate) fn ensure_podman_bootstrap_available() -> anyhow::Result<()> {
+    anyhow::ensure!(
+        STATE.get().is_none(),
+        "call init_userns_with_podman before init_userns"
+    );
+    Ok(())
+}
+
+#[cfg(all(target_os = "linux", feature = "podman"))]
+pub(crate) fn record_podman_bootstrap() {
+    let _ = STATE.set((Mapping::Root, Ok(())));
+}
+
 /// Raw libc-only variant safe for ELF `.init_array` / pre-TLS contexts.
 ///
 /// # Safety

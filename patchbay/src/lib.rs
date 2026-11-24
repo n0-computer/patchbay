@@ -224,6 +224,9 @@ mod netns;
 pub(crate) mod nft;
 #[path = "tracing.rs"]
 mod ns_tracing;
+/// Run OCI images with local rootless Podman on lab devices.
+#[cfg(all(target_os = "linux", feature = "podman"))]
+pub mod podman;
 mod qdisc;
 /// Router handle, builder, and presets.
 pub(crate) mod router;
@@ -249,6 +252,10 @@ pub use lab::{
     NatV6Mode, OutDir, Region, RegionLink, TestGuard,
 };
 pub use metrics::MetricsBuilder;
+#[cfg(all(target_os = "linux", feature = "podman"))]
+pub use podman::{
+    init_userns_with_podman, init_userns_with_podman_for_ctor, podman_session_token,
+};
 pub use router::{Router, RouterBuilder, RouterIface, RouterPreset};
 
 #[cfg(feature = "dns-server")]

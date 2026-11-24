@@ -13,7 +13,7 @@ test output directories that persist across runs, add `testdir` too:
 patchbay = "0.1"
 tokio = { version = "1", features = ["rt", "macros", "net", "io-util", "time"] }
 anyhow = "1"
-ctor = "0.2"
+ctor = "1"
 testdir = "0.9"
 ```
 
@@ -30,9 +30,10 @@ use testdir::testdir;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 /// Runs once before any test thread, entering the user namespace.
-#[ctor::ctor]
+#[ctor::ctor(unsafe)]
 fn init() {
-    patchbay::init_userns().expect("user namespace");
+    // SAFETY: This runs before libtest starts any threads.
+    unsafe { patchbay::init_userns_for_ctor() };
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -96,7 +97,7 @@ async fn tcp_through_nat() -> Result<()> {
 
 Key points:
 
-- **`#[ctor::ctor]`** calls `init_userns()` once before any threads
+- **`#[ctor::ctor(unsafe)]`** calls `init_userns_for_ctor()` once before any threads
   start. Without this, namespace creation will fail.
 - **`#[tokio::test(flavor = "current_thread")]`** is required. patchbay
   namespaces use single-threaded tokio runtimes internally.
@@ -131,6 +132,69 @@ patchbay serve --testdir --open
 
 The `--testdir` flag automatically locates `<target-dir>/testdir-current`
 using `cargo metadata`, so you don't need to pass a path.
+
+### Using a local Podman image
+
+Enable the `podman` feature on your `patchbay` dependency and put the helper
+from the same Patchbay version on your `PATH`. From a repository checkout, run:
+
+```bash
+cargo install --path patchbay --features podman --bin patchbay-podman-helper
+```
+
+Use `init_userns_with_podman_for_ctor()` in place of the usual Patchbay
+namespace constructor. The helper creates the lab's user namespace, and
+the constructor joins it before libtest starts any test threads. Each test
+can take its own token and create an independent lab session on the shared
+helper. A token request returns an error if the shared bootstrap failed.
+This example uses an image
+already present in the local Podman image store:
+
+```rust,ignore
+#[ctor::ctor(unsafe)]
+fn init() {
+    // SAFETY: This runs before libtest starts any threads.
+    unsafe { patchbay::init_userns_with_podman_for_ctor() };
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn etcd_in_patchbay() -> anyhow::Result<()> {
+    let bootstrap = patchbay::podman_session_token()?;
+    let lab = patchbay::Lab::new().await?;
+    let podman = lab.create_podman(bootstrap)?;
+    let router = lab.add_router("dc").build().await?;
+    let server = lab.add_device("etcd").iface("eth0", router.id()).build().await?;
+
+    let etcd = podman
+        .container("quay.io/coreos/etcd:v3.5.18")
+        .entrypoint("/usr/local/bin/etcd")
+        .arg("--listen-client-urls=http://0.0.0.0:2379")
+        .arg("--advertise-client-urls=http://localhost:2379")
+        .spawn_in(&server)
+        .await?;
+    // Probe readiness and run assertions from another device.
+    etcd.remove().await?;
+    Ok(())
+}
+```
+
+Run the target with `cargo test --test netsim`. Probe readiness using the
+server device's IP and port. Tests in the same binary can run in parallel.
+The helper handles container lifecycle requests one at a time. Dropping a
+session removes only its containers. If the helper itself is killed, you may
+need to remove its containers manually.
+
+For an executable with its own `main`, call `init_userns_with_podman()` at the
+start of `main` to get the token directly.
+
+To run Patchbay's own Podman integration tests, cache an etcd v3 image with
+`/usr/local/bin/etcd` and set `PATCHBAY_ETCD_IMAGE` to its name. The tests
+also require `curl`.
+
+```bash
+PATCHBAY_ETCD_IMAGE=quay.io/coreos/etcd:v3.5.18 \
+  cargo test -p patchbay --features podman --test podman -- --ignored
+```
 
 ## Running on macOS
 

@@ -159,6 +159,15 @@ impl Device {
         &self.ns
     }
 
+    #[cfg(all(target_os = "linux", feature = "podman"))]
+    pub(crate) fn podman_namespace(&self, lab: &crate::Lab) -> Result<std::fs::File> {
+        anyhow::ensure!(
+            Arc::ptr_eq(&self.lab, &lab.inner.0),
+            "device belongs to a different lab"
+        );
+        self.lab.netns.ns_fd(&self.ns)
+    }
+
     /// Builds a path in the lab run directory for this device.
     ///
     /// Returns `None` when the lab was created without an output directory.
