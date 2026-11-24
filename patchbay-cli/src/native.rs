@@ -235,7 +235,8 @@ pub fn run_in_command(
     work_dir: PathBuf,
     cmd: Vec<String>,
 ) -> Result<()> {
-    check_caps()?;
+    // No check_caps(): this runs outside any user namespace, and nsenter gets
+    // its rights from the user owning the inspect session's namespace.
     if cmd.is_empty() {
         bail!("run-in: missing command");
     }

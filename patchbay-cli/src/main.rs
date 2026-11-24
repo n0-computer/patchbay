@@ -197,8 +197,10 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     // Enter the user namespace only for commands that build labs in this
     // process. `test` and `compare` start cargo, whose test binaries set up
-    // their own namespace, and `vm` runs qemu as the host user. The namespace
-    // must exist before the runtime starts threads.
+    // their own namespace, and `vm` runs qemu as the host user. `run-in` must
+    // stay in the initial namespace: from there, the user owns the inspect
+    // session's namespace and nsenter may join it. The namespace must exist
+    // before the runtime starts threads.
     #[cfg(target_os = "linux")]
     if cli.command.builds_labs() {
         native::init()?;
@@ -210,10 +212,7 @@ impl Command {
     /// Whether the command builds labs in this process.
     #[cfg(target_os = "linux")]
     fn builds_labs(&self) -> bool {
-        matches!(
-            self,
-            Command::Run { .. } | Command::Inspect { .. } | Command::RunIn { .. }
-        )
+        matches!(self, Command::Run { .. } | Command::Inspect { .. })
     }
 }
 
