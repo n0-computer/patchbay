@@ -2114,6 +2114,7 @@ mod tests {
                 captures: HashMap::new(),
                 requires: vec![],
                 results: None,
+                root: false,
             }),
             wrap(Step::Wait {
                 duration: "1s".to_string(),
@@ -2149,6 +2150,7 @@ mod tests {
             captures: HashMap::new(),
             requires: vec!["provider.ready".to_string()], // bare format, no ${}
             results: None,
+            root: false,
         })];
         let mut counts = HashMap::new();
         counts.insert("fetcher".to_string(), 4);

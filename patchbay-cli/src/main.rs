@@ -194,15 +194,32 @@ fn resolve_project_root(opt: Option<PathBuf>) -> Result<PathBuf> {
 }
 
 fn main() -> Result<()> {
+    let cli = Cli::parse();
+    // Enter the user namespace only for commands that build labs in this
+    // process. `test` and `compare` start cargo, whose test binaries set up
+    // their own namespace, and `vm` runs qemu as the host user. The namespace
+    // must exist before the runtime starts threads.
     #[cfg(target_os = "linux")]
-    native::init()?;
-    tokio_main()
+    if cli.command.builds_labs() {
+        native::init()?;
+    }
+    tokio_main(cli)
+}
+
+impl Command {
+    /// Whether the command builds labs in this process.
+    #[cfg(target_os = "linux")]
+    fn builds_labs(&self) -> bool {
+        matches!(
+            self,
+            Command::Run { .. } | Command::Inspect { .. } | Command::RunIn { .. }
+        )
+    }
 }
 
 #[tokio::main(flavor = "current_thread")]
-async fn tokio_main() -> Result<()> {
+async fn tokio_main(cli: Cli) -> Result<()> {
     patchbay_utils::init_tracing();
-    let cli = Cli::parse();
     match cli.command {
         Command::Run { args } => dispatch_run(args).await,
         Command::Prepare {

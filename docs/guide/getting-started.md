@@ -103,15 +103,24 @@ keep `CAP_NET_ADMIN`, `CAP_NET_RAW` and `CAP_NET_BIND_SERVICE`, so `nft`,
 Some commands need root, for example `mount`. Spawn them through `root()`:
 
 ```rust
-let child = device.root().spawn_command_sync(std::process::Command::new("mount"))?;
+let mut cmd = std::process::Command::new("mount");
+cmd.args(["-t", "tmpfs", "none", "/mnt"]);
+let child = device.root().spawn_command_sync(cmd)?;
 ```
+
+In a sim, set `root = true` on a `run` or `spawn` step.
 
 Root needs a subordinate id range for your user, the same setup rootless
 podman uses: `newuidmap` and `newgidmap` on `PATH` and an entry in
-`/etc/subuid` and `/etc/subgid`. patchbay maps uid 0 to the first id of
-that range. Without it, `root()` returns an error and everything else
-works. Root inside the namespace is that subordinate id on the host, so
-files a root command creates outside the lab belong to it, and you need
+`/etc/subuid` and `/etc/subgid`. patchbay then maps the ids from 0 up to the
+size of the range, except your own, onto that range. Root, system users and
+`nobody` exist inside the namespace, so a daemon that drops from root to
+another user works. Without the range, or in a process that already runs in
+a nested user namespace, `root()` returns an error that says why, and
+everything else works.
+
+Root inside the namespace is one of your subordinate ids on the host. Files
+a root command creates outside the lab belong to it, and you need
 `podman unshare rm` to remove them. Prefer running commands as yourself
 where they work.
 

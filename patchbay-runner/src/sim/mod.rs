@@ -242,6 +242,9 @@ pub enum Step {
         #[serde(default)]
         requires: Vec<String>,
         results: Option<StepResults>,
+        /// Runs the command as root, see [`patchbay::AsRoot`].
+        #[serde(default)]
+        root: bool,
     },
     Spawn {
         id: String,
@@ -257,6 +260,9 @@ pub enum Step {
         #[serde(default)]
         requires: Vec<String>,
         results: Option<StepResults>,
+        /// Runs the command as root, see [`patchbay::AsRoot`].
+        #[serde(default)]
+        root: bool,
     },
     Wait {
         duration: String,

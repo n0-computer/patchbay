@@ -118,6 +118,7 @@ pub(crate) async fn execute_step(state: &mut SimState, step: &Step) -> Result<()
             env,
             parser,
             captures,
+            root,
             results,
             ..
         } => {
@@ -133,12 +134,16 @@ pub(crate) async fn execute_step(state: &mut SimState, step: &Step) -> Result<()
             let mut cmd = prepare_cmd(&cmd_parts, env, state)?;
             let logs = node_stdio_log_paths(&state.work_dir, device, sid);
             cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
-            let mut child = state
+            let node = state
                 .lab
                 .device_by_name(device)
-                .ok_or_else(|| anyhow::anyhow!("unknown device '{}'", device))?
-                .spawn_command_sync(cmd)
-                .with_context(|| format!("spawn run on '{}'", device))?;
+                .ok_or_else(|| anyhow::anyhow!("unknown device '{}'", device))?;
+            let mut child = if *root {
+                node.root().spawn_command_sync(cmd)
+            } else {
+                node.spawn_command_sync(cmd)
+            }
+            .with_context(|| format!("spawn run on '{}'", device))?;
             let stdout = child.stdout.take().context("take run stdout")?;
             let stderr = child.stderr.take().context("take run stderr")?;
 
@@ -213,6 +218,7 @@ pub(crate) async fn execute_step(state: &mut SimState, step: &Step) -> Result<()
             ready_after,
             captures,
             results,
+            root,
             ..
         } => {
             let device = device.as_deref().context("spawn: missing device")?;
@@ -249,12 +255,16 @@ pub(crate) async fn execute_step(state: &mut SimState, step: &Step) -> Result<()
                     .stderr(Stdio::from(err_log));
             }
 
-            let mut child = state
+            let node = state
                 .lab
                 .device_by_name(device)
-                .ok_or_else(|| anyhow::anyhow!("unknown device '{}'", device))?
-                .spawn_command_sync(cmd)
-                .with_context(|| format!("spawn '{}'", id))?;
+                .ok_or_else(|| anyhow::anyhow!("unknown device '{}'", device))?;
+            let mut child = if *root {
+                node.root().spawn_command_sync(cmd)
+            } else {
+                node.spawn_command_sync(cmd)
+            }
+            .with_context(|| format!("spawn '{}'", id))?;
 
             let (out_pump, err_pump, cap_reader) = if needs_pipes {
                 let stdout = child.stdout.take().context("take child stdout")?;

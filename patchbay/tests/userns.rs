@@ -28,32 +28,77 @@ fn uid_map() -> Result<Vec<[u32; 3]>> {
         .collect()
 }
 
-/// Whether the host gave the user a subordinate range, so root is mapped.
-fn has_range() -> Result<bool> {
-    Ok(uid_map()?.len() > 1)
+/// Whether the host is set up for a subordinate range: executable
+/// `newuidmap`/`newgidmap` on `PATH` and `/etc/subuid` and `/etc/subgid`
+/// entries for the user (by name or uid).
+fn host_has_range_setup() -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    let on_path = |name: &str| {
+        std::env::var_os("PATH").is_some_and(|path| {
+            std::env::split_paths(&path).any(|dir| {
+                std::fs::metadata(dir.join(name))
+                    .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
+            })
+        })
+    };
+    // SAFETY: getuid has no preconditions.
+    let uid = unsafe { libc::getuid() }.to_string();
+    let user = std::env::var("USER").unwrap_or_default();
+    let has_entry = |path: &str| {
+        std::fs::read_to_string(path).is_ok_and(|text| {
+            text.lines().any(|line| {
+                let login = line.split(':').next().unwrap_or_default();
+                login == uid || (!user.is_empty() && login == user)
+            })
+        })
+    };
+    on_path("newuidmap")
+        && on_path("newgidmap")
+        && has_entry("/etc/subuid")
+        && has_entry("/etc/subgid")
 }
 
-/// The process keeps its uid. With a subordinate range, 0 maps to the first
-/// subordinate id and the rest of the range to itself.
+/// Runs `sh -c script` in `dev`, as root or as the user, and returns stdout.
+fn sh(dev: &patchbay::Device, root: bool, script: &str) -> Result<String> {
+    let mut cmd = std::process::Command::new("sh");
+    cmd.args(["-c", script])
+        .stdout(std::process::Stdio::piped());
+    let child = if root {
+        dev.root().spawn_command_sync(cmd)?
+    } else {
+        dev.spawn_command_sync(cmd)?
+    };
+    let output = child.wait_with_output()?;
+    ensure!(output.status.success(), "{script:?} failed: {output:?}");
+    Ok(String::from_utf8(output.stdout)?)
+}
+
+/// The process keeps its uid. With a subordinate range, the ids from 0 up to
+/// the range size, except the user's, are mapped too.
 #[test]
 fn uid_maps_to_itself() -> Result<()> {
     let map = uid_map()?;
     // SAFETY: getuid has no preconditions.
     let uid = unsafe { libc::getuid() };
     ensure!(map[0] == [uid, uid, 1], "uid not mapped to itself: {map:?}");
-    if let [_, [0, root, 1], rest @ ..] = &map[..] {
-        for &[inner, outer, _] in rest {
-            ensure!(inner == outer, "range not mapped to itself: {map:?}");
-            ensure!(inner == root + 1, "range does not follow root: {map:?}");
-        }
-    } else {
-        ensure!(map.len() == 1, "unexpected uid_map: {map:?}");
+    if map.len() == 1 {
+        return Ok(());
+    }
+    let mapped = |id: u32| {
+        map.iter()
+            .any(|&[inner, _, count]| id >= inner && id - inner < count)
+    };
+    for id in [0, 1, 65534] {
+        ensure!(mapped(id), "uid {id} not mapped: {map:?}");
     }
     Ok(())
 }
 
-/// `root()` spawns commands as uid 0 with all capabilities; plain spawns run
-/// as the user.
+/// `root()` spawns commands as uid 0 with every capability, and root can
+/// switch to other ids such as `nobody`. Plain spawns run as the user.
+///
+/// Requires root where the host is set up for it, unless the test runs in a
+/// nested user namespace. Set `PATCHBAY_EXPECT_ROOT` to require it always.
 #[tokio::test(flavor = "current_thread")]
 async fn root_command_runs_as_uid_zero() -> Result<()> {
     patchbay::check_caps()?;
@@ -61,40 +106,58 @@ async fn root_command_runs_as_uid_zero() -> Result<()> {
     let dc = lab.add_router("dc").build().await?;
     let dev = lab.add_device("dev").uplink(dc.id()).build().await?;
 
-    let id = |root: bool| -> Result<String> {
-        let mut cmd = std::process::Command::new("sh");
-        cmd.args(["-c", "id -u; grep CapEff /proc/self/status"])
-            .stdout(std::process::Stdio::piped());
-        let child = if root {
-            dev.root().spawn_command_sync(cmd)?
-        } else {
-            dev.spawn_command_sync(cmd)?
-        };
-        let output = child.wait_with_output()?;
-        ensure!(output.status.success(), "command failed: {output:?}");
-        Ok(String::from_utf8(output.stdout)?)
-    };
-
     // SAFETY: getuid has no preconditions.
     let uid = unsafe { libc::getuid() };
-    let as_user = id(false)?;
-    ensure!(
-        as_user.starts_with(&format!("{uid}\n")),
-        "unexpected: {as_user:?}"
-    );
+    let as_user = sh(&dev, false, "id -u")?;
+    ensure!(as_user.trim() == uid.to_string(), "unexpected: {as_user:?}");
 
-    if !has_range()? {
-        let err = dev
-            .root()
-            .spawn_command_sync(std::process::Command::new("true"));
-        ensure!(err.is_err(), "root spawn without a range should fail");
+    if let Err(err) = dev
+        .root()
+        .spawn_command_sync(std::process::Command::new("true"))
+    {
+        let err = format!("{err:#}");
+        let nested = err.contains("nested user namespace");
+        let required = std::env::var_os("PATCHBAY_EXPECT_ROOT").is_some()
+            || (host_has_range_setup() && !nested);
+        ensure!(!required, "root not available: {err}");
+        eprintln!("skipping root checks: {err}");
         return Ok(());
     }
-    let as_root = id(true)?;
-    ensure!(as_root.starts_with("0\n"), "unexpected: {as_root:?}");
+
+    let as_root = sh(
+        &dev,
+        true,
+        "id -u; grep -E '^Cap(Eff|Bnd)' /proc/self/status",
+    )?;
+    let mut lines = as_root.lines();
+    ensure!(lines.next() == Some("0"), "not uid 0: {as_root:?}");
+    let eff = lines
+        .next()
+        .and_then(|l| l.strip_prefix("CapEff:"))
+        .map(str::trim);
+    let bnd = lines
+        .next()
+        .and_then(|l| l.strip_prefix("CapBnd:"))
+        .map(str::trim);
     ensure!(
-        as_root.contains("CapEff:\t000001ffffffffff"),
+        eff.is_some() && eff == bnd,
         "root lacks capabilities: {as_root:?}"
+    );
+
+    let as_nobody = sh(
+        &dev,
+        true,
+        "setpriv --reuid=65534 --regid=65534 --clear-groups id -u",
+    )?;
+    ensure!(as_nobody.trim() == "65534", "unexpected: {as_nobody:?}");
+
+    // The async variant runs as root too.
+    let mut cmd = tokio::process::Command::new("id");
+    cmd.arg("-u").stdout(std::process::Stdio::piped());
+    let output = dev.root().spawn_command(cmd)?.wait_with_output().await?;
+    ensure!(
+        String::from_utf8(output.stdout)?.trim() == "0",
+        "async spawn not root"
     );
     Ok(())
 }
