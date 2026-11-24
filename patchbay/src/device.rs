@@ -423,7 +423,7 @@ impl Device {
     /// Adds a hosts entry visible only to this device (via `/etc/hosts` overlay).
     ///
     /// glibc picks up changes on the next `getaddrinfo()` via mtime check.
-    /// For lab-wide DNS records, use [`Lab::dns_server`] instead.
+    /// For lab-wide DNS records, use [`Lab::dns_server`](crate::Lab::dns_server) instead.
     pub fn set_host(&self, name: &str, ip: IpAddr) -> Result<()> {
         let inner = self.lab.core.lock().expect("poisoned");
         inner.dns.append_host(self.id, name, ip)
@@ -614,7 +614,7 @@ impl Device {
 // DeviceBuilder
 // ─────────────────────────────────────────────
 
-/// Builder for a device node; returned by [`Lab::add_device`].
+/// Builder for a device node; returned by [`Lab::add_device`](crate::Lab::add_device).
 pub struct DeviceBuilder {
     pub(crate) inner: Arc<LabInner>,
     pub(crate) lab_span: tracing::Span,
@@ -643,7 +643,7 @@ impl DeviceBuilder {
 
     /// Adds a named interface with the given configuration.
     ///
-    /// Accepts anything that converts to [`IfaceConfig`], including a bare
+    /// Accepts anything that converts to [`IfaceConfig`](crate::IfaceConfig), including a bare
     /// [`NodeId`] for simple routed interfaces:
     ///
     /// ```ignore
@@ -665,7 +665,7 @@ impl DeviceBuilder {
 
     /// Adds an auto-named interface (eth0, eth1, ...) with the given config.
     ///
-    /// Accepts anything that converts to [`IfaceConfig`], including a bare
+    /// Accepts anything that converts to [`IfaceConfig`](crate::IfaceConfig), including a bare
     /// [`NodeId`].
     pub fn uplink(mut self, config: impl Into<crate::IfaceConfig>) -> Self {
         if self.result.is_ok() {

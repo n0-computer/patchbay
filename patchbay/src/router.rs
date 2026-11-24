@@ -969,7 +969,7 @@ impl RouterPreset {
 // RouterBuilder
 // ─────────────────────────────────────────────
 
-/// Builder for a router node; returned by [`Lab::add_router`].
+/// Builder for a router node; returned by [`Lab::add_router`](crate::Lab::add_router).
 pub struct RouterBuilder {
     pub(crate) inner: Arc<LabInner>,
     pub(crate) lab_span: tracing::Span,

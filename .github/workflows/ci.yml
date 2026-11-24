@@ -53,6 +53,11 @@ jobs:
       - name: Clippy without default features
         run: cargo clippy --locked -p patchbay --no-default-features --all-targets -- -D warnings
 
+      - name: Docs
+        run: cargo doc --locked --workspace --no-deps --all-features --lib
+        env:
+          RUSTDOCFLAGS: -D warnings
+
       - name: Format
         run: cargo make format-check
       - name: Lockfile must not have moved

@@ -172,7 +172,7 @@ pub struct RunManifest {
 impl RunManifest {
     /// Build the combined test list from on-disk directories and nextest results.
     ///
-    /// 1. Scan child dirs for `events.jsonl` via [`collect_event_dirs`] to get
+    /// 1. Scan child dirs for `events.jsonl` via `collect_event_dirs` to get
     ///    the authoritative list of test output directories.
     /// 2. Create a [`TestResult`] for each dir (default status = Pass).
     /// 3. Match existing nextest tests in `self.tests` to dirs by bare function

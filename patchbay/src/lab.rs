@@ -1554,7 +1554,8 @@ impl Lab {
     /// namespace. Once started, all devices' `resolv.conf` overlay is updated
     /// to point at it (glibc picks up the change on the next `getaddrinfo()`).
     ///
-    /// Use [`DnsServer::set_host`] and [`DnsServer::set_txt`] to add records.
+    /// Use [`DnsServer::set_host`](crate::DnsServer::set_host) and
+    /// [`DnsServer::set_txt`](crate::DnsServer::set_txt) to add records.
     /// Records are immediately visible to DNS queries — no propagation delay.
     #[cfg(feature = "dns-server")]
     pub fn dns_server(&self) -> Result<crate::dns_server::DnsServer> {
@@ -1609,7 +1610,7 @@ impl Lab {
     /// ```
     ///
     /// For per-interface directional control (egress vs ingress on a single
-    /// device interface), use [`Iface::set_condition`] instead.
+    /// device interface), use [`Iface::set_condition`](crate::Iface::set_condition) instead.
     pub async fn set_link_condition(
         &self,
         a: NodeId,

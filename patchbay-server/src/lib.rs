@@ -70,7 +70,7 @@ pub struct RunInfo {
     /// Lab lifecycle status from `state.json` (e.g. `"running"`, `"finished"`).
     ///
     /// This is the per-sim lab state, not the CI test outcome — see
-    /// [`RunManifest::test_outcome`] for the overall pass/fail from CI.
+    /// [`RunManifest::outcome`] for the overall pass/fail from CI.
     pub status: Option<String>,
     /// Group (first path component for nested runs, `None` for flat/direct).
     pub group: Option<String>,
@@ -85,7 +85,7 @@ const MAX_SCAN_DEPTH: usize = 3;
 /// Lists Lab output directories under `base`, newest-first.
 ///
 /// If `base` itself contains `events.jsonl`, it is served as the sole run.
-/// Otherwise, scans up to [`MAX_SCAN_DEPTH`] levels deep for directories
+/// Otherwise, scans up to `MAX_SCAN_DEPTH` (3) levels deep for directories
 /// that contain `events.jsonl`.
 pub fn discover_runs(base: &Path) -> anyhow::Result<Vec<RunInfo>> {
     // If the base dir itself is a run, serve only that.
