@@ -13,6 +13,15 @@ default = ["dns-server"]
 # The in-process lab DNS server (`Lab::dns_server`).
 dns-server = ["dep:hickory-proto"]
 iroh-metrics = ["dep:iroh-metrics"]
+podman = ["rustix/event", "rustix/fs", "rustix/net"]
+
+[[bin]]
+name = "patchbay-podman-helper"
+required-features = ["podman"]
+
+[[test]]
+name = "podman"
+required-features = ["podman"]
 
 [dependencies]
 iroh-metrics = { version = "1.0.2", optional = true }
