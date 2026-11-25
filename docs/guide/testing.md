@@ -106,6 +106,46 @@ Key points:
 - **`OutDir::Exact(path)`** tells the lab to write events and logs into
   that directory. After the test, you can browse them in the devtools UI.
 
+## Rebinding a fixed port
+
+Bind port 0 where you can. If a later step needs the same port, keep the
+socket open and use it again.
+
+When a thread spawns a child process, the child gets a copy of every open
+socket of the process. The copies stay open until the child starts its
+program, which usually takes a few milliseconds. This is true for any spawn
+in the process: `std::process`, `tokio::process`, and the `nft`, `tc` and
+`podman` commands that patchbay runs for you. If your test closes a socket
+in that moment, the copy keeps it open:
+
+- A bind on the same address and port fails with `EADDRINUSE`.
+- A closed TCP listener can still accept a connection.
+- A closed UDP socket can still receive a datagram.
+
+The odds rise under `cargo test`, where all tests share one process.
+`cargo nextest` runs each test in its own process.
+
+If your test must bind a fixed port again, wrap the bind in
+`patchbay::util::retry_addr_in_use`. It tries the bind again on
+`EADDRINUSE` for up to one second:
+
+```rust
+let socket = dev.run_sync(move || {
+    Ok(patchbay::util::retry_addr_in_use(|| std::net::UdpSocket::bind(addr))?)
+})?;
+```
+
+Call it in the device's context, for example inside `device.run_sync` or
+inline in a task from `device.spawn`. Do not move it to
+`tokio::task::spawn_blocking`: a network namespace belongs to a thread, and
+a blocking-pool thread is not in the device's namespace. In async code, bind
+with std and convert the socket with `from_std`.
+
+std and tokio already set `SO_REUSEADDR` on TCP listeners. It does not help
+here, because Linux refuses a bind while another socket listens on the port.
+For UDP, `SO_REUSEADDR` on both sockets avoids the failed bind, but then the
+old and the new socket are bound at the same time. The retry works for both.
+
 ## Running on Linux
 
 On Linux, tests run natively. Install patchbay's CLI if you want the
