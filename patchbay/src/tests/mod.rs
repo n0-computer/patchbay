@@ -83,6 +83,18 @@ fn ping_fails(addr: &str) -> Result<()> {
     Ok(())
 }
 
+/// Runs `ip <args>` inside the device namespace and returns stdout.
+fn ip_output(dev: &Device, args: &[&str]) -> Result<String> {
+    let mut cmd = std::process::Command::new("ip");
+    cmd.args(args);
+    cmd.stdout(std::process::Stdio::piped());
+    let output = dev
+        .spawn_command_sync(cmd)?
+        .wait_with_output()
+        .context("wait for ip")?;
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
 #[derive(Clone, Copy, Debug, strum::EnumIter, strum::Display)]
 enum UplinkWiring {
     DirectIx,

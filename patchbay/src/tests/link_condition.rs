@@ -1155,18 +1155,6 @@ async fn lab_bidirectional_via_two_calls() -> Result<()> {
 
 // ── Carrier ──────────────────────────────────────────────────────────
 
-/// Runs `ip <args>` inside the device namespace and returns stdout.
-fn ip_output(dev: &Device, args: &[&str]) -> Result<String> {
-    let mut cmd = std::process::Command::new("ip");
-    cmd.args(args);
-    cmd.stdout(std::process::Stdio::piped());
-    let output = dev
-        .spawn_command_sync(cmd)?
-        .wait_with_output()
-        .context("wait for ip")?;
-    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
-}
-
 /// Carrier down behaves like a pulled cable: the interface stays up with its
 /// addresses and routes, traffic stops, and carrier up restores it without
 /// re-adding anything. The ingress condition on the router-side veth

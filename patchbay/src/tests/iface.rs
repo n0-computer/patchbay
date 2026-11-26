@@ -132,6 +132,31 @@ async fn renew_ip_while_link_down() -> Result<()> {
     Ok(())
 }
 
+/// With two interfaces on the same router, renewing eth0 keeps the default
+/// route on eth0 and does not move it to eth1.
+#[tokio::test(flavor = "current_thread")]
+#[traced_test]
+async fn renew_ip_keeps_default_route_on_its_iface() -> Result<()> {
+    let lab = Lab::new().await?;
+    let dc = lab.add_router("dc").build().await?;
+    let dev = lab
+        .add_device("dev")
+        .iface("eth0", dc.id())
+        .iface("eth1", dc.id())
+        .build()
+        .await?;
+    let default_route = || ip_output(&dev, &["-4", "route", "show", "default"]);
+
+    let before = default_route()?;
+    assert!(before.contains("dev eth0"), "before renew: {before}");
+
+    dev.iface("eth0").unwrap().renew_ip().await?;
+    let after = default_route()?;
+    assert!(after.contains("dev eth0"), "after renew: {after}");
+
+    Ok(())
+}
+
 /// Builds a device behind a home NAT router, and returns it with the IP of a
 /// peer on a public router.
 async fn device_behind_nat(lab: &Lab) -> Result<(Device, String)> {

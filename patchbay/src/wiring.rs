@@ -173,7 +173,7 @@ pub(crate) async fn setup_router_async(
                 h.set_link_up(&ns_if).await?;
                 if let Some(ip4) = d.router.upstream_ip {
                     h.add_addr4(&ns_if, ip4, d.ix_cidr_prefix).await?;
-                    h.add_default_route_v4(d.ix_gw).await?;
+                    h.add_default_route_v4(&ns_if, d.ix_gw).await?;
                 }
                 if let (Some(ip6), Some(prefix6), Some(gw6)) =
                     (d.router.upstream_ip_v6, d.ix_cidr_v6_prefix, d.ix_gw_v6)
@@ -294,7 +294,7 @@ pub(crate) async fn setup_router_async(
                 h.set_link_up(&wan_if).await?;
                 if let (Some(ip4), Some(prefix4)) = (d.router.upstream_ip, d.upstream_cidr_prefix) {
                     h.add_addr4(&wan_if, ip4, prefix4).await?;
-                    h.add_default_route_v4(gw_ip).await?;
+                    h.add_default_route_v4(&wan_if, gw_ip).await?;
                 }
                 if let (Some(ip6), Some(prefix6), Some(g6)) = (
                     d.router.upstream_ip_v6,
@@ -784,7 +784,7 @@ pub(crate) async fn wire_iface_async(
                 h.add_addr4(&d.ifname, ip4, d.prefix_len).await?;
                 if d.is_default {
                     if let Some(gw4) = d.gw_ip {
-                        h.add_default_route_v4(gw4).await?;
+                        h.add_default_route_v4(&d.ifname, gw4).await?;
                     }
                 }
             }

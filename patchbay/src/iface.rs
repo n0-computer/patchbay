@@ -576,7 +576,7 @@ impl Iface {
             // the gateway is unreachable, and link_up adds the route instead.
             if let Some(gw) = gw {
                 if nl.link_is_up(&ifname).await? {
-                    nl.add_default_route_v4(gw).await?;
+                    nl.add_default_route_v4(&ifname, gw).await?;
                 }
             }
             Ok(())

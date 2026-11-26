@@ -259,10 +259,11 @@ impl Netlink {
         self.create(RouteNetlinkMessage::NewAddress(msg)).await
     }
 
-    /// Adds an IPv4 default route via `via`, ignoring EEXIST.
-    pub(crate) async fn add_default_route_v4(&self, via: Ipv4Addr) -> Result<()> {
-        trace!(via = %via, "add default route v4");
-        let msg = route(AddressFamily::Inet, None, Some(via.into()), None);
+    /// Adds an IPv4 default route via `via` on `ifname`, ignoring EEXIST.
+    pub(crate) async fn add_default_route_v4(&self, ifname: &str, via: Ipv4Addr) -> Result<()> {
+        trace!(ifname = %ifname, via = %via, "add default route v4");
+        let idx = self.link_index(ifname).await?;
+        let msg = route(AddressFamily::Inet, None, Some(via.into()), Some(idx));
         self.create(RouteNetlinkMessage::NewRoute(msg)).await
     }
 
