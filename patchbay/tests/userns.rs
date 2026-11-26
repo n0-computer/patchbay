@@ -97,11 +97,17 @@ fn uid_maps_to_itself() -> Result<()> {
 /// `as_root()` spawns commands as uid 0 with every capability, and root can
 /// switch to other ids such as `nobody`. Plain spawns run as the user.
 ///
+/// `nobody` can read the device's DNS files also under a strict umask.
+///
 /// Requires root where the host is set up for it, unless the test runs in a
 /// nested user namespace. Set `PATCHBAY_EXPECT_ROOT` to require it always.
 #[tokio::test(flavor = "current_thread")]
 async fn root_command_runs_as_uid_zero() -> Result<()> {
     patchbay::check_caps()?;
+    // The lab writes the DNS files under this umask. It applies to the whole
+    // test process, which only makes the other tests' files private.
+    // SAFETY: umask has no preconditions.
+    unsafe { libc::umask(0o077) };
     let lab = Lab::new().await?;
     let dc = lab.add_router("dc").build().await?;
     let dev = lab.add_device("dev").uplink(dc.id()).build().await?;
@@ -147,7 +153,8 @@ async fn root_command_runs_as_uid_zero() -> Result<()> {
     let as_nobody = sh(
         &dev,
         true,
-        "setpriv --reuid=65534 --regid=65534 --clear-groups id -u",
+        "setpriv --reuid=65534 --regid=65534 --clear-groups \
+         sh -c 'cat /etc/hosts /etc/resolv.conf >/dev/null && id -u'",
     )?;
     ensure!(as_nobody.trim() == "65534", "unexpected: {as_nobody:?}");
 
