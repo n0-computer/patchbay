@@ -24,7 +24,7 @@ libc = "0.2"
 netlink-packet-core = "0.9"
 netlink-packet-route = "0.33"
 netlink-proto = "0.13"
-rustix = { version = "1.1", default-features = false, features = ["std", "thread", "process", "pipe"] }
+rustix = { version = "1.1", default-features = false, features = ["std", "thread", "process", "pipe", "net"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 simple-dns = { version = "0.13", optional = true }
@@ -36,6 +36,7 @@ toml = "1.1"
 tracing = "0.1"
 tracing-core = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["env-filter", "fmt", "ansi"] }
+tempfile = "3"
 
 [dev-dependencies]
 ctor = "1.0"

@@ -159,9 +159,7 @@ impl<'de> Deserialize<'de> for StepEntry {
         }
 
         // Fall back to Concrete step.
-        let step: Step = toml::Value::Table(table)
-            .try_into()
-            .map_err(serde::de::Error::custom)?;
+        let step = Step::from_table(table).map_err(serde::de::Error::custom)?;
         Ok(StepEntry::Concrete { when, step })
     }
 }
@@ -242,9 +240,14 @@ pub enum Step {
         #[serde(default)]
         requires: Vec<String>,
         results: Option<StepResults>,
-        /// Runs the command as root, see [`patchbay::AsRoot`].
+        /// Runs the command as root, or as uid 0 in the device's container.
+        ///
+        /// See [`patchbay::AsRoot`] for root outside a container.
         #[serde(default)]
         root: bool,
+        /// Runs the command inside the device's container.
+        #[serde(default)]
+        container: bool,
     },
     Spawn {
         id: String,
@@ -260,9 +263,14 @@ pub enum Step {
         #[serde(default)]
         requires: Vec<String>,
         results: Option<StepResults>,
-        /// Runs the command as root, see [`patchbay::AsRoot`].
+        /// Runs the command as root, or as uid 0 in the device's container.
+        ///
+        /// See [`patchbay::AsRoot`] for root outside a container.
         #[serde(default)]
         root: bool,
+        /// Runs the command inside the device's container.
+        #[serde(default)]
+        container: bool,
     },
     Wait {
         duration: String,
@@ -315,6 +323,24 @@ pub enum Step {
         device: Option<String>,
         content: String,
     },
+}
+
+impl Step {
+    /// Parses a step table.
+    ///
+    /// Fails for `root` or `container` on a step that would ignore them.
+    pub(crate) fn from_table(table: toml::value::Table) -> anyhow::Result<Self> {
+        let action = table.get("action").and_then(toml::Value::as_str);
+        if let Some(action) = action.filter(|action| !matches!(*action, "run" | "spawn")) {
+            if let Some(key) = ["root", "container"]
+                .iter()
+                .find(|key| table.contains_key(**key))
+            {
+                anyhow::bail!("`{key}` applies to `run` and `spawn` steps, not to `{action}`");
+            }
+        }
+        Ok(toml::Value::Table(table).try_into()?)
+    }
 }
 
 /// Output parser mode for `spawn`/`run` steps.

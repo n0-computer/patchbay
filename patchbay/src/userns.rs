@@ -76,25 +76,49 @@ pub unsafe fn init_userns_for_ctor() {
 /// so that a child process can switch to root.
 pub(crate) fn root_is_mapped() -> bool {
     let has_zero = |path: &str| {
-        std::fs::read_to_string(path)
-            .ok()
-            .and_then(|map| parse_id_map(&map))
-            .is_some_and(|lines| {
-                lines
-                    .iter()
-                    .any(|&[inner, _, count]| inner == 0 && count > 0)
-            })
+        read_id_map(path).is_ok_and(|map| map.iter().any(|line| line.contains_inner(0)))
     };
     has_zero("/proc/self/uid_map") && has_zero("/proc/self/gid_map")
 }
 
-/// Parses `/proc/<pid>/{uid,gid}_map` text into `[inner, outer, count]` lines.
-fn parse_id_map(text: &str) -> Option<Vec<[u32; 3]>> {
+/// One `inner outer count` line of a `/proc/<pid>/{uid,gid}_map`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct IdMapLine {
+    pub(crate) inner: u32,
+    pub(crate) outer: u32,
+    pub(crate) count: u32,
+}
+
+impl IdMapLine {
+    /// Returns whether the line maps the id `id` of the namespace.
+    pub(crate) fn contains_inner(&self, id: u32) -> bool {
+        id >= self.inner && id - self.inner < self.count
+    }
+}
+
+/// Reads and parses an id map file.
+pub(crate) fn read_id_map(path: &str) -> anyhow::Result<Vec<IdMapLine>> {
+    use anyhow::Context;
+    let text = std::fs::read_to_string(path).with_context(|| format!("read {path}"))?;
+    parse_id_map(&text).with_context(|| format!("parse {path}"))
+}
+
+/// Parses the text of an id map file.
+fn parse_id_map(text: &str) -> anyhow::Result<Vec<IdMapLine>> {
     text.lines()
         .map(|line| {
-            let mut fields = line.split_whitespace().map(|field| field.parse().ok());
-            let line = [fields.next()??, fields.next()??, fields.next()??];
-            fields.next().is_none().then_some(line)
+            let fields = line
+                .split_whitespace()
+                .map(str::parse)
+                .collect::<Result<Vec<u32>, _>>()?;
+            let [inner, outer, count] = fields[..] else {
+                anyhow::bail!("expected three fields: {line:?}");
+            };
+            Ok(IdMapLine {
+                inner,
+                outer,
+                count,
+            })
         })
         .collect()
 }
@@ -103,10 +127,12 @@ fn parse_id_map(text: &str) -> Option<Vec<[u32; 3]>> {
 /// every id.
 #[cfg(target_os = "linux")]
 fn in_initial_userns() -> bool {
-    std::fs::read_to_string("/proc/self/uid_map")
-        .ok()
-        .and_then(|map| parse_id_map(&map))
-        .is_some_and(|lines| lines == [[0, 0, u32::MAX]])
+    let all = IdMapLine {
+        inner: 0,
+        outer: 0,
+        count: u32::MAX,
+    };
+    read_id_map("/proc/self/uid_map").is_ok_and(|map| map == [all])
 }
 
 #[cfg(target_os = "linux")]
@@ -379,7 +405,7 @@ fn run_idmap(helper: &std::path::Path, pid: &str, lines: &[[u32; 3]]) -> Result<
 
 /// Finds an executable file by name on `PATH`.
 #[cfg(target_os = "linux")]
-fn find_in_path(name: &str) -> Option<std::path::PathBuf> {
+pub(crate) fn find_in_path(name: &str) -> Option<std::path::PathBuf> {
     use std::os::unix::fs::PermissionsExt;
     let path = std::env::var_os("PATH")?;
     std::env::split_paths(&path)
@@ -540,7 +566,7 @@ fn ensure_root_mapped() -> anyhow::Result<()> {
 
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
-    use super::{id_map_lines, parse_id_map};
+    use super::{id_map_lines, parse_id_map, IdMapLine};
 
     #[test]
     fn map_lines_keep_the_id_and_fill_zero_up_from_the_range() {
@@ -564,11 +590,18 @@ mod tests {
 
     #[test]
     fn parses_padded_id_maps() {
+        let line = |inner, outer, count| IdMapLine {
+            inner,
+            outer,
+            count,
+        };
         assert_eq!(
-            parse_id_map("      1000       1000          1\n         0     100000       1000\n"),
-            Some(vec![[1000, 1000, 1], [0, 100000, 1000]])
+            parse_id_map("      1000       1000          1\n         0     100000       1000\n")
+                .unwrap(),
+            [line(1000, 1000, 1), line(0, 100000, 1000)]
         );
-        assert_eq!(parse_id_map("0 1000\n"), None);
-        assert_eq!(parse_id_map(""), Some(vec![]));
+        assert!(parse_id_map("0 1000\n").is_err());
+        assert!(parse_id_map("0 1000 1 2\n").is_err());
+        assert_eq!(parse_id_map("").unwrap(), []);
     }
 }

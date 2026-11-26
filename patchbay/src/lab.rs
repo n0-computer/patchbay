@@ -16,7 +16,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use ipnet::{Ipv4Net, Ipv6Net};
 use serde::Deserialize;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, debug_span};
+use tracing::{debug, debug_span, warn};
 
 pub use crate::qdisc::LinkCondition;
 use crate::{
@@ -199,6 +199,8 @@ pub(crate) struct LabInner {
     pub shared_state: Arc<std::sync::Mutex<crate::event::LabState>>,
     /// Registry for flushing all buffered writers during lab shutdown.
     pub flush_registry: Arc<crate::writer::FlushRegistry>,
+    /// Containers of the lab, by name. See [`LabInner::register_container`].
+    pub containers: std::sync::Mutex<HashMap<String, crate::container::ContainerEntry>>,
 }
 
 impl Drop for LabInner {
@@ -252,6 +254,7 @@ impl Drop for LabDropGuard {
         self.0.netns.cancel_all_workers();
         // Flush all buffered file writers to disk.
         self.0.flush_registry.flush_all();
+        self.0.remove_containers(|_| true);
 
         // Determine final status from the test guard.
         let status = match self.0.test_status.load(Ordering::Acquire) {
@@ -269,7 +272,119 @@ impl Drop for LabDropGuard {
     }
 }
 
+/// Fails if a live container in `containers` has this name.
+fn ensure_container_name_free(
+    containers: &HashMap<String, crate::container::ContainerEntry>,
+    name: &str,
+) -> Result<()> {
+    if containers.get(name).is_some_and(|entry| entry.is_alive()) {
+        bail!("a container named '{name}' already exists in the lab");
+    }
+    Ok(())
+}
+
 impl LabInner {
+    /// Removes a device, see [`Lab::remove_device`].
+    pub(crate) fn remove_device(&self, id: NodeId) -> Result<()> {
+        let dev = self.core.lock().expect("poisoned").remove_device(id)?;
+        // Processes that keep the namespace, such as containers until podman
+        // removes them, would keep the links too.
+        if let Err(err) = self.delete_links(&dev) {
+            warn!(device = %dev.name, err = %format_args!("{err:#}"), "could not delete the links of a removed device");
+        }
+        self.netns.remove_worker(&dev.ns);
+        self.remove_containers(|entry| entry.device == id);
+        self.emit(LabEventKind::DeviceRemoved {
+            name: dev.name.to_string(),
+        });
+        Ok(())
+    }
+
+    /// Deletes the interfaces of a device, from a thread in its namespace.
+    fn delete_links(&self, dev: &DeviceData) -> Result<()> {
+        let ifnames: Vec<_> = dev
+            .interfaces
+            .iter()
+            .map(|iface| iface.ifname.clone())
+            .collect();
+        let thread = self.netns.spawn_thread_in(&dev.ns, move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_io()
+                .build()?;
+            rt.block_on(async {
+                let (connection, netlink) = crate::netlink::connect()?;
+                tokio::spawn(connection);
+                for ifname in &ifnames {
+                    netlink.ensure_link_deleted(ifname).await?;
+                }
+                Ok(())
+            })
+        })?;
+        thread
+            .join()
+            .map_err(|_| anyhow!("the link deletion panicked"))?
+    }
+
+    /// Adds a started container to the registry under `name`.
+    ///
+    /// Fails if a live container has this name, or if `device` or the lab is
+    /// gone. The caller then removes the container, which no later removal
+    /// would see.
+    pub(crate) fn register_container(
+        &self,
+        name: &str,
+        device: NodeId,
+        container: &Arc<crate::container::ContainerInner>,
+    ) -> Result<()> {
+        // Checked under the registry lock: `remove_device` and the lab drop
+        // remove the device or cancel first, and drain the registry after.
+        let mut containers = self.containers.lock().expect("poisoned");
+        if self.core.lock().expect("poisoned").device(device).is_none() {
+            bail!("the device of container '{name}' was removed");
+        }
+        if self.cancel.is_cancelled() {
+            bail!("the lab of container '{name}' was dropped");
+        }
+        containers.retain(|_, entry| entry.is_alive());
+        ensure_container_name_free(&containers, name)?;
+        containers.insert(
+            name.to_string(),
+            crate::container::ContainerEntry {
+                device,
+                container: Arc::clone(container),
+            },
+        );
+        Ok(())
+    }
+
+    /// Fails if a live container has this name.
+    pub(crate) fn ensure_container_name_free(&self, name: &str) -> Result<()> {
+        ensure_container_name_free(&self.containers.lock().expect("poisoned"), name)
+    }
+
+    /// Removes the containers that `filter` selects from the registry.
+    ///
+    /// The removal runs after the registry lock is released.
+    fn remove_containers(&self, filter: impl Fn(&crate::container::ContainerEntry) -> bool) {
+        let removed: Vec<_> = self
+            .containers
+            .lock()
+            .expect("poisoned")
+            .extract_if(|_, entry| filter(entry))
+            .collect();
+        for (_, entry) in removed {
+            entry.remove();
+        }
+    }
+
+    /// Removes a device whose build failed or was cancelled.
+    pub(crate) fn forget_device(&self, id: NodeId) {
+        if let Ok(dev) = self.core.lock().expect("poisoned").remove_device(id) {
+            // A cancelled build may have created the namespace.
+            self.netns.remove_worker(&dev.ns);
+        }
+    }
+
     /// Returns a cloned tokio runtime handle for the given namespace.
     pub(crate) fn rt_handle_for(&self, ns: &str) -> Result<tokio::runtime::Handle> {
         self.netns.rt_handle_for(ns)
@@ -719,6 +834,7 @@ impl Lab {
             test_status: test_status.clone(),
             shared_state: shared_state.clone(),
             flush_registry,
+            containers: Default::default(),
         });
         let lab = Self {
             inner: Arc::new(LabDropGuard(lab_inner)),
@@ -883,6 +999,7 @@ impl Lab {
             name: String,
             default_via: Option<String>,
             ifaces: Vec<(String, NodeId, Option<LinkCondition>)>,
+            container: Option<crate::config::ContainerConfig>,
         }
 
         let dev_data: Vec<ParsedDev> = {
@@ -911,10 +1028,22 @@ impl Lab {
                             .map_err(|_| anyhow!("device '{}' count out of range", dev_name))?
                     }
                 };
-                // Interface sub-tables: table-valued keys, excluding scalar device-level keys.
+                let container: Option<crate::config::ContainerConfig> = dev_table
+                    .get("container")
+                    .map(|v| v.clone().try_into())
+                    .transpose()
+                    .map_err(|e: toml::de::Error| {
+                        anyhow!("device '{}' invalid container: {}", dev_name, e)
+                    })?;
+                // Check the volume specs now, before any device is wired.
+                for spec in container.iter().flat_map(|c| &c.volumes) {
+                    crate::container::parse_volume(spec)
+                        .with_context(|| format!("device '{dev_name}' invalid container"))?;
+                }
+                // Interface sub-tables: table-valued keys, excluding device-level keys.
                 let mut iface_keys: Vec<&String> = dev_table
                     .keys()
-                    .filter(|k| dev_table[*k].is_table())
+                    .filter(|k| *k != "container" && dev_table[*k].is_table())
                     .collect();
                 iface_keys.sort();
                 if iface_keys.is_empty() {
@@ -964,6 +1093,7 @@ impl Lab {
                             name: format!("{dev_name}-{idx}"),
                             default_via: default_via.clone(),
                             ifaces: ifaces.clone(),
+                            container: container.clone(),
                         });
                     }
                 } else {
@@ -971,6 +1101,7 @@ impl Lab {
                         name: dev_name.clone(),
                         default_via,
                         ifaces,
+                        container,
                     });
                 }
             }
@@ -990,7 +1121,15 @@ impl Lab {
             if let Some(via) = dev.default_via {
                 builder = builder.default_via(&via);
             }
-            builder.build().await?;
+            let Some(container) = dev.container else {
+                builder.build().await?;
+                continue;
+            };
+            crate::ContainerBuilder::new(&dev.name, builder, &container.image)
+                .config(&container)
+                .build()
+                .await
+                .with_context(|| format!("start container for device '{}'", dev.name))?;
         }
 
         Ok(())
@@ -1074,18 +1213,54 @@ impl Lab {
         }
     }
 
+    /// Returns a builder for a device that runs an OCI image with podman.
+    ///
+    /// Wire it like a device, then call
+    /// [`build`](crate::ContainerBuilder::build). See
+    /// [`Container`](crate::Container) for its lifetime and the host
+    /// requirements.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use patchbay::Lab;
+    /// # async fn f(lab: Lab, net_id: patchbay::NodeId) -> anyhow::Result<()> {
+    /// let db = lab
+    ///     .add_container("db", "docker.io/library/postgres:16")
+    ///     .uplink(net_id)
+    ///     .env("POSTGRES_PASSWORD", "test")
+    ///     .ready_tcp(5432)
+    ///     .build()
+    ///     .await?;
+    /// # let _ = db;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn add_container(&self, name: &str, image: impl Into<String>) -> crate::ContainerBuilder {
+        crate::ContainerBuilder::new(name, self.add_device(name), image)
+    }
+
+    /// Pulls a container image if it is missing.
+    ///
+    /// A build pulls a missing image itself, but not from inside a lab
+    /// namespace such as a device task. Pull such images here first, or pull
+    /// to keep the download time out of a test.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the pull fails, or if the image is missing and this
+    /// runs inside a lab namespace.
+    pub async fn pull_image(&self, image: &str) -> Result<()> {
+        crate::container::ensure_image(image, crate::PullPolicy::Missing).await
+    }
+
     // ── removal ──────────────────────────────────────────────────────────
 
-    /// Removes a device from the lab, destroying its namespace and all interfaces.
+    /// Removes a device from the lab, destroying its interfaces and namespace.
     ///
-    /// The kernel automatically destroys veth pairs when the namespace closes.
+    /// This also removes the [`Container`](crate::Container)s in the device.
     pub fn remove_device(&self, id: NodeId) -> Result<()> {
-        let dev = self.inner.core.lock().unwrap().remove_device(id)?;
-        self.inner.netns.remove_worker(&dev.ns);
-        self.inner.emit(LabEventKind::DeviceRemoved {
-            name: dev.name.to_string(),
-        });
-        Ok(())
+        self.inner.remove_device(id)
     }
 
     /// Removes a router from the lab, destroying its namespace and all interfaces.
@@ -1660,6 +1835,19 @@ impl Lab {
             d.ns.clone(),
             Arc::clone(&self.inner.0),
         ))
+    }
+
+    /// Looks up a container by its name in the lab.
+    ///
+    /// Returns `None` for a stopped or removed container. A container from a
+    /// config or [`add_container`](Self::add_container) has its device's name.
+    pub fn container_by_name(&self, name: &str) -> Option<crate::Container> {
+        let (device, inner) = {
+            let containers = self.inner.containers.lock().expect("poisoned");
+            let entry = containers.get(name)?;
+            (entry.device, entry.live()?)
+        };
+        Some(crate::Container::from_parts(self.device(device)?, inner))
     }
 
     /// Looks up a router by name and returns a handle.
