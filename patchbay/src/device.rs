@@ -377,6 +377,11 @@ impl Device {
     /// The child is registered with the namespace's tokio reactor so that
     /// `.wait()` and `.wait_with_output()` work as non-blocking futures.
     /// The sync worker's DNS bind-mounts are inherited by the child process.
+    ///
+    /// The kernel kills the process when the device is removed, when the lab
+    /// drops, or when this process exits, also on `SIGKILL`. This does not
+    /// reach the processes it starts, nor a setuid program or one with file
+    /// capabilities.
     pub fn spawn_command(&self, cmd: tokio::process::Command) -> Result<tokio::process::Child> {
         self.lab.netns.spawn_command(&self.ns, cmd)
     }
@@ -385,7 +390,8 @@ impl Device {
     ///
     /// The sync worker thread has `/etc/hosts` and `/etc/resolv.conf` bind-mounted.
     /// `fork()` inherits the mount namespace, so child processes automatically see
-    /// the DNS overlay without a separate `pre_exec` hook.
+    /// the DNS overlay without a separate `pre_exec` hook. The process ends like
+    /// one from [`spawn_command`](Self::spawn_command).
     pub fn spawn_command_sync(&self, cmd: Command) -> Result<std::process::Child> {
         self.lab.netns.spawn_command_sync(&self.ns, cmd)
     }

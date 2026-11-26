@@ -1815,12 +1815,18 @@ impl Ix {
     }
 
     /// Spawns a [`tokio::process::Command`] in the IX root namespace.
+    ///
+    /// The process ends with the lab, like one from
+    /// [`Device::spawn_command`](crate::Device::spawn_command).
     pub fn spawn_command(&self, cmd: tokio::process::Command) -> Result<tokio::process::Child> {
         let ns = self.lab.core.lock().unwrap().root_ns().to_string();
         self.lab.netns.spawn_command(&ns, cmd)
     }
 
     /// Spawns a [`std::process::Command`] in the IX root namespace.
+    ///
+    /// The process ends with the lab, like one from
+    /// [`Device::spawn_command`](crate::Device::spawn_command).
     pub fn spawn_command_sync(&self, cmd: Command) -> Result<std::process::Child> {
         let ns = self.lab.core.lock().unwrap().root_ns().to_string();
         self.lab.netns.spawn_command_sync(&ns, cmd)

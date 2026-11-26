@@ -151,6 +151,42 @@ async fn remove_device() -> Result<()> {
     Ok(())
 }
 
+/// A spawned command ends when its device is removed or its lab drops.
+#[tokio::test(flavor = "current_thread")]
+#[traced_test]
+async fn spawned_command_ends_with_its_namespace() -> Result<()> {
+    use std::os::unix::process::ExitStatusExt;
+    let lab = Lab::new().await?;
+    let dc = lab.add_router("dc").build().await?;
+    let removed = lab.add_device("removed").uplink(dc.id()).build().await?;
+    let kept = lab.add_device("kept").uplink(dc.id()).build().await?;
+    let sleep = || {
+        let mut cmd = std::process::Command::new("sleep");
+        let null = std::process::Stdio::null;
+        cmd.arg("60").stdout(null()).stderr(null());
+        cmd
+    };
+    /// Waits up to five seconds for `child` to be killed.
+    async fn wait_killed(mut child: std::process::Child) -> Result<()> {
+        for _ in 0..50 {
+            if let Some(status) = child.try_wait()? {
+                assert_eq!(status.signal(), Some(libc::SIGKILL), "{status:?}");
+                return Ok(());
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        child.kill()?;
+        anyhow::bail!("the command still runs")
+    }
+    let first = removed.spawn_command_sync(sleep())?;
+    let second = kept.spawn_command_sync(sleep())?;
+
+    lab.remove_device(removed.id())?;
+    wait_killed(first).await?;
+    drop(lab);
+    wait_killed(second).await
+}
+
 /// Removing a router that still has connected devices returns an error.
 #[tokio::test(flavor = "current_thread")]
 #[traced_test]

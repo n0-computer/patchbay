@@ -608,14 +608,16 @@ impl Router {
 
     /// Spawns a [`tokio::process::Command`] in this router's network namespace.
     ///
-    /// The child is registered with the namespace's tokio reactor.
+    /// The child is registered with the namespace's tokio reactor. It ends
+    /// with the router, like one from [`Device::spawn_command`](crate::Device::spawn_command).
     pub fn spawn_command(&self, cmd: tokio::process::Command) -> Result<tokio::process::Child> {
         self.lab.netns.spawn_command(&self.ns, cmd)
     }
 
     /// Spawns a [`std::process::Command`] in this router's network namespace.
     ///
-    /// The child inherits the namespace's DNS bind-mounts.
+    /// The child inherits the namespace's DNS bind-mounts. It ends with the
+    /// router, like one from [`Device::spawn_command`](crate::Device::spawn_command).
     pub fn spawn_command_sync(&self, cmd: Command) -> Result<std::process::Child> {
         self.lab.netns.spawn_command_sync(&self.ns, cmd)
     }
