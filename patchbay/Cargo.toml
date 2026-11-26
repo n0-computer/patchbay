@@ -11,7 +11,7 @@ repository.workspace = true
 [features]
 default = ["dns-server"]
 # The in-process lab DNS server (`Lab::dns_server`).
-dns-server = ["simple-dns"]
+dns-server = ["dep:simple-dns"]
 iroh-metrics = ["dep:iroh-metrics"]
 
 [dependencies]
@@ -44,3 +44,5 @@ n0-dns-resolver = { version = "0.1", default-features = false }
 n0-tracing-test = "0.3.0"
 noq-udp = "1.5"
 testdir = "0.10"
+# `examples/simple.rs` uses `#[tokio::main]`, which needs the multi-thread runtime.
+tokio = { version = "1", features = ["rt-multi-thread"] }
