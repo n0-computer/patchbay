@@ -1,6 +1,7 @@
 //! DNS server on the IX bridge + per-device /etc/hosts overlay.
 
 use super::*;
+use crate::dns_server::RecordType;
 
 /// Resolves `name` to its first IPv4 address with a resolver that reads the
 /// system configuration. Call it inside a device namespace.
@@ -695,5 +696,43 @@ async fn txt_record_via_dns() -> Result<()> {
         strings,
         Some(vec!["node=abc123".to_string(), "port=4433".to_string()])
     );
+    Ok(())
+}
+
+/// `set_txt` accepts a 255-byte value and rejects a 256-byte value.
+#[tokio::test(flavor = "current_thread")]
+#[traced_test]
+async fn txt_value_length_limit() -> Result<()> {
+    let lab = Lab::new().await?;
+    let _dc = lab.add_router("dc").build().await?;
+    let dns = lab.dns_server()?;
+
+    let max = "a".repeat(255);
+    dns.set_txt("_long.test.", &[&max])?;
+
+    let too_long = "a".repeat(256);
+    assert!(dns.set_txt("_long.test.", &[&too_long]).is_err());
+    Ok(())
+}
+
+/// `remove` deletes only the record of the given type, and ignores name case.
+#[tokio::test(flavor = "current_thread")]
+#[traced_test]
+async fn remove_record_by_type() -> Result<()> {
+    let lab = Lab::new().await?;
+    let _dc = lab.add_router("dc").build().await?;
+    let dns = lab.dns_server()?;
+
+    let v4 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let v6 = IpAddr::V6(std::net::Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 0x1));
+    dns.set_host("remove.test.", v4)?;
+    dns.set_host("remove.test.", v6)?;
+    assert_eq!(lab.resolve("remove.test."), Some(v4));
+
+    dns.remove("remove.test", RecordType::A)?;
+    assert_eq!(lab.resolve("remove.test."), Some(v6));
+
+    dns.remove("Remove.TEST.", RecordType::Aaaa)?;
+    assert_eq!(lab.resolve("remove.test."), None);
     Ok(())
 }
