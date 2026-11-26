@@ -6,8 +6,13 @@
 //!
 //! ## Limitations
 //!
-//! - **No TCP fallback.** Only UDP is supported. Responses exceeding 512 bytes
-//!   will be truncated. This is fine for lab use with short names.
+//! - **No TCP fallback.** Only UDP is supported. The server sends each response
+//!   in full, also when it is longer than 512 bytes, and never sets the TC
+//!   (truncated) flag. This is fine for lab use with short names.
+//! - **No answer for unknown record types.** The server drops a query that
+//!   `simple-dns` cannot parse, for example a query for a record type that
+//!   `simple-dns` does not know. The client then times out. It does not get an
+//!   empty answer.
 //! - **FQDN trailing dots.** DNS names passed to [`DnsServer::set_host`] and
 //!   [`DnsServer::set_txt`] are always fully qualified. The trailing dot is
 //!   optional: `"relay.test"` and `"relay.test."` are the same name. Device-level
@@ -135,7 +140,13 @@ impl DnsServer {
     }
 
     /// Sets a TXT record, replacing any previous TXT record for this name.
-    /// Immediately visible to DNS queries.
+    ///
+    /// Immediately visible to DNS queries. Each value becomes one TXT string.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `name` is not a valid DNS name, or if a value is
+    /// longer than 255 bytes, the limit for one TXT string.
     pub fn set_txt(&self, name: &str, values: &[&str]) -> Result<()> {
         let name = parse_name(name)?;
         let mut txt = TXT::new();
