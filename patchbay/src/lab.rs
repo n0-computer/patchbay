@@ -1804,7 +1804,13 @@ impl Ix {
     /// See [`AsRoot`](crate::AsRoot) for when root is available and what it
     /// means for files on the host.
     pub fn as_root(&self) -> crate::AsRoot<'_> {
-        let ns = self.lab.core.lock().unwrap().root_ns().to_string();
+        let ns = self
+            .lab
+            .core
+            .lock()
+            .expect("poisoned")
+            .root_ns()
+            .to_string();
         crate::AsRoot::new(&self.lab, ns)
     }
 

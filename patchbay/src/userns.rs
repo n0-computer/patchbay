@@ -161,15 +161,19 @@ struct RangeParams {
 impl RangeParams {
     /// Detects whether a range map is possible for the current user.
     ///
-    /// Requires the initial user namespace (the setuid helpers have no effect
-    /// in a nested one), a user other than root, `newuidmap` and `newgidmap` on
-    /// `PATH`, and an `/etc/subuid` and `/etc/subgid` entry for the user.
-    /// Otherwise returns why not, and the caller uses the single-id map.
+    /// Requires the initial user namespace, a user other than root,
+    /// `newuidmap` and `newgidmap` on `PATH`, and an `/etc/subuid` and
+    /// `/etc/subgid` entry for the user. Otherwise returns why not, and the
+    /// caller uses the single-id map.
+    ///
+    /// In a nested user namespace this does not try the helpers. The host's
+    /// setuid helpers fail there, because their owner, host root, is not
+    /// mapped. Helpers inside a container could work, but are not tried.
     fn detect(uid: u32, gid: u32) -> Result<Self, String> {
         if !in_initial_userns() {
             return Err(
                 "the process already runs in a nested user namespace, where \
-                        newuidmap and newgidmap have no effect"
+                        patchbay does not try newuidmap and newgidmap"
                     .into(),
             );
         }
