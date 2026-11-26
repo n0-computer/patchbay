@@ -203,6 +203,7 @@ use anyhow::{anyhow, bail, Context, Result};
 pub mod config;
 /// Shared filename constants for the run output directory.
 pub mod consts;
+pub(crate) mod container;
 pub(crate) mod core;
 /// Device handle and builder.
 pub(crate) mod device;
@@ -238,6 +239,11 @@ pub mod util;
 pub(crate) mod wiring;
 pub(crate) mod writer;
 
+#[doc(hidden)]
+pub use container::containers_supported;
+pub use container::{
+    Container, ContainerBuilder, ContainerChild, ContainerChildSync, ContainerCommand, PullPolicy,
+};
 pub use device::{Device, DeviceBuilder};
 pub use firewall::PortPolicy;
 pub use iface::{Iface, IfaceConfig};

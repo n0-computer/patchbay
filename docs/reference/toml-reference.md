@@ -284,7 +284,8 @@ These fields apply to most or all step types.
 | `vars`    | table           | Group substitution variables. Only meaningful when `use` references a `[[step-group]]`. |
 | `device`  | string          | Name of the network namespace to run the command in. |
 | `env`     | table           | Extra environment variables, merged with any template `env`. |
-| `root`    | bool            | `run` and `spawn` only. Runs the command as root (uid 0) in the namespace. Default `false`: commands run as the invoking user with the network capabilities. Needs a subordinate id range, see [Getting started](../guide/getting-started.md). |
+| `root`    | bool            | `run` and `spawn` only. Runs the command as root (uid 0) in the namespace. Default `false`: commands run as the invoking user with the network capabilities. Needs a subordinate id range, see [Getting started](../guide/getting-started.md). With `container`, runs the command as uid 0 in the container. |
+| `container` | bool | `run` and `spawn` only. Runs the command inside the device's container, which needs a `container` table. Default `false`. See [Containers](../guide/containers.md#commands-in-a-container). |
 | `requires`| array of strings| Capture keys to wait for before this step starts. Format: `"step_id.capture_name"`. Blocks until all are resolved. |
 | `when`    | string          | Conditional guard. If `"false"`, the step is skipped. Any other value or absent means run. Typically set via `${matrix.*}` substitution. |
 
@@ -586,8 +587,8 @@ impair = { latency_ms = 100, jitter_ms = 10, loss_pct = 0.5, rate_kbit = 10000 }
 ```
 
 All numeric fields also accept string representations (`latency_ms = "100"` is
-equivalent to `latency_ms = 100`). This enables matrix variable substitution
-in link condition tables.
+equivalent to `latency_ms = 100`), and an empty string means the default. This
+enables matrix variable substitution in link condition tables.
 
 | Field          | Type   | Default | Description |
 |----------------|--------|---------|-------------|
@@ -719,6 +720,47 @@ gateway = "dc"
 | Key     | Type    | Default | Description |
 |---------|---------|---------|-------------|
 | `count` | integer | 1       | Number of instances. Creates `{name}-0` through `{name}-{N-1}`. Steps targeting the base name are automatically expanded. |
+| `container` | table | none  | Runs an OCI image as the device, see below. |
+
+`count` and `container` are reserved. A device cannot have an interface with
+one of these names.
+
+**Container devices:**
+
+A device with a `container` table runs an OCI image with podman. It is wired
+like any other device, and other devices reach the service at
+`$NETSIM_IP_<DEVICE>`. The lab starts the container before the first step and
+removes it when the sim ends. See [Running Containers](../guide/containers.md)
+for the host requirements.
+
+```toml
+[device.web.container]
+image     = "docker.io/library/nginx:alpine"
+ready_tcp = 80
+
+[device.web.eth0]
+gateway = "dc"
+```
+
+| Key                  | Type             | Default     | Description |
+|----------------------|------------------|-------------|-------------|
+| `image`              | string           | required    | Image reference. |
+| `entrypoint`         | array of strings | none        | Replaces the image's entrypoint. An empty array clears it. |
+| `args`               | array of strings | none        | Arguments of the container's command, after the image name. |
+| `env`                | table            | none        | Environment variables inside the container. |
+| `volumes`            | array of strings | none        | Bind mounts as `"host:container"`, with an optional `:ro` or `:rw` suffix. A relative host path is relative to the working directory of the runner, not to the sim file. |
+| `tmpfs`              | array of strings | none        | Container paths to mount a fresh tmpfs at. |
+| `run_args`           | array of strings | none        | Extra flags for `podman run`. |
+| `pull`               | string           | `"missing"` | `"missing"`, `"always"` or `"never"`. |
+| `ready_tcp`          | integer          | none        | Port that must accept a TCP connection on the device's lab IP before the steps start. |
+| `ready_timeout_secs` | integer          | 30          | How long to wait for `ready_tcp`, in seconds. |
+
+`ready_tcp` and `ready_timeout_secs` also accept a number in a string, for
+matrix values. An empty string leaves the key unset.
+
+A `run` or `spawn` step with `device` set to a container device runs the
+command in the device's network namespace on the host file system. Set
+`container = true` on the step to run the command inside the container.
 
 **NAT modes:**
 

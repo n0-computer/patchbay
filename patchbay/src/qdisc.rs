@@ -2,6 +2,8 @@ use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use tokio::process::Command;
 
+use crate::config::coerce;
+
 /// Max retries for transient EAGAIN (os error 11) when spawning `tc` commands.
 const SPAWN_RETRIES: u32 = 3;
 
@@ -360,23 +362,23 @@ impl<'de> Deserialize<'de> for LinkCondition {
         #[derive(Default, Deserialize)]
         #[serde(default)]
         struct Fields {
-            #[serde(deserialize_with = "coerce::opt_u32_or_string")]
+            #[serde(deserialize_with = "coerce::opt_num_or_string")]
             rate_kbit: Option<u32>,
-            #[serde(deserialize_with = "coerce::u32_or_string")]
+            #[serde(deserialize_with = "coerce::num_or_string")]
             latency_ms: u32,
-            #[serde(deserialize_with = "coerce::u32_or_string")]
+            #[serde(deserialize_with = "coerce::num_or_string")]
             jitter_ms: u32,
-            #[serde(deserialize_with = "coerce::f32_or_string")]
+            #[serde(deserialize_with = "coerce::num_or_string")]
             loss_pct: f32,
-            #[serde(deserialize_with = "coerce::opt_u32_or_string")]
+            #[serde(deserialize_with = "coerce::opt_num_or_string")]
             loss_burst_pkts: Option<u32>,
-            #[serde(deserialize_with = "coerce::opt_u32_or_string")]
+            #[serde(deserialize_with = "coerce::opt_num_or_string")]
             buffer_ms: Option<u32>,
-            #[serde(deserialize_with = "coerce::f32_or_string")]
+            #[serde(deserialize_with = "coerce::num_or_string")]
             reorder_pct: f32,
-            #[serde(deserialize_with = "coerce::f32_or_string")]
+            #[serde(deserialize_with = "coerce::num_or_string")]
             duplicate_pct: f32,
-            #[serde(deserialize_with = "coerce::f32_or_string")]
+            #[serde(deserialize_with = "coerce::num_or_string")]
             corrupt_pct: f32,
         }
 
@@ -403,58 +405,6 @@ impl<'de> Deserialize<'de> for LinkCondition {
                 corrupt_pct: f.corrupt_pct,
                 label: None,
             }),
-        }
-    }
-}
-
-/// Serde helpers that accept both native types and string representations.
-mod coerce {
-    use serde::{Deserialize, Deserializer};
-
-    pub(super) fn u32_or_string<'de, D: Deserializer<'de>>(de: D) -> Result<u32, D::Error> {
-        #[derive(Deserialize)]
-        #[serde(untagged)]
-        enum Val {
-            Num(u32),
-            Str(String),
-        }
-        match Val::deserialize(de)? {
-            Val::Num(n) => Ok(n),
-            Val::Str(s) if s.is_empty() => Ok(0),
-            Val::Str(s) => s.parse().map_err(serde::de::Error::custom),
-        }
-    }
-
-    pub(super) fn f32_or_string<'de, D: Deserializer<'de>>(de: D) -> Result<f32, D::Error> {
-        #[derive(Deserialize)]
-        #[serde(untagged)]
-        enum Val {
-            Num(f32),
-            Str(String),
-        }
-        match Val::deserialize(de)? {
-            Val::Num(n) => Ok(n),
-            Val::Str(s) if s.is_empty() => Ok(0.0),
-            Val::Str(s) => s.parse().map_err(serde::de::Error::custom),
-        }
-    }
-
-    /// Accepts a number, a string, or null, mapping null and the empty string
-    /// to `None` so an unset knob stays unset.
-    pub(super) fn opt_u32_or_string<'de, D: Deserializer<'de>>(
-        de: D,
-    ) -> Result<Option<u32>, D::Error> {
-        #[derive(Deserialize)]
-        #[serde(untagged)]
-        enum Val {
-            Num(u32),
-            Str(String),
-        }
-        match Option::<Val>::deserialize(de)? {
-            None => Ok(None),
-            Some(Val::Num(n)) => Ok(Some(n)),
-            Some(Val::Str(s)) if s.is_empty() => Ok(None),
-            Some(Val::Str(s)) => s.parse().map(Some).map_err(serde::de::Error::custom),
         }
     }
 }

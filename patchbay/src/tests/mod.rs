@@ -34,6 +34,7 @@ use super::*;
 use crate::{check_caps, config};
 
 mod alloc;
+mod container;
 mod devtools;
 #[cfg(feature = "dns-server")]
 mod dns;

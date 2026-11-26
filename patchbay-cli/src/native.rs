@@ -354,7 +354,17 @@ mod tests {
         assert!(!is_sim);
     }
 
+    /// Runs one sim from TOML text in a temporary work directory.
+    async fn run_sim_toml(name: &str, sim: &str) -> Result<()> {
+        let root = tempfile::tempdir().expect("temp dir");
+        let sim_path = root.path().join(format!("{name}.toml"));
+        std::fs::write(&sim_path, sim).expect("write sim");
+        let work_dir = root.path().to_path_buf();
+        run_sims(vec![sim_path], work_dir, vec![], false, None, true, None).await
+    }
+
     /// A step with `root = true` runs as uid 0, other steps as the user.
+    ///
     /// Skips on hosts without a subordinate id range.
     #[tokio::test(flavor = "current_thread")]
     async fn root_step_runs_as_uid_zero() {
@@ -370,7 +380,6 @@ mod tests {
         let uid = std::os::unix::fs::MetadataExt::uid(
             &std::fs::metadata("/proc/self").expect("stat /proc/self"),
         );
-        let root = tempfile::tempdir().expect("temp dir");
         let sim = format!(
             r#"
 [sim]
@@ -404,19 +413,141 @@ action = "assert"
 checks = ["as-root.uid == 0", "as-user.uid == {uid}"]
 "#
         );
-        let sim_path = root.path().join("root-step.toml");
-        std::fs::write(&sim_path, sim).expect("write sim");
-        run_sims(
-            vec![sim_path],
-            root.path().to_path_buf(),
-            vec![],
-            false,
-            None,
-            true,
-            None,
-        )
-        .await
-        .expect("run root-step sim");
+        run_sim_toml("root-step", &sim)
+            .await
+            .expect("run root-step sim");
+    }
+
+    /// Container devices serve other devices, and container steps run inside them.
+    ///
+    /// A plain device reaches the container at `$NETSIM_IP_<DEVICE>`. `run`
+    /// and `spawn` steps with `container = true` run in the image's file
+    /// system, with the step env, with output captures, and as the image's
+    /// user. Skips without container support.
+    #[tokio::test(flavor = "current_thread")]
+    async fn container_devices_and_steps() {
+        if !patchbay::containers_supported() {
+            eprintln!("skipping: podman or a subordinate id range is missing");
+            return;
+        }
+        let sim = r#"
+[sim]
+name = "container-steps"
+
+[[router]]
+name = "dc"
+
+[device.web.container]
+image = "docker.io/library/nginx:alpine"
+ready_tcp = 80
+
+[device.web.eth0]
+gateway = "dc"
+
+# The image sets `USER curl_user`.
+[device.curl.container]
+image = "docker.io/curlimages/curl:8.23.0"
+entrypoint = ["sleep", "infinity"]
+
+[device.curl.eth0]
+gateway = "dc"
+
+[device.client.eth0]
+gateway = "dc"
+
+[[step]]
+action = "run"
+id = "fetch"
+device = "client"
+cmd = ["curl", "-s", "-o", "/dev/null", "-w", "%{http_code}", "http://$NETSIM_IP_WEB/"]
+[step.captures.status]
+regex = "([0-9]+)"
+
+[[step]]
+action = "run"
+id = "whoami"
+device = "curl"
+container = true
+cmd = ["id", "-un"]
+[step.captures.user]
+regex = "(\\S+)"
+
+[[step]]
+action = "run"
+id = "info"
+device = "web"
+container = true
+env = { GREETING = "hello-$NETSIM_IP_WEB" }
+cmd = ["sh", "-c", "echo release=$(cat /etc/alpine-release) greeting=$GREETING"]
+[step.captures.release]
+regex = "release=([0-9.]+)"
+[step.captures.greeting]
+regex = "greeting=(\\S+)"
+
+[[step]]
+action = "spawn"
+id = "server"
+device = "web"
+container = true
+root = true
+cmd = ["sh", "-c", "echo uid=$(id -u); exec sleep 4245"]
+ready_after = "200ms"
+[step.captures.uid]
+regex = "uid=([0-9]+)"
+
+[[step]]
+action = "run"
+id = "check"
+device = "web"
+container = true
+requires = ["server.uid"]
+cmd = ["pgrep", "-f", "sleep 4245"]
+
+[[step]]
+action = "assert"
+checks = [
+    "fetch.status == 200",
+    "info.release matches ^[0-9]+\\.[0-9]+",
+    "info.greeting matches ^hello-[0-9.]+$",
+    "server.uid == 0",
+    "whoami.user == curl_user",
+]
+"#;
+        run_sim_toml("container-steps", sim)
+            .await
+            .expect("run container-steps sim");
+    }
+
+    /// A step with `container = true` on a device without a container fails.
+    ///
+    /// The error names the device.
+    #[tokio::test(flavor = "current_thread")]
+    async fn container_step_on_a_plain_device_fails() {
+        let sim = r#"
+[sim]
+name = "container-step-plain"
+
+[[router]]
+name = "dc"
+
+[device.plain.eth0]
+gateway = "dc"
+
+[[step]]
+action = "run"
+id = "info"
+device = "plain"
+container = true
+cmd = ["true"]
+"#;
+        let err = run_sim_toml("container-step-plain", sim)
+            .await
+            .expect_err("sim should fail");
+        let err = format!("{err:#}");
+        assert!(
+            err.contains("device 'plain' has no container"),
+            "unexpected error: {err}"
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]

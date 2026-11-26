@@ -56,7 +56,7 @@ pub struct SimState {
 }
 
 pub(crate) struct GenericProcess {
-    pub(crate) child: std::process::Child,
+    pub(crate) child: crate::sim::steps::StepChild,
     pub(crate) stdout_pump: Option<thread::JoinHandle<Result<()>>>,
     pub(crate) stderr_pump: Option<thread::JoinHandle<Result<()>>>,
     pub(crate) capture_reader: Option<thread::JoinHandle<Result<()>>>,
@@ -1723,12 +1723,9 @@ pub(crate) fn expand_steps(
                             toml::Value::Boolean(b) => Some(b.to_string()),
                             _ => None,
                         });
-                        let step =
-                            toml::Value::Table(table)
-                                .try_into::<Step>()
-                                .with_context(|| {
-                                    format!("parse group step in '{}'", use_step.use_name)
-                                })?;
+                        let step = Step::from_table(table).with_context(|| {
+                            format!("parse group step in '{}'", use_step.use_name)
+                        })?;
                         flat.push(StepEntry::Concrete { when, step });
                     }
                 }
@@ -1929,9 +1926,7 @@ fn merge_use_step(use_step: UseStep, template: &StepTemplateDef) -> Result<Step>
     }
 
     normalize_step_table(&mut table);
-    toml::Value::Table(table)
-        .try_into::<Step>()
-        .with_context(|| format!("parse merged template '{}'", template.name))
+    Step::from_table(table).with_context(|| format!("parse merged template '{}'", template.name))
 }
 
 #[cfg(test)]
@@ -2101,6 +2096,22 @@ mod tests {
         }
     }
 
+    /// `root` and `container` fail on steps that would ignore them.
+    #[test]
+    fn step_flags_only_on_run_and_spawn() {
+        let parse = |step: &str| toml::from_str::<SimFile>(&format!("[[step]]\n{step}"));
+        let ok = r#"action = "run"
+device = "a"
+cmd = ["true"]
+container = true"#;
+        assert!(parse(ok).is_ok());
+        let err = parse("action = \"gen-file\"\nid = \"f\"\ncontent = \"x\"\ncontainer = true")
+            .err()
+            .expect("container on gen-file should fail");
+        assert!(err.to_string().contains("`container`"), "{err}");
+        assert!(parse("action = \"wait\"\nduration = \"1s\"\nroot = true").is_err());
+    }
+
     #[test]
     fn expand_counted_steps_expands_device() {
         let wrap = |step| Guarded { when: None, step };
@@ -2115,6 +2126,7 @@ mod tests {
                 requires: vec![],
                 results: None,
                 root: false,
+                container: false,
             }),
             wrap(Step::Wait {
                 duration: "1s".to_string(),
@@ -2151,6 +2163,7 @@ mod tests {
             requires: vec!["provider.ready".to_string()], // bare format, no ${}
             results: None,
             root: false,
+            container: false,
         })];
         let mut counts = HashMap::new();
         counts.insert("fetcher".to_string(), 4);

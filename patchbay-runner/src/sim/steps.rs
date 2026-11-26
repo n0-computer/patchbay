@@ -4,7 +4,7 @@ use std::{
     io::{BufRead, BufReader, Read, Write},
     net::IpAddr,
     path::{Path, PathBuf},
-    process::Stdio,
+    process::{ChildStderr, ChildStdout, ExitStatus, Stdio},
     sync::mpsc,
     thread,
     time::Duration,
@@ -119,6 +119,7 @@ pub(crate) async fn execute_step(state: &mut SimState, step: &Step) -> Result<()
             parser,
             captures,
             root,
+            container,
             results,
             ..
         } => {
@@ -131,21 +132,22 @@ pub(crate) async fn execute_step(state: &mut SimState, step: &Step) -> Result<()
                 step_id = sid,
                 cmd = %shell_join(&cmd_parts),
             );
-            let mut cmd = prepare_cmd(&cmd_parts, env, state)?;
             let logs = node_stdio_log_paths(&state.work_dir, device, sid);
-            cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
-            let node = state
-                .lab
-                .device_by_name(device)
-                .ok_or_else(|| anyhow::anyhow!("unknown device '{}'", device))?;
-            let mut child = if *root {
-                node.as_root().spawn_command_sync(cmd)
-            } else {
-                node.spawn_command_sync(cmd)
-            }
+            let target = StepTarget {
+                device,
+                root: *root,
+                container: *container,
+            };
+            let mut child = spawn_step_command(
+                state,
+                &target,
+                &cmd_parts,
+                env,
+                Stdio::piped(),
+                Stdio::piped(),
+            )
             .with_context(|| format!("spawn run on '{}'", device))?;
-            let stdout = child.stdout.take().context("take run stdout")?;
-            let stderr = child.stderr.take().context("take run stderr")?;
+            let (stdout, stderr) = child.take_output()?;
 
             let (tx, rx) = mpsc::channel::<String>();
             let out_pump = spawn_pipe_pump(
@@ -219,6 +221,7 @@ pub(crate) async fn execute_step(state: &mut SimState, step: &Step) -> Result<()
             captures,
             results,
             root,
+            container,
             ..
         } => {
             let device = device.as_deref().context("spawn: missing device")?;
@@ -234,12 +237,11 @@ pub(crate) async fn execute_step(state: &mut SimState, step: &Step) -> Result<()
                 step_id = id.as_str(),
                 cmd = %shell_join(&cmd_parts_final),
             );
-            let mut cmd = prepare_cmd(&cmd_parts_final, env, state)?;
             let logs = node_stdio_log_paths(&state.work_dir, device, id);
 
             let needs_pipes = !captures.is_empty() || state.verbose;
-            if needs_pipes {
-                cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+            let (stdout, stderr) = if needs_pipes {
+                (Stdio::piped(), Stdio::piped())
             } else {
                 let out_log = OpenOptions::new()
                     .create(true)
@@ -251,24 +253,20 @@ pub(crate) async fn execute_step(state: &mut SimState, step: &Step) -> Result<()
                     .append(true)
                     .open(&logs.stderr)
                     .with_context(|| format!("open step stderr log {}", logs.stderr.display()))?;
-                cmd.stdout(Stdio::from(out_log))
-                    .stderr(Stdio::from(err_log));
-            }
+                (Stdio::from(out_log), Stdio::from(err_log))
+            };
 
-            let node = state
-                .lab
-                .device_by_name(device)
-                .ok_or_else(|| anyhow::anyhow!("unknown device '{}'", device))?;
-            let mut child = if *root {
-                node.as_root().spawn_command_sync(cmd)
-            } else {
-                node.spawn_command_sync(cmd)
-            }
-            .with_context(|| format!("spawn '{}'", id))?;
+            let target = StepTarget {
+                device,
+                root: *root,
+                container: *container,
+            };
+            let mut child =
+                spawn_step_command(state, &target, &cmd_parts_final, env, stdout, stderr)
+                    .with_context(|| format!("spawn '{}'", id))?;
 
             let (out_pump, err_pump, cap_reader) = if needs_pipes {
-                let stdout = child.stdout.take().context("take child stdout")?;
-                let stderr = child.stderr.take().context("take child stderr")?;
+                let (stdout, stderr) = child.take_output()?;
 
                 let (out_tx, out_rx) = mpsc::channel::<String>();
                 let (err_tx, err_rx) = mpsc::channel::<String>();
@@ -838,27 +836,118 @@ fn collect_step_results(
     })
 }
 
-fn prepare_cmd(
+/// Where a `run` or `spawn` step runs its command.
+struct StepTarget<'a> {
+    device: &'a str,
+    root: bool,
+    /// Runs the command inside the device's container.
+    container: bool,
+}
+
+/// A process that a `run` or `spawn` step started.
+pub(crate) enum StepChild {
+    /// Runs in the device's network namespace on the host file system.
+    Host(std::process::Child),
+    /// Runs inside a container of the device.
+    Container(patchbay::ContainerChildSync),
+}
+
+impl StepChild {
+    /// Takes the stdout and stderr pipes, which must be piped.
+    fn take_output(&mut self) -> Result<(ChildStdout, ChildStderr)> {
+        let (stdout, stderr) = match self {
+            Self::Host(child) => (child.stdout.take(), child.stderr.take()),
+            Self::Container(child) => (child.stdout.take(), child.stderr.take()),
+        };
+        Ok((
+            stdout.context("take stdout")?,
+            stderr.context("take stderr")?,
+        ))
+    }
+
+    /// Returns the exit status if the process exited, without waiting.
+    pub(crate) fn try_wait(&mut self) -> Result<Option<ExitStatus>> {
+        match self {
+            Self::Host(child) => Ok(child.try_wait()?),
+            Self::Container(child) => child.try_wait(),
+        }
+    }
+
+    /// Waits for the process to exit and returns its status.
+    pub(crate) fn wait(&mut self) -> Result<ExitStatus> {
+        match self {
+            Self::Host(child) => Ok(child.wait()?),
+            Self::Container(child) => child.wait(),
+        }
+    }
+
+    /// Kills the process. For a container, also its child processes.
+    pub(crate) fn kill(&mut self) -> Result<()> {
+        match self {
+            Self::Host(child) => Ok(child.kill()?),
+            Self::Container(child) => child.kill(),
+        }
+    }
+}
+
+/// Spawns the command of a `run` or `spawn` step.
+///
+/// The command gets the sim environment and the step's `env`.
+fn spawn_step_command(
+    state: &SimState,
+    target: &StepTarget<'_>,
     parts: &[String],
     extra_env: &HashMap<String, String>,
-    state: &SimState,
-) -> Result<std::process::Command> {
-    if parts.is_empty() {
+    stdout: Stdio,
+    stderr: Stdio,
+) -> Result<StepChild> {
+    let Some((program, args)) = parts.split_first() else {
         bail!("empty cmd");
-    }
-    let mut cmd = std::process::Command::new(&parts[0]);
-    cmd.args(&parts[1..]);
-    for (k, v) in state.env.process_env() {
-        cmd.env(k, v);
-    }
+    };
+    let device = target.device;
+    let node = state
+        .lab
+        .device_by_name(device)
+        .ok_or_else(|| anyhow!("unknown device '{}'", device))?;
+    let mut env: Vec<(String, String)> = state
+        .env
+        .process_env()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
     // Only set RUST_LOG if NETSIM_RUST_LOG is set; otherwise leave to process.
     if let Ok(rust_log) = std::env::var("NETSIM_RUST_LOG") {
-        cmd.env("RUST_LOG", rust_log);
+        env.push(("RUST_LOG".into(), rust_log));
     }
     for (k, v) in extra_env {
-        cmd.env(k, state.env.interpolate_str(v)?);
+        env.push((k.clone(), state.env.interpolate_str(v)?));
     }
-    Ok(cmd)
+
+    if target.container {
+        let container = state
+            .lab
+            .container_by_name(device)
+            .filter(|container| container.id() == node.id())
+            .ok_or_else(|| anyhow!("device '{device}' has no container"))?;
+        let mut cmd = container
+            .command(program)
+            .args(args.iter().cloned())
+            .envs(env)
+            .stdout(stdout)
+            .stderr(stderr);
+        if target.root {
+            cmd = cmd.user("0");
+        }
+        return Ok(StepChild::Container(cmd.spawn_sync()?));
+    }
+
+    let mut cmd = std::process::Command::new(program);
+    cmd.args(args).envs(env).stdout(stdout).stderr(stderr);
+    let child = if target.root {
+        node.as_root().spawn_command_sync(cmd)
+    } else {
+        node.spawn_command_sync(cmd)
+    }?;
+    Ok(StepChild::Host(child))
 }
 
 pub(crate) fn spawn_pipe_pump<R: Read + Send + 'static>(

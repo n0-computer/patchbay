@@ -9,7 +9,7 @@ use std::{
     time::Duration,
 };
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, bail, Result};
 use tracing::Instrument as _;
 
 use crate::{
@@ -370,6 +370,41 @@ impl Device {
     /// means for files on the host.
     pub fn as_root(&self) -> crate::AsRoot<'_> {
         crate::AsRoot::new(&self.lab, self.ns.to_string())
+    }
+
+    /// Returns a builder for a container that joins this device.
+    ///
+    /// The container shares the device's network namespace, so code in the
+    /// device reaches it on `127.0.0.1`. `name` is its name in the lab, for
+    /// [`Lab::container_by_name`](crate::Lab::container_by_name), and must be
+    /// unique among the lab's containers. See [`Container`](crate::Container)
+    /// for its lifetime.
+    ///
+    /// The build sets `ip_unprivileged_port_start` and `ping_group_range` in
+    /// the device, so that container root can bind low ports and ping. They
+    /// apply to the device's own processes too.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # async fn f(device: patchbay::Device) -> anyhow::Result<()> {
+    /// let redis = device
+    ///     .add_container("redis", "docker.io/library/redis:7-alpine")
+    ///     .ready_tcp(6379)
+    ///     .build()
+    ///     .await?;
+    /// // Code in `device` reaches redis on 127.0.0.1:6379.
+    /// # let _ = redis;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn add_container(&self, name: &str, image: impl Into<String>) -> crate::ContainerBuilder {
+        crate::ContainerBuilder::attach(name, self.clone(), image)
+    }
+
+    /// Returns the lab that the device belongs to.
+    pub(crate) fn lab(&self) -> &Arc<LabInner> {
+        &self.lab
     }
 
     /// Spawns a [`tokio::process::Command`] in this device's network namespace.
@@ -853,7 +888,11 @@ impl DeviceBuilder {
         // Emit DeviceAdded event.
         {
             let inner = self.inner.core.lock().expect("poisoned");
-            let d = inner.device(self.id).expect("device just created");
+            let Some(d) = inner.device(self.id) else {
+                drop(inner);
+                self.inner.netns.remove_worker(&dev.ns);
+                bail!("device '{}' was removed during its build", dev.name);
+            };
             let device_state = DeviceState::from_device_data(d, &inner);
 
             self.inner.emit(LabEventKind::DeviceAdded {

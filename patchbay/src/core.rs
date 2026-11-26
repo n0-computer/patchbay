@@ -481,7 +481,8 @@ impl DnsOverlayDir {
 ///
 /// The mode is set whatever the umask or the mode of an existing file. A
 /// command that runs as root and switches to another user, such as
-/// `nobody`, reads these files through the "other" bits.
+/// `nobody`, and a non-root container user read these files through the
+/// "other" bits.
 fn write_dns_file(path: &Path, content: &str) -> Result<()> {
     std::fs::write(path, content).with_context(|| format!("write {}", path.display()))?;
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o644))

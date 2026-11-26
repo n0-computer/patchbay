@@ -187,6 +187,30 @@ async fn spawned_command_ends_with_its_namespace() -> Result<()> {
     wait_killed(second).await
 }
 
+/// Removing a device during its build does not panic.
+///
+/// The removal lands at a different point of the build in each round.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[traced_test]
+async fn remove_device_during_build() -> Result<()> {
+    let lab = Lab::new().await?;
+    let dc = lab.add_router("dc").build().await?;
+    let start = Instant::now();
+    lab.add_device("timed").uplink(dc.id()).build().await?;
+    let full = start.elapsed();
+    for round in 0..40 {
+        let name = format!("dev{round}");
+        let builder = lab.add_device(&name).uplink(dc.id());
+        let id = builder.id;
+        let build = tokio::spawn(builder.build());
+        tokio::time::sleep(full * round / 30).await;
+        lab.remove_device(id)?;
+        let _ = build.await.context("the build panicked")?;
+        assert!(lab.device_by_name(&name).is_none(), "{name} remains");
+    }
+    Ok(())
+}
+
 /// Removing a router that still has connected devices returns an error.
 #[tokio::test(flavor = "current_thread")]
 #[traced_test]
