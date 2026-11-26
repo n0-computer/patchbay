@@ -609,23 +609,15 @@ impl Router {
     /// Spawns a [`tokio::process::Command`] in this router's network namespace.
     ///
     /// The child is registered with the namespace's tokio reactor.
-    pub fn spawn_command(&self, mut cmd: tokio::process::Command) -> Result<tokio::process::Child> {
-        let ns = self.ns.to_string();
-        let rt = self.lab.rt_handle_for(&ns)?;
-        self.lab.netns.run_closure_in(&ns, move || {
-            let _guard = rt.enter();
-            cmd.spawn().context("spawn async command in namespace")
-        })
+    pub fn spawn_command(&self, cmd: tokio::process::Command) -> Result<tokio::process::Child> {
+        self.lab.netns.spawn_command(&self.ns, cmd)
     }
 
     /// Spawns a [`std::process::Command`] in this router's network namespace.
     ///
     /// The child inherits the namespace's DNS bind-mounts.
-    pub fn spawn_command_sync(&self, mut cmd: Command) -> Result<std::process::Child> {
-        let ns = self.ns.to_string();
-        self.lab.netns.run_closure_in(&ns, move || {
-            cmd.spawn().context("spawn command in namespace")
-        })
+    pub fn spawn_command_sync(&self, cmd: Command) -> Result<std::process::Child> {
+        self.lab.netns.spawn_command_sync(&self.ns, cmd)
     }
 
     /// Applies or removes impairment on this router's downlink bridge.

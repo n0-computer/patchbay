@@ -603,6 +603,30 @@ impl NetnsManager {
             .context("sync worker result channel closed")?
     }
 
+    /// Spawns `cmd` in `ns`, registered with the namespace's tokio runtime.
+    pub(crate) fn spawn_command(
+        &self,
+        ns: &str,
+        mut cmd: tokio::process::Command,
+    ) -> Result<tokio::process::Child> {
+        let rt = self.rt_handle_for(ns)?;
+        self.run_closure_in(ns, move || {
+            let _guard = rt.enter();
+            cmd.spawn().context("spawn async command in namespace")
+        })
+    }
+
+    /// Spawns `cmd` in `ns`.
+    pub(crate) fn spawn_command_sync(
+        &self,
+        ns: &str,
+        mut cmd: std::process::Command,
+    ) -> Result<std::process::Child> {
+        self.run_closure_in(ns, move || {
+            cmd.spawn().context("spawn command in namespace")
+        })
+    }
+
     /// Spawn a dedicated OS thread inside `ns`. Non-blocking.
     pub(crate) fn spawn_thread_in<F, R>(
         &self,

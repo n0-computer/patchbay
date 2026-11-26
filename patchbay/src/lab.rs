@@ -1815,21 +1815,15 @@ impl Ix {
     }
 
     /// Spawns a [`tokio::process::Command`] in the IX root namespace.
-    pub fn spawn_command(&self, mut cmd: tokio::process::Command) -> Result<tokio::process::Child> {
+    pub fn spawn_command(&self, cmd: tokio::process::Command) -> Result<tokio::process::Child> {
         let ns = self.lab.core.lock().unwrap().root_ns().to_string();
-        let rt = self.lab.rt_handle_for(&ns)?;
-        self.lab.netns.run_closure_in(&ns, move || {
-            let _guard = rt.enter();
-            cmd.spawn().context("spawn async command in namespace")
-        })
+        self.lab.netns.spawn_command(&ns, cmd)
     }
 
     /// Spawns a [`std::process::Command`] in the IX root namespace.
-    pub fn spawn_command_sync(&self, mut cmd: Command) -> Result<std::process::Child> {
+    pub fn spawn_command_sync(&self, cmd: Command) -> Result<std::process::Child> {
         let ns = self.lab.core.lock().unwrap().root_ns().to_string();
-        self.lab.netns.run_closure_in(&ns, move || {
-            cmd.spawn().context("spawn command in namespace")
-        })
+        self.lab.netns.spawn_command_sync(&ns, cmd)
     }
 
     /// Spawns a STUN-like UDP reflector in the IX root namespace.

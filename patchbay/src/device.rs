@@ -9,7 +9,7 @@ use std::{
     time::Duration,
 };
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, Result};
 use tracing::Instrument as _;
 
 use crate::{
@@ -377,13 +377,8 @@ impl Device {
     /// The child is registered with the namespace's tokio reactor so that
     /// `.wait()` and `.wait_with_output()` work as non-blocking futures.
     /// The sync worker's DNS bind-mounts are inherited by the child process.
-    pub fn spawn_command(&self, mut cmd: tokio::process::Command) -> Result<tokio::process::Child> {
-        let ns = self.ns.to_string();
-        let rt = self.lab.rt_handle_for(&ns)?;
-        self.lab.netns.run_closure_in(&ns, move || {
-            let _guard = rt.enter();
-            cmd.spawn().context("spawn async command in namespace")
-        })
+    pub fn spawn_command(&self, cmd: tokio::process::Command) -> Result<tokio::process::Child> {
+        self.lab.netns.spawn_command(&self.ns, cmd)
     }
 
     /// Spawns a [`std::process::Command`] in this device's network namespace.
@@ -391,11 +386,8 @@ impl Device {
     /// The sync worker thread has `/etc/hosts` and `/etc/resolv.conf` bind-mounted.
     /// `fork()` inherits the mount namespace, so child processes automatically see
     /// the DNS overlay without a separate `pre_exec` hook.
-    pub fn spawn_command_sync(&self, mut cmd: Command) -> Result<std::process::Child> {
-        let ns = self.ns.to_string();
-        self.lab.netns.run_closure_in(&ns, move || {
-            cmd.spawn().context("spawn command in namespace")
-        })
+    pub fn spawn_command_sync(&self, cmd: Command) -> Result<std::process::Child> {
+        self.lab.netns.spawn_command_sync(&self.ns, cmd)
     }
 
     /// Probes the NAT mapping seen by a reflector from this device.
