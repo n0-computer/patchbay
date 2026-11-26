@@ -250,16 +250,26 @@ pub fn run_in_command(
         )
     })?;
 
+    // Without --preserve-credentials, nsenter switches to uid 0 in the user
+    // namespace. That fails without a subordinate id range, and runs the
+    // command as root with one. --keep-caps gives the command nsenter's
+    // capabilities in the namespace.
     let mut proc = ProcessCommand::new("nsenter");
+    proc.arg("--preserve-credentials");
+    if nsenter_keeps_caps() {
+        proc.arg("--keep-caps");
+    } else {
+        tracing::warn!(
+            "nsenter has no --keep-caps option (util-linux before 2.39), \
+             so the command runs without capabilities"
+        );
+    }
     proc.arg("-U")
         .arg("-t")
         .arg(pid.to_string())
         .arg("-n")
         .arg("--")
-        .arg(&cmd[0]);
-    if cmd.len() > 1 {
-        proc.args(&cmd[1..]);
-    }
+        .args(&cmd);
     let status = proc
         .status()
         .context("run command with nsenter for inspect session")?;
@@ -267,6 +277,17 @@ pub fn run_in_command(
         bail!("run-in command exited with status {}", status);
     }
     Ok(())
+}
+
+/// Returns whether `nsenter` supports `--keep-caps`, which util-linux 2.39
+/// added.
+fn nsenter_keeps_caps() -> bool {
+    ProcessCommand::new("nsenter")
+        .arg("--help")
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .is_ok_and(|out| String::from_utf8_lossy(&out.stdout).contains("--keep-caps"))
 }
 
 #[cfg(test)]
