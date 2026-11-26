@@ -195,6 +195,8 @@ fn resolve_project_root(opt: Option<PathBuf>) -> Result<PathBuf> {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+    // Before the bootstrap, so that its warnings show. Starts no threads.
+    patchbay_utils::init_tracing();
     // Enter the user namespace only for commands that build labs in this
     // process. `test` and `compare` start cargo, whose test binaries set up
     // their own namespace, and `vm` runs qemu as the host user. `run-in` must
@@ -218,7 +220,6 @@ impl Command {
 
 #[tokio::main(flavor = "current_thread")]
 async fn tokio_main(cli: Cli) -> Result<()> {
-    patchbay_utils::init_tracing();
     match cli.command {
         Command::Run { args } => dispatch_run(args).await,
         Command::Prepare {
