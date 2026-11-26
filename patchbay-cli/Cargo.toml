@@ -29,7 +29,7 @@ toml = "1.1"
 tracing = "0.1"
 
 [target.'cfg(target_os = "linux")'.dependencies]
-nix = { version = "0.31", features = ["signal", "process"] }
+nix = { version = "0.32", features = ["signal", "process"] }
 patchbay = { workspace = true }
 patchbay-runner = { workspace = true }
 
