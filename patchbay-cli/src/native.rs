@@ -14,15 +14,16 @@ use patchbay::check_caps;
 use patchbay_runner::sim;
 use serde::{Deserialize, Serialize};
 
-/// Bootstrap user namespaces before main() — required for test binaries
-/// where main() is not our code (nextest spawns each test as a process).
+/// Enters the user namespace in this crate's unit-test binary, whose main()
+/// is not ours. Runs before any threads exist.
+#[cfg(test)]
 #[ctor::ctor(unsafe)]
 fn _init_userns() {
-    // Safety: called from .init_array before main() and before any threads.
-    unsafe { patchbay::init_userns_for_ctor() };
+    let _ = patchbay::init_userns();
 }
 
-/// Initialize user namespaces (called from main() as well for the CLI binary).
+/// Enters the user namespace. The CLI calls this from main() for commands
+/// that build labs.
 pub fn init() -> Result<()> {
     patchbay::init_userns()
 }
@@ -234,7 +235,8 @@ pub fn run_in_command(
     work_dir: PathBuf,
     cmd: Vec<String>,
 ) -> Result<()> {
-    check_caps()?;
+    // No check_caps(): this runs outside any user namespace, and nsenter gets
+    // its rights from the user owning the inspect session's namespace.
     if cmd.is_empty() {
         bail!("run-in: missing command");
     }
@@ -248,16 +250,26 @@ pub fn run_in_command(
         )
     })?;
 
+    // Without --preserve-credentials, nsenter switches to uid 0 in the user
+    // namespace. That fails without a subordinate id range, and runs the
+    // command as root with one. --keep-caps gives the command nsenter's
+    // capabilities in the namespace.
     let mut proc = ProcessCommand::new("nsenter");
+    proc.arg("--preserve-credentials");
+    if nsenter_keeps_caps() {
+        proc.arg("--keep-caps");
+    } else {
+        tracing::warn!(
+            "nsenter has no --keep-caps option (util-linux before 2.39), \
+             so the command runs without capabilities"
+        );
+    }
     proc.arg("-U")
         .arg("-t")
         .arg(pid.to_string())
         .arg("-n")
         .arg("--")
-        .arg(&cmd[0]);
-    if cmd.len() > 1 {
-        proc.args(&cmd[1..]);
-    }
+        .args(&cmd);
     let status = proc
         .status()
         .context("run command with nsenter for inspect session")?;
@@ -265,6 +277,17 @@ pub fn run_in_command(
         bail!("run-in command exited with status {}", status);
     }
     Ok(())
+}
+
+/// Returns whether `nsenter` supports `--keep-caps`, which util-linux 2.39
+/// added.
+fn nsenter_keeps_caps() -> bool {
+    ProcessCommand::new("nsenter")
+        .arg("--help")
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .is_ok_and(|out| String::from_utf8_lossy(&out.stdout).contains("--keep-caps"))
 }
 
 #[cfg(test)]
@@ -329,6 +352,71 @@ mod tests {
         );
         let (_topo, is_sim) = load_topology_for_inspect(&topo_path).expect("load direct topology");
         assert!(!is_sim);
+    }
+
+    /// A step with `root = true` runs as uid 0, other steps as the user.
+    /// Skips on hosts without a subordinate id range.
+    #[tokio::test(flavor = "current_thread")]
+    async fn root_step_runs_as_uid_zero() {
+        let has_root = std::fs::read_to_string("/proc/self/uid_map")
+            .expect("read uid_map")
+            .lines()
+            .any(|line| line.split_whitespace().next() == Some("0"));
+        if !has_root {
+            eprintln!("skipping root_step_runs_as_uid_zero: root is not mapped");
+            return;
+        }
+        // The owner of /proc/self is the effective uid.
+        let uid = std::os::unix::fs::MetadataExt::uid(
+            &std::fs::metadata("/proc/self").expect("stat /proc/self"),
+        );
+        let root = tempfile::tempdir().expect("temp dir");
+        let sim = format!(
+            r#"
+[sim]
+name = "root-step"
+
+[[router]]
+name = "r1"
+
+[device.node.eth0]
+gateway = "r1"
+
+[[step]]
+action = "run"
+id = "as-root"
+device = "node"
+root = true
+cmd = ["id", "-u"]
+[step.captures.uid]
+regex = "([0-9]+)"
+
+[[step]]
+action = "run"
+id = "as-user"
+device = "node"
+cmd = ["id", "-u"]
+[step.captures.uid]
+regex = "([0-9]+)"
+
+[[step]]
+action = "assert"
+checks = ["as-root.uid == 0", "as-user.uid == {uid}"]
+"#
+        );
+        let sim_path = root.path().join("root-step.toml");
+        std::fs::write(&sim_path, sim).expect("write sim");
+        run_sims(
+            vec![sim_path],
+            root.path().to_path_buf(),
+            vec![],
+            false,
+            None,
+            true,
+            None,
+        )
+        .await
+        .expect("run root-step sim");
     }
 
     #[tokio::test(flavor = "current_thread")]

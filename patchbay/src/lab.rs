@@ -1799,6 +1799,21 @@ impl Ix {
         self.lab.netns.spawn_thread_in(&ns, f)
     }
 
+    /// Returns a handle that spawns commands as root in the IX root namespace.
+    ///
+    /// See [`AsRoot`](crate::AsRoot) for when root is available and what it
+    /// means for files on the host.
+    pub fn as_root(&self) -> crate::AsRoot<'_> {
+        let ns = self
+            .lab
+            .core
+            .lock()
+            .expect("poisoned")
+            .root_ns()
+            .to_string();
+        crate::AsRoot::new(&self.lab, ns)
+    }
+
     /// Spawns a [`tokio::process::Command`] in the IX root namespace.
     pub fn spawn_command(&self, mut cmd: tokio::process::Command) -> Result<tokio::process::Child> {
         let ns = self.lab.core.lock().unwrap().root_ns().to_string();

@@ -24,7 +24,7 @@ libc = "0.2"
 netlink-packet-core = "0.9"
 netlink-packet-route = "0.33"
 netlink-proto = "0.13"
-rustix = { version = "1.1", default-features = false, features = ["std", "thread", "process"] }
+rustix = { version = "1.1", default-features = false, features = ["std", "thread", "process", "pipe"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 strum = { version = "0.28", features = ["derive"] }

@@ -284,6 +284,7 @@ These fields apply to most or all step types.
 | `vars`    | table           | Group substitution variables. Only meaningful when `use` references a `[[step-group]]`. |
 | `device`  | string          | Name of the network namespace to run the command in. |
 | `env`     | table           | Extra environment variables, merged with any template `env`. |
+| `root`    | bool            | `run` and `spawn` only. Runs the command as root (uid 0) in the namespace. Default `false`: commands run as the invoking user with the network capabilities. Needs a subordinate id range, see [Getting started](../guide/getting-started.md). |
 | `requires`| array of strings| Capture keys to wait for before this step starts. Format: `"step_id.capture_name"`. Blocks until all are resolved. |
 | `when`    | string          | Conditional guard. If `"false"`, the step is skipped. Any other value or absent means run. Typically set via `${matrix.*}` substitution. |
 

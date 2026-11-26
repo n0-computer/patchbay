@@ -92,18 +92,37 @@ The `ctor` crate runs the function at load time, before `main` or the
 test harness starts. This keeps your test functions clean and avoids
 repeating the namespace setup in every binary.
 
-### Keeping your own uid
+### Your uid and running as root
 
-`init_userns()` maps your user to root (uid 0) inside the namespace. A
-process that also talks to the session D-Bus, for example to use a desktop
-portal, then fails: D-Bus clients such as `zbus` claim uid 0, and the bus
-rejects them.
+`init_userns()` keeps your uid inside the namespace. Services that check the
+caller's uid, such as the session D-Bus or PipeWire portals, keep working.
+The patchbay process has all capabilities in the namespace. Spawned commands
+keep `CAP_NET_ADMIN`, `CAP_NET_RAW` and `CAP_NET_BIND_SERVICE`, so `nft`,
+`tc`, `ping` and low ports work.
 
-In that case call `init_userns_keep_uid()` (or
-`init_userns_keep_uid_for_ctor()` from a `#[ctor]`). Your user keeps its
-uid. Spawned commands keep `CAP_NET_ADMIN`, `CAP_NET_RAW` and
-`CAP_NET_BIND_SERVICE`, so `nft`, `tc`, `ping` and low ports work, but
-commands such as `mount` do not. That is why it is not the default.
+Some commands need root, for example `mount`. Spawn them through `as_root()`:
+
+```rust
+let mut cmd = std::process::Command::new("mount");
+cmd.args(["-t", "tmpfs", "none", "/mnt"]);
+let child = device.as_root().spawn_command_sync(cmd)?;
+```
+
+In a sim, set `root = true` on a `run` or `spawn` step.
+
+Root needs a subordinate id range for your user, the same setup rootless
+podman uses: `newuidmap` and `newgidmap` on `PATH` and an entry in
+`/etc/subuid` and `/etc/subgid`. patchbay then maps the ids from 0 up to the
+size of the range, except your own, onto that range. Root, system users and
+`nobody` exist inside the namespace, so a daemon that drops from root to
+another user works. Without the range, or in a process that already runs in
+a nested user namespace, `as_root()` returns an error that says why, and
+everything else works.
+
+Root inside the namespace is one of your subordinate ids on the host. Files
+a root command creates outside the lab belong to it, and you need
+`podman unshare rm` to remove them. Prefer running commands as yourself
+where they work.
 
 ## Creating a lab
 
