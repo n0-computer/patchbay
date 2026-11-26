@@ -478,6 +478,28 @@ impl Default for NetnsManager {
     }
 }
 
+/// Makes the kernel send `SIGKILL` to `cmd`'s process when the spawning thread ends.
+///
+/// The spawning thread is the namespace's sync worker, which ends with this
+/// process, also on `SIGKILL`, with the lab, and when its node is removed.
+/// The signal does not reach the process's own child processes.
+fn kill_with_worker(cmd: &mut std::process::Command) {
+    use std::os::unix::process::CommandExt;
+    let parent = rustix::process::getpid();
+    // SAFETY: the closure only makes system calls.
+    unsafe {
+        cmd.pre_exec(move || {
+            let kill = Some(rustix::process::Signal::KILL);
+            rustix::process::set_parent_process_death_signal(kill)?;
+            // This process may have died before the call above.
+            if rustix::process::getppid() != Some(parent) {
+                return Err(std::io::Error::other("the spawning process exited"));
+            }
+            Ok(())
+        });
+    }
+}
+
 impl NetnsManager {
     pub(crate) fn new() -> Self {
         Self {
@@ -601,6 +623,34 @@ impl NetnsManager {
         result_rx
             .recv()
             .context("sync worker result channel closed")?
+    }
+
+    /// Spawns `cmd` in `ns`, registered with the namespace's tokio runtime.
+    ///
+    /// See [`kill_with_worker`] for the process's lifetime.
+    pub(crate) fn spawn_command(
+        &self,
+        ns: &str,
+        mut cmd: tokio::process::Command,
+    ) -> Result<tokio::process::Child> {
+        kill_with_worker(cmd.as_std_mut());
+        let rt = self.rt_handle_for(ns)?;
+        self.run_closure_in(ns, move || {
+            let _guard = rt.enter();
+            cmd.spawn().context("spawn async command in namespace")
+        })
+    }
+
+    /// Spawns `cmd` in `ns`, see [`kill_with_worker`] for the process's lifetime.
+    pub(crate) fn spawn_command_sync(
+        &self,
+        ns: &str,
+        mut cmd: std::process::Command,
+    ) -> Result<std::process::Child> {
+        kill_with_worker(&mut cmd);
+        self.run_closure_in(ns, move || {
+            cmd.spawn().context("spawn command in namespace")
+        })
     }
 
     /// Spawn a dedicated OS thread inside `ns`. Non-blocking.

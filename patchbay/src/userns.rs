@@ -505,15 +505,9 @@ impl<'a> AsRoot<'a> {
         &self,
         mut cmd: tokio::process::Command,
     ) -> anyhow::Result<tokio::process::Child> {
-        use anyhow::Context;
         ensure_root_mapped()?;
         cmd.uid(0).gid(0);
-        let rt = self.lab.rt_handle_for(&self.ns)?;
-        self.lab.netns.run_closure_in(&self.ns, move || {
-            let _guard = rt.enter();
-            cmd.spawn()
-                .context("spawn async command as root in namespace")
-        })
+        self.lab.netns.spawn_command(&self.ns, cmd)
     }
 
     /// Spawns a [`std::process::Command`] as root in the node's namespace.
@@ -526,12 +520,9 @@ impl<'a> AsRoot<'a> {
     ) -> anyhow::Result<std::process::Child> {
         use std::os::unix::process::CommandExt;
 
-        use anyhow::Context;
         ensure_root_mapped()?;
         cmd.uid(0).gid(0);
-        self.lab.netns.run_closure_in(&self.ns, move || {
-            cmd.spawn().context("spawn command as root in namespace")
-        })
+        self.lab.netns.spawn_command_sync(&self.ns, cmd)
     }
 }
 

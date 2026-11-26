@@ -93,6 +93,12 @@ let output = tokio::task::spawn_blocking(move || {
 assert!(output.status.success());
 ```
 
+The kernel kills a spawned process when its device or router is removed,
+when the lab drops, or when the patchbay process exits, also on `SIGKILL`
+or Ctrl-C. Dropping the `Child` alone does not kill it. The signal does not
+reach the processes that the command starts in turn, nor a setuid program or
+one with file capabilities.
+
 ## Dedicated threads
 
 When you have long-running blocking work that would starve the sync
