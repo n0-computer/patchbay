@@ -253,6 +253,8 @@ pub use router::{Router, RouterBuilder, RouterIface, RouterPreset};
 
 #[cfg(feature = "dns-server")]
 pub use crate::dns_server::DnsServer;
+#[allow(deprecated)]
+pub use crate::userns::init_userns_for_ctor;
 pub use crate::{
     core::{NodeId, ReflectorGuard},
     event::{IfaceCounters, IfaceSnapshot, LabEvent, LabEventKind, LabState},

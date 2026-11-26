@@ -54,6 +54,24 @@ pub fn init_userns() -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!("{e}"))
 }
 
+/// Calls [`init_userns`] and ignores its error.
+///
+/// Kept so that existing `#[ctor]` functions still compile. [`init_userns`]
+/// works from a `#[ctor]` too, and returns the error. Like [`init_userns`],
+/// this now keeps the caller's uid instead of mapping it to root.
+///
+/// # Safety
+///
+/// No requirements beyond those of [`init_userns`]. The function is `unsafe`
+/// only to keep its old signature.
+#[deprecated(
+    since = "0.8.0",
+    note = "call `init_userns()`, also from a `#[ctor]`. It now keeps the caller's uid."
+)]
+pub unsafe fn init_userns_for_ctor() {
+    let _ = init_userns();
+}
+
 /// Returns whether uid and gid 0 are mapped in the current user namespace,
 /// so that a child process can switch to root.
 pub(crate) fn root_is_mapped() -> bool {

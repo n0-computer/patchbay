@@ -73,6 +73,18 @@ fn sh(dev: &patchbay::Device, root: bool, script: &str) -> Result<String> {
     Ok(String::from_utf8(output.stdout)?)
 }
 
+/// The deprecated ctor entry point still exists and does nothing after the
+/// bootstrap.
+#[test]
+#[allow(deprecated)]
+fn ctor_alias_is_a_no_op_after_the_bootstrap() -> Result<()> {
+    let before = uid_map()?;
+    // SAFETY: no requirements beyond those of `init_userns`.
+    unsafe { patchbay::init_userns_for_ctor() };
+    ensure!(uid_map()? == before, "uid map changed");
+    Ok(())
+}
+
 /// The process keeps its uid. With a subordinate range, the ids from 0 up to
 /// the range size, except the user's, are mapped too.
 #[test]
